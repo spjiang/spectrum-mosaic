@@ -215,4 +215,8 @@ if [[ "$branch" != "main" ]] && git show-ref --verify --quiet refs/remotes/origi
   branch=main
 fi
 git push -u origin "$branch"
+# GitHub 默认分支若仍是 master，一并更新，避免只看 commits/master 时落后
+if [[ "$branch" == "main" ]]; then
+  git push origin main:master || true
+fi
 echo "已推送到 $REPO_URL ($branch)"
