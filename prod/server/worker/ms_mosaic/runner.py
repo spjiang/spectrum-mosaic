@@ -117,17 +117,47 @@ def _extract_init() -> None:
     _limit_blas_threads()
 
 
+@dataclass(frozen=True)
+class PairStat:
+    """像对匹配摘要。质量报告只要 (i, j, 内点数)，不必留着内点下标数组。"""
+
+    i: int
+    j: int
+    n: int
+
+    def __len__(self) -> int:
+        return int(self.n)
+
+
+@dataclass
+class TrackSummary:
+    """连接点摘要：每张影像上的连接点数与总条数，检查点续跑时代替完整轨迹。"""
+
+    counts: dict[int, int]
+    n_tracks: int
+
+    def __len__(self) -> int:
+        return int(self.n_tracks)
+
+    def per_image_counts(self) -> dict[int, int]:
+        return dict(self.counts)
+
+
+def summarize_matches(matches) -> list[PairStat]:
+    return [PairStat(int(pm.i), int(pm.j), int(len(pm))) for pm in matches]
+
+
 @dataclass
 class SparseResult:
     block: Block
     at: ATResult
-    tracks: Tracks
+    tracks: Tracks | TrackSummary
     image_paths: dict[int, Path]
     poses: dict[int, Pose]
     camera: Camera
     timings: dict[str, float] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
-    matches: list[PairMatches] = field(default_factory=list)
+    matches: list[PairStat] = field(default_factory=list)
     keypoint_counts: dict[int, int] = field(default_factory=dict)
 
     @property
@@ -265,12 +295,9 @@ def run_sparse(
         log(f"空三并行下调 {requested} → {workers}（按{why}封顶）")
     else:
         log(f"空三并行 {workers} 进程")
-    ctx = multiprocessing.get_context("spawn")
-
     t = time.time()
     jobs = [(i, p, str(cache_dir), max_features) for i, p in zip(indices, paths)]
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_extract_init) as pool:
-        list(pool.map(_extract_worker, jobs))
+    _extract_all(jobs, workers)
     timings["features"] = time.time() - t
     log(f"特征提取 {len(jobs)} 张，{timings['features']:.1f}s")
 
@@ -279,19 +306,13 @@ def run_sparse(
     pair_jobs = [
         (c.i, c.j, path_by[c.i], path_by[c.j], band_by[c.i]) for c in candidates
     ]
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=ctx,
-        initializer=_match_init,
-        initargs=(str(cache_dir), dict(block.cameras)),
-    ) as pool:
-        raw = list(pool.map(_match_worker, pair_jobs, chunksize=4))
-    matches = [PairMatches(*r) for r in raw if r is not None]
+    matches = _match_all(pair_jobs, workers, cache_dir, dict(block.cameras))
     timings["matching"] = time.time() - t
     log(f"匹配 {len(matches)}/{len(candidates)} 对成功，{timings['matching']:.1f}s")
 
     tracks = build_tracks(matches)
-    # 像对列表交完轨即可丢，避免与交会点云叠在一起占内存。
+    # 内点下标数组交完轨即可丢；报告只要每对的 (i, j, 内点数)。
+    match_stats = summarize_matches(matches)
     del matches
     gc.collect()
     log(
@@ -303,6 +324,8 @@ def run_sparse(
     keypoints = {
         i: load_keypoints(Path(p), cache_dir=cache_dir) for i, p in zip(indices, paths)
     }
+    # run_at 交会后会清空 keypoints，点数必须先记下。
+    keypoint_counts = {i: int(len(kp)) for i, kp in keypoints.items()}
     image_camera = {im.index: im.band for im in images}
     gps = {im.index: block.gps[im.index] for im in images}
     att = {im.index: block.poses[im.index].rotation for im in images}
@@ -324,6 +347,10 @@ def run_sparse(
         log=log,
     )
     del keypoints
+    # 逐条观测和完整轨迹后面只用于报告计数，约 2~3 GB。压成每影像摘要再进加密/正射。
+    at.summarize_observations(drop=True)
+    track_stats = TrackSummary(tracks.per_image_counts(), len(tracks))
+    del tracks
     gc.collect()
     timings["at"] = time.time() - t
     timings["total"] = time.time() - t0
@@ -334,7 +361,7 @@ def run_sparse(
     return SparseResult(
         block=block,
         at=at,
-        tracks=tracks,
+        tracks=track_stats,
         image_paths={im.index: im.path for im in images},
         poses=at.poses,
         camera=primary_cam,
@@ -345,10 +372,28 @@ def run_sparse(
             "n_primary": len(primary),
             "n_images": len(images),
             "n_candidates": len(candidates),
-            "n_matched_pairs": len(matches),
-            "n_tracks": len(tracks),
-            "n_keypoints": int(sum(len(feats[i]) for i in feats)),
+            "n_matched_pairs": len(match_stats),
+            "n_tracks": len(track_stats),
+            "n_keypoints": int(sum(keypoint_counts.values())),
         },
-        matches=matches,
-        keypoint_counts={i: len(feats[i]) for i in feats},
+        matches=match_stats,
+        keypoint_counts=keypoint_counts,
     )
+
+
+def _extract_all(jobs: list, workers: int) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_extract_init) as pool:
+        list(pool.map(_extract_worker, jobs))
+
+
+def _match_all(pair_jobs: list, workers: int, cache_dir: Path, cameras: dict) -> list[PairMatches]:
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=ctx,
+        initializer=_match_init,
+        initargs=(str(cache_dir), cameras),
+    ) as pool:
+        raw = list(pool.map(_match_worker, pair_jobs, chunksize=4))
+    return [PairMatches(*r) for r in raw if r is not None]

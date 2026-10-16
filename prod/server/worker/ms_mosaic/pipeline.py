@@ -549,13 +549,13 @@ def run_mosaic(
     # 复用检查点时 keypoint_counts 可能为空：从特征缓存补齐，保证全波段统计
     kp_counts = dict(sparse.keypoint_counts or {})
     if len(kp_counts) < len(sparse.image_paths):
-        from ms_mosaic.features import extract_file
+        from ms_mosaic.features import load_keypoints
 
         for idx, path in sparse.image_paths.items():
             if idx in kp_counts:
                 continue
             try:
-                kp_counts[idx] = len(extract_file(Path(path), cache_dir=cache_dir))
+                kp_counts[idx] = len(load_keypoints(Path(path), cache_dir=cache_dir))
             except Exception:
                 kp_counts[idx] = 0
     reg_ids = registered_image_ids(at, sparse.tracks)

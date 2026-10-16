@@ -24,10 +24,31 @@ POOR_KEYPOINT_FRACTION = 0.20
 MIN_POOR_KEYPOINTS = 80
 
 
+def observation_summary(at) -> tuple[dict[int, int], dict[int, float]]:
+    """每张影像的 (观测数, 残差平方和)。逐条观测已释放时读 ATResult 上的摘要。"""
+    counts = dict(getattr(at, "obs_counts", None) or {})
+    sq = dict(getattr(at, "obs_sq_residual", None) or {})
+    if counts:
+        return counts, sq
+    observations = list(getattr(at, "observations", None) or [])
+    if not observations:
+        return {}, {}
+    raw = getattr(at, "residuals_px", None)
+    residuals = np.asarray([] if raw is None else raw, float).ravel()
+    with_res = residuals.size == len(observations)
+    for k, obs in enumerate(observations):
+        idx = int(obs.image)
+        counts[idx] = counts.get(idx, 0) + 1
+        if with_res:
+            sq[idx] = sq.get(idx, 0.0) + float(residuals[k]) ** 2
+    return counts, sq
+
+
 def registered_image_ids(at, tracks=None) -> set[int]:
     """已注册影像：有空三观测；检查点无观测时读 stats / 连接点。"""
-    if getattr(at, "observations", None):
-        return {int(o.image) for o in at.observations}
+    obs_counts, _ = observation_summary(at)
+    if obs_counts:
+        return {i for i, n in obs_counts.items() if n > 0}
     saved = (getattr(at, "stats", None) or {}).get("registered_ids")
     if saved:
         return {int(i) for i in saved}
@@ -49,25 +70,24 @@ def band_rms_px(block: Block, at) -> dict[str, float | None]:
     global_rms = None
     if getattr(at, "stats", None):
         global_rms = at.stats.get("rms_reprojection_px")
-    # residuals_px 是数组，不能写 `or []`，否则非空数组会在布尔判断里抛错。
-    raw_residuals = getattr(at, "residuals_px", None)
-    residuals = np.asarray([] if raw_residuals is None else raw_residuals, float).ravel()
-    observations = list(getattr(at, "observations", None) or [])
-    if residuals.size == 0 or len(observations) != residuals.size:
+    counts, sq = observation_summary(at)
+    if not counts or not sq:
         return {band: global_rms for band in BAND_ORDER if band in block.cameras}
     by_index = {im.index: im for im in block.images}
-    buckets: dict[str, list[float]] = defaultdict(list)
-    for obs, r in zip(observations, residuals):
-        im = by_index.get(int(obs.image))
+    band_n: dict[str, int] = defaultdict(int)
+    band_sq: dict[str, float] = defaultdict(float)
+    for idx, n in counts.items():
+        im = by_index.get(int(idx))
         if im is None:
             continue
-        buckets[im.band].append(float(r))
+        band_n[im.band] += int(n)
+        band_sq[im.band] += float(sq.get(idx, 0.0))
     out: dict[str, float | None] = {}
     for band in BAND_ORDER:
         if band not in block.cameras:
             continue
-        vals = buckets.get(band) or []
-        out[band] = float(np.sqrt(np.mean(np.square(vals)))) if vals else global_rms
+        n = band_n.get(band, 0)
+        out[band] = float(np.sqrt(band_sq[band] / n)) if n else global_rms
     return out
 
 
@@ -486,7 +506,7 @@ def build_quality_payload(
         match_most = match_least = "-"
         mean_tracks = 0.0
 
-    obs_per = Counter(o.image for o in at.observations)
+    obs_per, _ = observation_summary(at)
     if obs_per:
         hi_obs = max(obs_per, key=obs_per.get)
         lo_obs = min(all_indices, key=lambda i: obs_per.get(i, 0)) if all_indices else hi_obs

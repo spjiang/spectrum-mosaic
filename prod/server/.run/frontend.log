@@ -1,0 +1,43 @@
+
+> ms-mosaic-visual@1.0.0 dev
+> vite --host 0.0.0.0 --port 8080
+
+Port 8080 is in use, trying another one...
+
+  VITE v5.4.21  ready in 108 ms
+
+  ➜  Local:   http://localhost:8081/
+  ➜  Network: http://192.168.3.78:8081/
+
+> ms-mosaic-visual@1.0.0 dev
+> vite --host 0.0.0.0 --port 8080
+
+
+  VITE v5.4.21  ready in 737 ms
+
+  ➜  Local:   http://localhost:8080/
+  ➜  Network: http://192.168.3.78:8080/
+4:34:57 PM [vite] hmr update /src/auth.tsx, /src/components/AppShell.tsx, /src/pages/ProfilesList.tsx, /src/pages/Execute.tsx, /src/pages/Jobs.tsx, /src/pages/CliGuide.tsx, /src/pages/Settings.tsx, /src/pages/ProfileEdit.tsx, /src/pages/Health.tsx
+4:34:58 PM [vite] hmr update /src/pages/Health.tsx
+4:34:59 PM [vite] hmr update /src/pages/Health.tsx
+4:35:00 PM [vite] hmr update /src/pages/Health.tsx
+4:35:04 PM [vite] hmr update /src/pages/Health.tsx
+
+> ms-mosaic-visual@1.0.0 dev
+> vite --host 0.0.0.0 --port 8080
+
+Port 8080 is in use, trying another one...
+
+  VITE v5.4.21  ready in 326 ms
+
+  ➜  Local:   http://localhost:8081/
+  ➜  Network: http://192.168.3.78:8081/
+
+> ms-mosaic-visual@1.0.0 dev
+> vite --host 0.0.0.0 --port 8080
+
+
+  VITE v5.4.21  ready in 693 ms
+
+  ➜  Local:   http://localhost:8080/
+  ➜  Network: http://192.168.3.78:8080/

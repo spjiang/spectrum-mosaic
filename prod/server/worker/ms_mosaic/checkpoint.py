@@ -11,9 +11,8 @@ import numpy as np
 from ms_mosaic.at import ATResult
 from ms_mosaic.camera import Camera, Pose
 from ms_mosaic.progress import stage_index
-from ms_mosaic.runner import SparseResult
+from ms_mosaic.runner import PairStat, SparseResult, TrackSummary
 from ms_mosaic.scene import Block
-from ms_mosaic.tracks import Tracks
 
 _CAM_FIELDS = ("key", "width", "height", "f", "cx", "cy", "k1", "k2", "k3", "p1", "p2", "b1", "b2", "model")
 AT_RESULT_NAME = "at_result.npz"
@@ -86,19 +85,45 @@ def save_sparse(
         "image_paths": [str(sparse.image_paths[i]) for i in image_ids],
         "camera_key": sparse.camera.key,
     }
+    meta["n_tracks"] = int(len(sparse.tracks))
+    at = sparse.at
+    if not at.obs_counts:
+        at.summarize_observations()
     tmp = path.with_name(path.stem + ".tmp.npz")
     np.savez_compressed(
         tmp,
         meta=np.frombuffer(json.dumps(meta, ensure_ascii=False, default=_json_default).encode("utf-8"), dtype=np.uint8),
-        points=np.asarray(sparse.at.points, float),
-        residuals=np.asarray(sparse.at.residuals_px, float),
+        points=np.asarray(at.points, float),
+        residuals=np.asarray(at.residuals_px, float),
         pose_R=pose_r,
         pose_C=pose_c,
         pose_ids=np.asarray(pose_ids, np.int64),
         image_ids=np.asarray(image_ids, np.int64),
+        # 质量报告用的摘要：续跑时不再有完整匹配/轨迹/观测，靠这些保持统计一致
+        pair_stats=np.asarray(
+            [(int(pm.i), int(pm.j), int(len(pm))) for pm in sparse.matches], np.int64
+        ).reshape(-1, 3),
+        keypoint_counts=_int_map_array(sparse.keypoint_counts),
+        track_counts=_int_map_array(sparse.tracks.per_image_counts()),
+        obs_counts=_int_map_array(at.obs_counts),
+        obs_sq_residual=np.asarray(
+            [(float(k), float(v)) for k, v in sorted(at.obs_sq_residual.items())], float
+        ).reshape(-1, 2),
     )
     tmp.replace(path)
     return path
+
+
+def _int_map_array(mapping: dict[int, int]) -> np.ndarray:
+    return np.asarray(
+        [(int(k), int(v)) for k, v in sorted((mapping or {}).items())], np.int64
+    ).reshape(-1, 2)
+
+
+def _int_map(data, name: str) -> dict[int, int]:
+    if name not in data.files:
+        return {}
+    return {int(k): int(v) for k, v in np.asarray(data[name]).reshape(-1, 2)}
 
 
 def load_at_payload(path: Path) -> dict[str, Any]:
@@ -114,6 +139,16 @@ def load_at_payload(path: Path) -> dict[str, Any]:
         image_ids = [int(i) for i in (data["image_ids"] if "image_ids" in data.files else meta.get("image_ids") or [])]
         paths = meta.get("image_paths") or []
         image_paths = {idx: Path(p) for idx, p in zip(image_ids, paths)}
+        pair_stats = (
+            np.asarray(data["pair_stats"], np.int64).reshape(-1, 3)
+            if "pair_stats" in data.files
+            else np.zeros((0, 3), np.int64)
+        )
+        obs_sq = (
+            {int(k): float(v) for k, v in np.asarray(data["obs_sq_residual"]).reshape(-1, 2)}
+            if "obs_sq_residual" in data.files
+            else {}
+        )
         return {
             **meta,
             "points": np.asarray(data["points"], float),
@@ -121,6 +156,11 @@ def load_at_payload(path: Path) -> dict[str, Any]:
             "poses": poses,
             "camera_objs": cameras,
             "image_path_map": image_paths,
+            "pair_stats": pair_stats,
+            "keypoint_count_map": _int_map(data, "keypoint_counts"),
+            "track_count_map": _int_map(data, "track_counts"),
+            "obs_count_map": _int_map(data, "obs_counts"),
+            "obs_sq_map": obs_sq,
         }
 
 
@@ -147,22 +187,28 @@ def apply_payload(block: Block, payload: dict[str, Any]) -> SparseResult:
         observations=[],
         residuals_px=np.asarray(residuals, float),
         stats=dict(payload.get("stats") or {}),
+        obs_counts=dict(payload.get("obs_count_map") or {}),
+        obs_sq_residual=dict(payload.get("obs_sq_map") or {}),
     )
     image_paths = dict(payload.get("image_path_map") or {})
     if not image_paths:
         # 全波段空三检查点应带齐各波段路径；旧检查点无路径时按 block 全影像回填
         image_paths = {im.index: Path(im.path) for im in block.images}
+    counts = dict(payload.get("counts") or {})
+    track_counts = dict(payload.get("track_count_map") or {})
+    n_tracks = payload.get("n_tracks", counts.get("n_tracks", 0))
+    pair_stats = np.asarray(payload.get("pair_stats", np.zeros((0, 3))), np.int64).reshape(-1, 3)
     return SparseResult(
         block=block,
         at=at,
-        tracks=Tracks(observations=[]),
+        tracks=TrackSummary(track_counts, int(n_tracks or 0)),
         image_paths=image_paths,
         poses=poses,
         camera=primary,
         timings=dict(payload.get("timings") or {}),
-        counts=dict(payload.get("counts") or {}),
-        matches=[],
-        keypoint_counts={},
+        counts=counts,
+        matches=[PairStat(int(i), int(j), int(n)) for i, j, n in pair_stats],
+        keypoint_counts=dict(payload.get("keypoint_count_map") or {}),
     )
 
 

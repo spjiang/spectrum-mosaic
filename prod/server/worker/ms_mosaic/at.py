@@ -77,9 +77,12 @@ INTRINSIC_SCALES = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class Observation:
-    """一条 (影像, 物方点, 像点) 观测。"""
+    """一条 (影像, 物方点, 像点) 观测。
+
+    全波段一次有 600 万条以上，slots 省掉每条的 __dict__（约 100 B/条）。
+    """
 
     image: int
     point: int
@@ -94,6 +97,21 @@ class ATResult:
     observations: list[Observation]
     residuals_px: np.ndarray
     stats: dict = field(default_factory=dict)
+    # 每张影像的观测数与重投影残差平方和。observations 释放后质量报告靠它统计。
+    obs_counts: dict[int, int] = field(default_factory=dict)
+    obs_sq_residual: dict[int, float] = field(default_factory=dict)
+
+    def summarize_observations(self, *, drop: bool = False) -> None:
+        """把逐条观测汇总到每张影像；drop=True 时随后释放逐条观测。"""
+        if self.observations and len(self.observations) == self.residuals_px.size:
+            images = np.fromiter((o.image for o in self.observations), np.int64, len(self.observations))
+            ids, inv = np.unique(images, return_inverse=True)
+            counts = np.bincount(inv, minlength=ids.size)
+            sq = np.bincount(inv, weights=np.square(self.residuals_px), minlength=ids.size)
+            self.obs_counts = {int(i): int(c) for i, c in zip(ids, counts)}
+            self.obs_sq_residual = {int(i): float(s) for i, s in zip(ids, sq)}
+        if drop:
+            self.observations = []
 
     @property
     def rms_reprojection_px(self) -> float:
