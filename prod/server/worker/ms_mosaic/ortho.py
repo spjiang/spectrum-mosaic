@@ -81,8 +81,9 @@ class NativeImageCache:
         if arr.ndim == 2:
             arr = arr[None, :, :]
         else:
-            arr = np.moveaxis(arr, -1, 0)
-        arr = arr.astype(np.float32)
+            arr = np.ascontiguousarray(np.moveaxis(arr, -1, 0))
+        # 保持原始位深缓存：双线性采样里 uint8/uint16 与 float32 系数相乘即提升为
+        # float32，结果逐位相同；Color 缓存占用是转 float32 的 1/4。
         self._cache[index] = arr
         self._order.append(index)
         while len(self._order) > self._limit:
@@ -123,17 +124,51 @@ def _facade_samples(
     固定段数不行：25 m 的立面切 12 段间距 2.08 m，在像方留下约 3 px 的缝，
     实测仍有 28% 的阴影地面从缝里漏判为可见。
     """
+    chunks = list(_facade_sample_chunks(pts, drop_m, gsd=gsd, max_sub=max_sub, min_drop_m=min_drop_m))
+    return np.concatenate(chunks) if chunks else np.zeros((0, 3))
+
+
+# 立面采样按层分批：一块 480² 全是高差时 64 层 ≈ 1470 万点，一次投影排序峰值约 3.5 GB
+FACADE_CHUNK_POINTS = 2_000_000
+
+
+def _facade_sample_chunks(
+    pts: np.ndarray,
+    drop_m: np.ndarray,
+    *,
+    gsd: float,
+    max_sub: int,
+    min_drop_m: float,
+    chunk_points: int | None = None,
+):
+    """逐批产出立面采样点，每批不超过 chunk_points（至少一层）。"""
+    if chunk_points is None:
+        chunk_points = FACADE_CHUNK_POINTS
     tall = drop_m > min_drop_m
     if not tall.any():
-        return np.zeros((0, 3))
+        return
     base = pts[tall]
     depth = drop_m[tall]
     n_sub = int(np.clip(np.ceil(float(depth.max()) / max(gsd, 1e-6)), 1, max_sub))
+    per = max(1, int(chunk_points) // max(1, base.shape[0]))
     # 从顶面往下均匀取 n_sub 层，不含顶面本身（顶面已在主采样里）
-    fracs = (np.arange(1, n_sub + 1) / n_sub)[:, None]
-    extra = np.repeat(base[None, :, :], n_sub, axis=0)
-    extra[:, :, 2] -= fracs * depth[None, :]
-    return extra.reshape(-1, 3)
+    for s in range(1, n_sub + 1, per):
+        fracs = (np.arange(s, min(n_sub, s + per - 1) + 1) / n_sub)[:, None]
+        extra = np.repeat(base[None, :, :], fracs.shape[0], axis=0)
+        extra[:, :, 2] -= fracs * depth[None, :]
+        yield extra.reshape(-1, 3)
+
+
+def _merge_min_depth(zbuf: np.ndarray, flat: np.ndarray, rng: np.ndarray) -> None:
+    """zbuf[像素] = min(zbuf, 该像素上所有新点的距离)。分批调用与一次全量结果相同。"""
+    if flat.size == 0:
+        return
+    order = np.lexsort((rng, flat))
+    f = flat[order]
+    first = np.ones(f.size, bool)
+    first[1:] = f[1:] != f[:-1]
+    uf = f[first]
+    zbuf[uf] = np.minimum(zbuf[uf], rng[order][first])
 
 
 def visibility_zbuffer(
@@ -166,30 +201,22 @@ def visibility_zbuffer(
     rows = np.clip(np.round(v[sel]).astype(np.int64), 0, camera.height - 1)
     flat = rows * camera.width + cols
 
-    occluders = [(flat, rng)]
+    # 每像素只留最近距离。按批排序取首个再与 zbuf 取小，比 minimum.at 快，且内存按批封顶。
+    zbuf = np.full(camera.width * camera.height, np.inf, np.float64)
+    _merge_min_depth(zbuf, flat, rng)
     if drop_m is not None:
-        extra = _facade_samples(
+        for extra in _facade_sample_chunks(
             main, np.asarray(drop_m)[sel], gsd=gsd, max_sub=max_sub, min_drop_m=min_drop_m
-        )
-        if extra.size:
+        ):
             eu, ev, eok = project(camera, pose, extra)
             keep = eok & camera.in_bounds(eu, ev, margin=0)
             if keep.any():
                 ec = np.clip(np.round(eu[keep]).astype(np.int64), 0, camera.width - 1)
                 er = np.clip(np.round(ev[keep]).astype(np.int64), 0, camera.height - 1)
-                occluders.append(
-                    (
-                        er * camera.width + ec,
-                        np.linalg.norm(extra[keep] - pose.center, axis=1),
-                    )
+                _merge_min_depth(
+                    zbuf, er * camera.width + ec, np.linalg.norm(extra[keep] - pose.center, axis=1)
                 )
-
-    all_flat = np.concatenate([f for f, _ in occluders])
-    all_rng = np.concatenate([r for _, r in occluders])
-    # 按距离降序写入，同一像素上最后落笔的就是最近点 —— 比 minimum.at 快得多
-    order = np.argsort(-all_rng, kind="stable")
-    zbuf = np.full(camera.width * camera.height, np.inf, np.float64)
-    zbuf[all_flat[order]] = all_rng[order]
+            del extra, eu, ev, eok, keep
 
     visible[sel] = rng <= zbuf[flat] + tolerance_m
     return visible

@@ -78,6 +78,17 @@ def available_bytes() -> int | None:
     return _meminfo_bytes("MemAvailable")
 
 
+def process_rss_bytes() -> int | None:
+    """本进程当前常驻内存。任务预算是总量，已被自己占掉的部分不能再分给工人。"""
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def cap_workers(
     requested: int,
     *,

@@ -116,6 +116,20 @@ def test_visibility_zbuffer_hides_ground_behind_wall():
     assert seen[shadow].mean() < 0.1, f"墙后阴影区仍有 {seen[shadow].mean():.1%} 判为可见"
 
 
+def test_visibility_zbuffer_chunked_facades_match_single_pass(monkeypatch):
+    """立面采样分批合并 Z-buffer，结果必须与一次全量相同。"""
+    survey, pose, grid, gx, z, pts = _wall_scene()
+    cam = survey.cameras[0]
+    u, v, ok = project(cam, pose, pts)
+    inside = ok & cam.in_bounds(u, v, margin=2)
+    drop = neighbor_drop(z).ravel()
+    monkeypatch.setattr("ms_mosaic.ortho.FACADE_CHUNK_POINTS", 10**9)
+    once = visibility_zbuffer(cam, pose, pts, u, v, inside, tolerance_m=0.6, drop_m=drop, gsd=grid.gsd)
+    monkeypatch.setattr("ms_mosaic.ortho.FACADE_CHUNK_POINTS", 1)
+    chunked = visibility_zbuffer(cam, pose, pts, u, v, inside, tolerance_m=0.6, drop_m=drop, gsd=grid.gsd)
+    np.testing.assert_array_equal(once, chunked)
+
+
 def test_visibility_zbuffer_needs_facade_samples():
     """反证：不补立面采样时，墙后阴影会被大面积漏判。"""
     survey, pose, grid, gx, z, pts = _wall_scene()

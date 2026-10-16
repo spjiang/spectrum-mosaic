@@ -625,9 +625,14 @@ def _match_on_grid(
     views = np.zeros(grid.shape, np.uint8)
     overlap = cfg.window
     windows = list(grid.tiles(cfg.tile, overlap=overlap))
+    from ms_mosaic.compose import _share_array
+    from ms_mosaic.parallel import tile_worker_mb
+
+    # 先验面落盘后子进程 mmap 只读，避免整幅先验随 payload 给每个进程各 pickle 一份。
+    prior_path = _share_array(np.asarray(prior, np.float32))
     payload = {
         "grid": grid,
-        "prior": prior,
+        "prior_path": str(prior_path),
         "cameras": cameras,
         "poses": poses,
         "paths": image_paths,
@@ -635,22 +640,28 @@ def _match_on_grid(
         "sigma": sigma,
         "level": level,
     }
+    any_cam = next(iter(cameras.values()))
+    gray_bytes = (any_cam.width >> level) * (any_cam.height >> level) * 4
     n_workers = workers if workers is not None else cfg.workers
     done = 0
-    for _, window, (tile_z, tile_conf, tile_views) in map_tiles(
-        windows,
-        partial(_dense_setup, payload),
-        _dense_fn,
-        workers=n_workers,
-        log=log,
-        label=label,
-    ):
-        paste_tile(z, tile_z, window, overlap, grid)
-        paste_tile(conf, tile_conf, window, overlap, grid)
-        paste_tile(views, tile_views, window, overlap, grid)
-        done += 1
-        if log is not None and n_workers == 1 and (done % 10 == 0 or done == len(windows)):
-            log(f"{label} {done}/{len(windows)} 块，已解出 {np.isfinite(z).mean():.1%}")
+    try:
+        for _, window, (tile_z, tile_conf, tile_views) in map_tiles(
+            windows,
+            partial(_dense_setup, payload),
+            _dense_fn,
+            workers=n_workers,
+            log=log,
+            label=label,
+            per_worker_mb=tile_worker_mb(gray_bytes),
+        ):
+            paste_tile(z, tile_z, window, overlap, grid)
+            paste_tile(conf, tile_conf, window, overlap, grid)
+            paste_tile(views, tile_views, window, overlap, grid)
+            done += 1
+            if log is not None and n_workers == 1 and (done % 10 == 0 or done == len(windows)):
+                log(f"{label} {done}/{len(windows)} 块，已解出 {np.isfinite(z).mean():.1%}")
+    finally:
+        prior_path.unlink(missing_ok=True)
     return z, conf, views, img_gsd
 
 
@@ -792,9 +803,12 @@ def paste_tile(
 def _dense_setup(payload: dict):
     from ms_mosaic.parallel import CACHE_PER_WORKER
 
+    prior = payload.get("prior")
+    if prior is None:
+        prior = np.load(payload["prior_path"], mmap_mode="r")
     return {
         "grid": payload["grid"],
-        "prior": payload["prior"],
+        "prior": prior,
         "cameras": payload["cameras"],
         "poses": payload["poses"],
         "cfg": payload["cfg"],

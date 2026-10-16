@@ -83,6 +83,37 @@ def seam_cost_volume(stack: WarpedStack, cfg: SeamConfig) -> np.ndarray:
     return np.where(bad, 4.0 * max(scale, 1.0), cost).astype(np.float64)
 
 
+class SeamCost:
+    """按需取值的接缝代价，seam[l1, l2, r, c] 与 seam_cost_volume 逐位相同。
+
+    整卷是 n²·h·w 个 float64：12 视角 480² 块连中间量约 1 GB，而 α 扩张只读相邻格对上的值。
+    """
+
+    def __init__(self, stack: WarpedStack, cfg: SeamConfig) -> None:
+        self.inten = _view_intensity(stack)
+        gy, gx = np.gradient(np.nan_to_num(self.inten, nan=0.0), axis=(1, 2))
+        self.grad = np.hypot(gx, gy)
+        self.gw = cfg.gradient_weight
+        n = self.inten.shape[0]
+        scale = None
+        for a in range(n):
+            for b in range(a, n):
+                c = self._raw(a, b, slice(None), slice(None))
+                if np.isfinite(c).any():
+                    m = float(np.nanmax(c))
+                    scale = m if scale is None else max(scale, m)
+        self.fill = 4.0 * max(1.0 if scale is None else scale, 1.0)
+
+    def _raw(self, l1, l2, r, c) -> np.ndarray:
+        diff = np.abs(self.inten[l1, r, c] - self.inten[l2, r, c])
+        gdiff = np.abs(self.grad[l1, r, c] - self.grad[l2, r, c])
+        return diff + self.gw * gdiff
+
+    def __getitem__(self, key) -> np.ndarray:
+        cost = self._raw(*key)
+        return np.where(np.isfinite(cost), cost, self.fill).astype(np.float64)
+
+
 def _expansion_move(
     labels: np.ndarray,
     alpha: int,
@@ -177,7 +208,7 @@ def optimal_labels(stack: WarpedStack, cfg: SeamConfig | None = None) -> np.ndar
         return np.where(any_valid, 0, -1).astype(np.int16)
 
     labels = np.argmin(data, axis=0).astype(np.int64)
-    seam = seam_cost_volume(stack, cfg)
+    seam = SeamCost(stack, cfg)
 
     for _ in range(cfg.max_cycles):
         changed = False
@@ -193,7 +224,7 @@ def energy(labels: np.ndarray, stack: WarpedStack, cfg: SeamConfig | None = None
     """给定标号的总能量，用于验证图割确实在下降。"""
     cfg = cfg or SeamConfig()
     data = data_cost(stack, cfg)
-    seam = seam_cost_volume(stack, cfg)
+    seam = SeamCost(stack, cfg)
     ok = labels >= 0
     if not ok.any():
         return 0.0

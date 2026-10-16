@@ -9,7 +9,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from ms_mosaic.compose import render_band, write_band_product
-from ms_mosaic.parallel import resolve_workers, split_ortho_pools
+from ms_mosaic.parallel import resolve_workers, split_ortho_pools, tile_worker_mb
 from ms_mosaic.dense import DenseConfig, compute_height_field
 from ms_mosaic.dsm import (
     Dsm,
@@ -448,8 +448,7 @@ def run_mosaic(
         ortho_grid = dsm.grid.refine(ORTHO_OVER_DSM)
     enter("S5_ortho", f"正射波段 {wanted}")
     files: dict[str, Any] = {"bands": {}, "dsm": str(dsm_path), "mosaic_dir": str(products_dir)}
-    labels_rgb = None
-    views_rgb: list[int] = []
+    rgb_raster = None
     t_ortho = time.time()
     # 贴边采样面只跟 DSM 有关，各波段相同。算一次，避免八个波段各滤一遍同一张高程。
     ortho_z = flatten_edge_z(
@@ -459,13 +458,13 @@ def run_mosaic(
         band_m=80.0 if flatten_edge_band_m is None else float(flatten_edge_band_m),
     )
 
-    def _run_band(band: str, band_workers: int | None) -> tuple[str, np.ndarray, np.ndarray, list[int]] | None:
+    def _run_band(band: str, band_workers: int | None):
         cameras, poses, paths = transfer_band(block, at.cameras, at.poses, band)
         if not poses:
             log(f"跳过 {band}：没有对应的空三外方位")
             return None
         log(f"=== 正射 {group_name(band)} ({band})  {len(poses)} 张 ===")
-        mosaic, labels, views = render_band(
+        raster = render_band(
             ortho_grid,
             ortho_z,
             dsm.grid,
@@ -481,27 +480,42 @@ def run_mosaic(
             # 全局仿射辐射归一化：只改档位，不动纹理与局部对比。自研输出忠实于
             # 源 JPG（G 均值 114.3，源 107.4），商业是减掉暗电平后的档位
             # （G 91.1，饱和 0）。实测校正后分位残差 0.9–1.7 DN、饱和率 0%。
+            # 验收套色要整幅统计，只在显式开启的调试路径整幅读入
             ref_rgb = ref_dir / "Orthomosaic_pix_surf_group0.tif"
-            mosaic = scale_mosaic_to_reference(mosaic, ortho_grid, ref_rgb)
+            mosaic = scale_mosaic_to_reference(raster.to_array(), ortho_grid, ref_rgb)
             if match_reference_color:
                 # 低频替换会把参考的低频底搬过来，属调试手段，不进交付主路径
                 mosaic = match_lowfreq_to_reference(mosaic, ortho_grid, ref_rgb)
-        return band, mosaic, labels, views
+            return band, raster, mosaic
+        return band, raster, None
 
-    def _commit_band(band: str, mosaic: np.ndarray, labels: np.ndarray, views: list[int]) -> None:
+    def _commit_band(band: str, raster, mosaic) -> None:
         out_path = products_dir / group_name(band)
-        # 足迹已按 edge_trim_m 收过，这里只清 RGB 全 0，不再二次腐蚀
-        write_band_product(mosaic, ortho_grid, band, out_path, trim_m=0)
-        files["bands"][band] = str(out_path)
-        log(f"已写出 {out_path.name}（{band} 完成）")
-        if band == RGB_BAND or band == PRIMARY_BAND:
-            files["rgb"] = str(out_path)
-            nonlocal labels_rgb, views_rgb
-            labels_rgb, views_rgb = labels, views
+        try:
+            # 足迹已按 edge_trim_m 收过，这里只清 RGB 全 0，不再二次腐蚀
+            write_band_product(mosaic if mosaic is not None else raster, ortho_grid, band, out_path, trim_m=0)
+            files["bands"][band] = str(out_path)
+            log(f"已写出 {out_path.name}（{band} 完成）")
+            keep = band == RGB_BAND or band == PRIMARY_BAND
+            if keep:
+                files["rgb"] = str(out_path)
+                nonlocal rgb_raster
+                if rgb_raster is not None and rgb_raster is not raster:
+                    rgb_raster.close()
+                rgb_raster = raster
+        except BaseException:
+            raster.close()
+            raise
+        if not keep:
+            raster.close()
 
     rgb_bands = [b for b in wanted if b == RGB_BAND]
     ms_bands = [b for b in wanted if b != RGB_BAND]
-    tile_n = resolve_workers(ortho_workers)
+    ms_cam = next((block.cameras[b] for b in ms_bands if b in block.cameras), None)
+    tile_n = resolve_workers(
+        ortho_workers,
+        per_worker_mb=tile_worker_mb(ms_cam.width * ms_cam.height * 2) if ms_cam is not None else None,
+    )
     for band in rgb_bands:
         got = _run_band(band, ortho_workers)
         if got:
@@ -524,6 +538,8 @@ def run_mosaic(
     reporter.stage_done("S5_ortho", timings["ortho"])
     early = _barrier(control, reporter, "S5_ortho")
     if early:
+        if rgb_raster is not None:
+            rgb_raster.close()
         early["files"] = files
         return early
     early = _stop_here(
@@ -533,6 +549,8 @@ def run_mosaic(
         reporter,
     )
     if early:
+        if rgb_raster is not None:
+            rgb_raster.close()
         return early
 
     t_report = time.time()
@@ -541,9 +559,16 @@ def run_mosaic(
     kml_path = write_kml(ortho_grid, extras_dir / "area.kml", image=Path(files.get("rgb", "DSM.tif")).name)
     files["pseudocolor"] = str(pc_path)
     files["kml"] = str(kml_path)
-    if seamline_enabled and labels_rgb is not None:
-        seam_path = seamline_geojson(labels_rgb, ortho_grid, views_rgb, extras_dir / "seamlines.geojson")
-        files["seamlines"] = str(seam_path)
+    if rgb_raster is not None:
+        try:
+            if seamline_enabled:
+                seam_path = seamline_geojson(
+                    rgb_raster.labels, ortho_grid, rgb_raster.views, extras_dir / "seamlines.geojson"
+                )
+                files["seamlines"] = str(seam_path)
+        finally:
+            rgb_raster.close()
+            rgb_raster = None
 
     n_shots = sparse.counts.get("n_usable", len(block.primary()))
     # 复用检查点时 keypoint_counts 可能为空：从特征缓存补齐，保证全波段统计

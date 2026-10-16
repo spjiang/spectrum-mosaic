@@ -31,26 +31,48 @@ from scipy.spatial.transform import Rotation
 from ms_mosaic.camera import INTRINSIC_NAMES, Camera, Pose
 from ms_mosaic.cpu import cpu_cap
 from ms_mosaic.features import Features
-from ms_mosaic.memory import cap_workers, job_memory_gb, resolve_memory_budget
+from ms_mosaic.memory import (
+    available_bytes,
+    cap_workers,
+    job_memory_gb,
+    process_rss_bytes,
+    resolve_memory_budget,
+)
 from ms_mosaic.tracks import Tracks
 
 OUTLIER_THRESHOLD_PX = 6.0  # 与 LiMapper 报告「外点阈值（像素） 6」一致
 HUBER_SCALE_PX = 1.5
 MIN_TRIANGULATION_ANGLE_DEG = 1.0
 MIN_OBS_PER_TRACK = 2
-# 单波段组装 Schur 法方程时雅可比/W 块峰值约数 GB。8 路一起上会在 24GB 引擎里被 oom_kill。
+# 分波段平差的内存模型，系数由 scripts/calibrate_ba_memory.py 用 tracemalloc 实测拟合：
+# 24 万观测/8 万点单路峰值 245 MB（分块）/ 349 MB（不分块）。
+# 线程各自的 malloc arena 与碎片 tracemalloc 量不到，乘 1.25 兜底。
+_BA_CHUNK_OBS = 200_000
+_BA_BYTES_PER_CHUNK_OBS = 600  # 一块雅可比（width=16 时）
+_BA_BYTES_PER_OBS = 600  # 跨块累加的 W 与消元时的 Y=W·V⁻¹
+_BA_BYTES_PER_POINT = 1450  # V、V⁻¹ 块对角与 g_p
+_BA_DENSE_COPIES = 4  # U、U+λD、S 与 Y·Wᵀ 稠密结果
+_BA_SAFETY = 1.25
+# 不知道波段规模时的保守单路估计
 _BA_WORKER_MB = 4096
-_BA_RESERVE_MB = 8192
+# 剩余内存是实时读的，已扣掉本进程；这里只留其它容器波动与主线程代价评估的余量。
+_BA_RESERVE_MB = 1536
 
 
-def ba_parallel_workers(n_bands: int) -> int:
-    """平差并行路数：波段数 ∩ CPU ∩（任务预算 ∩ 此刻剩余内存）。"""
+def ba_parallel_workers(n_bands: int, per_worker_bytes: int | None = None) -> int:
+    """平差并行路数：波段数 ∩ CPU ∩（任务预算 − 本进程已占 ∩ 此刻剩余内存）。
+
+    per_worker_bytes 按最大波段的观测规模估计；不给时按 _BA_WORKER_MB 保守估计。
+    """
     n = max(1, int(n_bands or 1))
     n = min(n, cpu_cap())
     budget = resolve_memory_budget(job_memory_gb())
+    if budget is not None:
+        budget = max(0, budget - (process_rss_bytes() or 0))
+    per_mb = _BA_WORKER_MB if per_worker_bytes is None else max(64, -(-int(per_worker_bytes) // 2**20))
     return cap_workers(
         n,
-        per_worker_mb=_BA_WORKER_MB,
+        per_worker_mb=per_mb,
         reserve_mb=_BA_RESERVE_MB,
         budget_bytes=budget,
     )
@@ -624,7 +646,7 @@ def _separable_bands(problem: BAProblem) -> list[_SchurBand] | None:
 
     有跨波段点时返回 None，调用方退回整块求解，避免拆开以后方程变了。
     """
-    if problem.n_cam <= 1 or problem.n_obs == 0 or problem.n_free == 0:
+    if problem.n_obs == 0 or problem.n_free == 0:
         return None
     min_c = np.full(problem.n_pts, problem.n_cam, dtype=np.int32)
     max_c = np.full(problem.n_pts, -1, dtype=np.int32)
@@ -670,9 +692,8 @@ def _separable_bands(problem: BAProblem) -> list[_SchurBand] | None:
                 nc=n_img * 6 + problem.n_free,
             )
         )
-    if len(bands) <= 1:
-        return None
-    return bands
+    # 单相机也走分块组装路径（一个块），峰值同样受分块控制
+    return bands or None
 
 
 def band_worker_bytes(n_obs: int, n_pts: int, nc: int, n_free: int, *, chunk: int = _BA_CHUNK_OBS) -> int:
@@ -683,13 +704,13 @@ def band_worker_bytes(n_obs: int, n_pts: int, nc: int, n_free: int, *, chunk: in
     """
     width = 6 + int(n_free)
     per_chunk_obs = min(int(n_obs), int(chunk))
-    w_nnz = int(n_obs) * 18 + int(n_pts) * 3 * int(n_free)
-    return int(
+    raw = (
         per_chunk_obs * _BA_BYTES_PER_CHUNK_OBS * width / 16
-        + w_nnz * _BA_BYTES_PER_W_NNZ
+        + int(n_obs) * _BA_BYTES_PER_OBS
         + int(n_pts) * _BA_BYTES_PER_POINT
         + int(nc) * int(nc) * 8 * _BA_DENSE_COPIES
     )
+    return int(raw * _BA_SAFETY)
 
 
 def _assemble_band(
@@ -831,6 +852,7 @@ def solve_lm(
     step_tolerance: float = 1e-10,
     verbose: int = 0,
     band_parallel: bool = True,
+    log=None,
 ) -> np.ndarray:
     """Schur 补 Levenberg-Marquardt。
 
@@ -856,7 +878,19 @@ def solve_lm(
     x = problem.x0.copy()
     lam = initial_lambda
     bands = _separable_bands(problem) if band_parallel else None
-    workers = ba_parallel_workers(len(bands)) if bands else 1
+    workers = 1
+    if bands:
+        per_worker = max(
+            band_worker_bytes(int(b.obs_idx.size), b.n_pts, b.nc, problem.n_free) for b in bands
+        )
+        workers = ba_parallel_workers(len(bands), per_worker)
+        if log is not None:
+            avail = available_bytes()
+            log(
+                f"平差并行 {workers}/{len(bands)} 路（单路约 {per_worker / 2**30:.1f} GB，"
+                f"此刻剩余 {avail / 2**30:.1f} GB）" if avail is not None
+                else f"平差并行 {workers}/{len(bands)} 路（单路约 {per_worker / 2**30:.1f} GB）"
+            )
     pool = ThreadPoolExecutor(max_workers=workers) if bands and workers > 1 else None
 
     def total_cost(xv: np.ndarray) -> float:
@@ -880,11 +914,35 @@ def solve_lm(
             + 0.5 * (intr_res**2).sum()
         )
 
+    cached: dict = {"x": None, "assembled": None}
+
     def solve_bands(lam_now: float):
-        """按封顶路数分批组装再消元。一批做完就丢掉，避免 8 路法方程同时驻留。"""
+        """按封顶路数分批组装再消元。一批做完就丢掉，避免 8 路法方程同时驻留。
+
+        法方程只依赖 x、不依赖 λ。全部波段能同时驻留时（单波段或路数够），
+        步长被拒后加大 λ 只重做消元，不重新组装。
+        """
         assert bands is not None
         parts: list = []
         step = max(1, workers)
+        if step >= len(bands):
+            if cached["x"] is not x:
+                cached["assembled"] = None
+                if pool is None:
+                    cached["assembled"] = [_assemble_band(problem, b, x, huber_px) for b in bands]
+                else:
+                    cached["assembled"] = list(
+                        pool.map(lambda b: _assemble_band(problem, b, x, huber_px), bands)
+                    )
+                cached["x"] = x
+            items = cached["assembled"]
+            if pool is None:
+                solved = [_damp_solve_band(item, lam_now) for item in items]
+            else:
+                solved = list(pool.map(lambda item: _damp_solve_band(item, lam_now), items))
+            if any(part is None for part in solved):
+                return None
+            return _scatter_band_step(problem, bands, solved)
         for i in range(0, len(bands), step):
             chunk = bands[i : i + step]
             if pool is None:
@@ -1095,8 +1153,34 @@ def bundle_adjust(
     intrinsic_prior: dict[str, Camera] | None = None,
     max_iterations: int = 40,
     verbose: int = 0,
+    log=None,
 ) -> tuple[dict[str, Camera], dict[int, Pose], np.ndarray, np.ndarray]:
-    """一次平差。返回 (相机, 位姿, 物方点, 每观测重投影残差像素)。"""
+    """一次平差。返回 (相机, 位姿, 物方点, 每观测重投影残差像素)。
+
+    组内选对时各波段不共享物方点、相机各自独立，目标函数是各波段之和、
+    互不耦合。此时每个波段单独跑一套 LM（各自的 λ 与收敛判据），按内存封顶
+    并行。共用一个 λ 时任一波段步长被拒就要 8 个波段一起重组装重试，阶段 2
+    实测因此从 23 min 拖到 2 h 12 min。
+    """
+    groups = _camera_groups(points, observations, image_camera, poses)
+    if groups is not None and len(groups) > 1:
+        return _bundle_adjust_by_camera(
+            groups,
+            cameras,
+            poses,
+            points,
+            observations,
+            image_camera,
+            gps,
+            attitude_rotation,
+            sigma_xyz=sigma_xyz,
+            sigma_attitude_rad=sigma_attitude_rad,
+            free_names=free_names,
+            intrinsic_prior=intrinsic_prior,
+            max_iterations=max_iterations,
+            verbose=verbose,
+            log=log,
+        )
     problem = BAProblem(
         cameras,
         poses,
@@ -1110,9 +1194,129 @@ def bundle_adjust(
         free_names=free_names,
         intrinsic_prior=intrinsic_prior,
     )
-    x = solve_lm(problem, max_iterations=max_iterations, verbose=verbose)
+    x = solve_lm(problem, max_iterations=max_iterations, verbose=verbose, log=log)
     out_cameras, out_poses, out_points = problem.unpack(x)
     return out_cameras, out_poses, out_points, problem.reprojection_px(x)
+
+
+@dataclass
+class _CameraGroup:
+    key: str
+    image_ids: list[int]
+    point_ids: np.ndarray  # 全局物方点号
+    obs_idx: np.ndarray  # 全局观测下标
+
+
+def _camera_groups(
+    points: np.ndarray,
+    observations: list[Observation],
+    image_camera: dict[int, str],
+    poses: dict[int, Pose],
+) -> list[_CameraGroup] | None:
+    """按相机把观测分组；有物方点跨相机时返回 None（方程耦合，不能拆）。"""
+    if not observations:
+        return None
+    keys = sorted({image_camera[i] for i in poses})
+    if len(keys) <= 1:
+        return None
+    key_pos = {k: n for n, k in enumerate(keys)}
+    n = len(observations)
+    obs_cam = np.fromiter((key_pos[image_camera[o.image]] for o in observations), np.int32, n)
+    obs_pt = np.fromiter((o.point for o in observations), np.int64, n)
+    n_pts = int(points.shape[0])
+    lo = np.full(n_pts, len(keys), np.int32)
+    hi = np.full(n_pts, -1, np.int32)
+    np.minimum.at(lo, obs_pt, obs_cam)
+    np.maximum.at(hi, obs_pt, obs_cam)
+    seen = hi >= 0
+    if np.any(lo[seen] != hi[seen]):
+        return None
+    groups = []
+    for k, key in enumerate(keys):
+        idx = np.flatnonzero(obs_cam == k)
+        imgs = sorted(i for i in poses if image_camera[i] == key)
+        if not imgs:
+            continue
+        groups.append(_CameraGroup(key, imgs, np.unique(obs_pt[idx]), idx))
+    return groups
+
+
+def _bundle_adjust_by_camera(
+    groups: list[_CameraGroup],
+    cameras: dict[str, Camera],
+    poses: dict[int, Pose],
+    points: np.ndarray,
+    observations: list[Observation],
+    image_camera: dict[int, str],
+    gps: dict[int, np.ndarray],
+    attitude_rotation: dict[int, np.ndarray],
+    *,
+    sigma_xyz,
+    sigma_attitude_rad,
+    free_names,
+    intrinsic_prior,
+    max_iterations,
+    verbose,
+    log,
+):
+    n_free = len(free_names)
+    per_worker = max(
+        band_worker_bytes(int(g.obs_idx.size), int(g.point_ids.size), len(g.image_ids) * 6 + n_free, n_free)
+        for g in groups
+    )
+    workers = ba_parallel_workers(len(groups), per_worker)
+    if log is not None:
+        avail = available_bytes()
+        tail = f"，此刻剩余 {avail / 2**30:.1f} GB" if avail is not None else ""
+        log(f"平差按波段独立求解 {workers}/{len(groups)} 路（单路约 {per_worker / 2**30:.1f} GB{tail}）")
+
+    def solve_group(g: _CameraGroup):
+        local_of = np.full(int(points.shape[0]), -1, np.int64)
+        local_of[g.point_ids] = np.arange(g.point_ids.size)
+        sub_obs = [
+            Observation(observations[k].image, int(local_of[observations[k].point]), observations[k].uv)
+            for k in g.obs_idx
+        ]
+        sub_poses = {i: poses[i] for i in g.image_ids}
+        prior = {g.key: (intrinsic_prior or cameras)[g.key]}
+        problem = BAProblem(
+            {g.key: cameras[g.key]},
+            sub_poses,
+            points[g.point_ids],
+            sub_obs,
+            {i: g.key for i in g.image_ids},
+            {i: gps[i] for i in g.image_ids},
+            {i: attitude_rotation[i] for i in g.image_ids},
+            sigma_xyz=sigma_xyz,
+            sigma_attitude_rad=sigma_attitude_rad,
+            free_names=free_names,
+            intrinsic_prior=prior,
+        )
+        del sub_obs
+        x = solve_lm(problem, max_iterations=max_iterations, verbose=verbose)
+        cams, sub_out, pts = problem.unpack(x)
+        return g, cams, sub_out, pts, problem.reprojection_px(x)
+
+    out_cameras = dict(cameras)
+    out_poses = dict(poses)
+    out_points = np.array(points, copy=True)
+    residual = np.zeros(len(observations))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = pool.map(solve_group, groups)
+            for g, cams, sub_out, pts, res in results:
+                out_cameras.update(cams)
+                out_poses.update(sub_out)
+                out_points[g.point_ids] = pts
+                residual[g.obs_idx] = res
+    else:
+        for g in groups:
+            g, cams, sub_out, pts, res = solve_group(g)
+            out_cameras.update(cams)
+            out_poses.update(sub_out)
+            out_points[g.point_ids] = pts
+            residual[g.obs_idx] = res
+    return out_cameras, out_poses, out_points, residual
 
 
 def drop_outliers(
@@ -1183,13 +1387,7 @@ def run_at(
 
     history: list[dict] = []
     # 组内选对后各波段法方程互不相连，按波段并行分解，未知数和残差都不改。
-    n_band = len({image_camera[i] for i in poses})
-    if n_band > 1:
-        workers = ba_parallel_workers(n_band)
-        if workers < n_band:
-            _say(f"平差并行下调 {n_band} → {workers}（按内存封顶）")
-        else:
-            _say(f"平差并行 {workers} 路")
+    # 并行路数在每次平差开始时按实时剩余内存与波段规模重算。
     for stage_no, free_names in enumerate(stages, start=1):
         cameras, poses, points, residual_px = bundle_adjust(
             cameras,
@@ -1204,6 +1402,7 @@ def run_at(
             free_names=free_names,
             intrinsic_prior=intrinsic_prior,
             verbose=verbose,
+            log=_say,
         )
         rms = float(np.sqrt(np.mean(residual_px**2)))
         points, observations, dropped = drop_outliers(
@@ -1221,7 +1420,8 @@ def run_at(
         if len(points) == 0:
             raise ValueError("剔粗差后没有剩余物方点，阈值可能过严")
 
-    _, _, _, residual_px = bundle_adjust(
+    # 剔粗差后的残差直接在当前参数处重投影；不再多跑一轮 LM（那一轮的解会被丢弃，残差与返回位姿对不上）。
+    final_problem = BAProblem(
         cameras,
         poses,
         points,
@@ -1233,8 +1433,9 @@ def run_at(
         sigma_attitude_rad=np.radians(sigma_attitude_deg),
         free_names=stages[-1] if stages else (),
         intrinsic_prior=intrinsic_prior,
-        max_iterations=1,
     )
+    residual_px = final_problem.reprojection_px(final_problem.x0)
+    del final_problem
 
     # 已注册 = 至少有一条重投影观测（LiMapper：无连接的影像进「未注册」）
     registered_ids = sorted({int(o.image) for o in observations})

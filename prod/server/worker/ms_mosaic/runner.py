@@ -114,7 +114,10 @@ def _limit_blas_threads() -> None:
 
 
 def _extract_init() -> None:
+    from ms_mosaic.parallel import prefer_oom_kill
+
     _limit_blas_threads()
+    prefer_oom_kill()
 
 
 @dataclass(frozen=True)
@@ -172,7 +175,10 @@ def _extract_worker(job):
 
 
 def _match_init(cache_dir, cameras_by_band: dict):
+    from ms_mosaic.parallel import prefer_oom_kill
+
     _limit_blas_threads()
+    prefer_oom_kill()
     _SHARED["cameras"] = cameras_by_band
     _SHARED["cache_dir"] = str(cache_dir)
 

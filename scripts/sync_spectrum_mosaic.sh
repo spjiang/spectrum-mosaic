@@ -92,6 +92,9 @@ fi
 "${rsync_cmd[@]}" "$SRC/" "$DST/"
 rm -f "$OVERSIZE_LIST"
 
+# rsync 默认不删除「被 exclude 的目标路径」，手动清运行时目录
+rm -rf "$DST/prod/server/.run" "$DST/prod/server/frontend/dist"
+
 mkdir -p "$DST/prod/server/data/input" "$DST/prod/server/data/output/runs"
 find "$DST/prod/server/data/input" "$DST/prod/server/data/output" \
   -type f ! -name '.gitkeep' ! -name '.gitignore' -delete 2>/dev/null || true

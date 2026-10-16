@@ -164,6 +164,21 @@ def test_resample_height_preserves_linear_slope_on_refined_grid():
     assert float(np.abs(got[inner, inner] - truth[inner, inner]).max()) < 0.05
 
 
+def test_resample_height_window_matches_full_raster():
+    """按窗口裁源格网后，结果必须与整幅重采样再切窗逐位相同（含越出源格网的边缘）。"""
+    src = Grid.from_bounds((0.0, 0.0, 40.0, 30.0), 1.0, CRS)
+    rng = np.random.default_rng(3)
+    z = (100.0 + rng.normal(0, 5, src.shape)).astype(np.float32)
+    z[rng.random(z.shape) < 0.1] = np.nan
+    dst = Grid.from_bounds((-3.0, -2.0, 43.0, 33.0), 0.37, CRS)
+    full = resample_height(z, src, dst)
+    for window in [(0, 0, 9, 11), (20, 30, 25, 17), (dst.height - 7, dst.width - 13, 7, 13),
+                   (0, dst.width - 5, 4, 5), (40, 0, 30, 6)]:
+        r0, c0, h, w = window
+        got = resample_height(z, src, dst, window)
+        np.testing.assert_array_equal(got, full[r0:r0 + h, c0:c0 + w])
+
+
 def test_resample_height_keeps_nodata():
     src = Grid.from_bounds((0.0, 0.0, 8.0, 8.0), 1.0, CRS)
     z = np.full(src.shape, 10.0, np.float32)

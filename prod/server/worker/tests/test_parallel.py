@@ -1,6 +1,9 @@
 """分块并行：空间切段必须邻近，串行与多进程结果必须一致。"""
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from ms_mosaic.grid import Grid
 from ms_mosaic.parallel import map_tiles, spatial_chunks, split_ortho_pools
@@ -83,8 +86,34 @@ def test_resolve_workers_stays_inside_free_ram(monkeypatch):
     monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 36.0)
     monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
     monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(18 * 1024**3))
-    # 剩余 18GB，扣 8GB 预留，按每进程 4GB，得到 2
-    assert resolve_workers(None) == 2
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: 0)
+    # 剩余 18GB，扣 1.5GB 预留，按每进程 4GB，得到 4
+    assert resolve_workers(None) == 4
+
+
+def test_resolve_workers_uses_per_worker_estimate(monkeypatch):
+    """按实估单进程内存放进程：10GB 剩余、每进程 1.5GB → 5 进程，而不是固定 4GB 压成 2。"""
+    from ms_mosaic.parallel import resolve_workers, tile_worker_mb
+
+    monkeypatch.setattr("ms_mosaic.parallel.cpu_cap", lambda requested=None: 8 if requested is None else min(8, int(requested)))
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: int(2 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(10 * 1024**3))
+    per = tile_worker_mb(2048 * 1536 * 3)  # Color 原始位深 48 张 ≈ 432MB + 1GB
+    assert 1400 < per < 1500
+    assert resolve_workers(None, per_worker_mb=per) == (10 * 1024 - 1536) // per
+
+
+def test_resolve_workers_subtracts_own_rss_from_budget(monkeypatch):
+    from ms_mosaic.parallel import resolve_workers
+
+    monkeypatch.setattr("ms_mosaic.parallel.cpu_cap", lambda requested=None: 8 if requested is None else min(8, int(requested)))
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: int(20 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(64 * 1024**3))
+    assert resolve_workers(None, per_worker_mb=1024) == max(1, (int(3.4 * 1024) - 1536) // 1024)
 
 
 def test_resolve_workers_budget_caps_at_seven(monkeypatch):
@@ -94,7 +123,23 @@ def test_resolve_workers_budget_caps_at_seven(monkeypatch):
     monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 36.0)
     monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
     monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(36 * 1024**3))
-    assert resolve_workers(None) == 7
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: 0)
+    # 36GB − 1.5GB 预留，按每进程 4GB → 8
+    assert resolve_workers(None) == 8
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="需要 Linux /proc")
+def test_peak_rss_of_spawned_child_excludes_parent_peak():
+    """子进程峰值不能继承主进程的 ru_maxrss，否则日志里的实测峰值没法用来校准。"""
+    import multiprocessing
+
+    from ms_mosaic.parallel import peak_rss_mb
+
+    big = np.ones(400 * 2**20 // 8)
+    with multiprocessing.get_context("spawn").Pool(1) as pool:
+        child = pool.apply(peak_rss_mb)
+    del big
+    assert child < 300, f"子进程报 {child:.0f} MB，疑似继承了主进程峰值"
 
 
 def test_split_ortho_pools_runs_several_ms_bands():

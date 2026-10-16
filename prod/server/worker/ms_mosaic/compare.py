@@ -272,6 +272,36 @@ def fit_plane_residual(
     }
 
 
+def _ortho_overlap_stats(o, t, *, strip_rows: int = 1024) -> dict:
+    """同格网两幅正射按条带累加掩膜面积与 RGB 一、二阶矩，不整幅读入。"""
+    from rasterio.windows import Window
+
+    out = {"both": 0, "extra": 0, "missing": 0,
+           "bands": [dict(so=0.0, st=0.0, soo=0.0, stt=0.0, sot=0.0, sad=0.0) for _ in range(3)]}
+    h, w = o.height, o.width
+    for r0 in range(0, h, strip_rows):
+        win = Window(0, r0, w, min(strip_rows, h - r0))
+        oa = (o.read(4, window=win) if o.count >= 4 else o.read(1, window=win)) > 0
+        ta = (t.read(4, window=win) if t.count >= 4 else t.read(1, window=win)) > 0
+        both = oa & ta
+        out["both"] += int(both.sum())
+        out["extra"] += int((oa & ~ta).sum())
+        out["missing"] += int((ta & ~oa).sum())
+        if not both.any():
+            continue
+        for bi in range(3):
+            ov = o.read(min(bi + 1, o.count), window=win)[both].astype(np.float64)
+            tv = t.read(min(bi + 1, t.count), window=win)[both].astype(np.float64)
+            s = out["bands"][bi]
+            s["so"] += ov.sum()
+            s["st"] += tv.sum()
+            s["soo"] += (ov * ov).sum()
+            s["stt"] += (tv * tv).sum()
+            s["sot"] += (ov * tv).sum()
+            s["sad"] += np.abs(ov - tv).sum()
+    return out
+
+
 def compare_ortho(ours: Path, theirs: Path, *, report: ComparisonReport | None = None):
     """比对正射：规格必须逐项对齐，重叠区再比辐射与覆盖。"""
     import rasterio
@@ -303,15 +333,11 @@ def compare_ortho(ours: Path, theirs: Path, *, report: ComparisonReport | None =
     )
     if same_grid:
         with rasterio.open(ours) as o, rasterio.open(theirs) as t:
-            oa = o.read(4) > 0 if o.count >= 4 else o.read(1) > 0
-            ta = t.read(4) > 0 if t.count >= 4 else t.read(1) > 0
-            both = oa & ta
-            extra = oa & ~ta
-            missing = ta & ~oa
+            stats = _ortho_overlap_stats(o, t)
             # 商业有效区可以大于本次相片足迹。掩膜不一致只记面积，不按逐格相同判失败。
             ha = (a.gsd ** 2) / 10000.0
-            n_extra = int(extra.sum())
-            n_miss = int(missing.sum())
+            n_extra = stats["extra"]
+            n_miss = stats["missing"]
             rep.add(
                 "正射多余像元",
                 n_extra,
@@ -324,15 +350,20 @@ def compare_ortho(ours: Path, theirs: Path, *, report: ComparisonReport | None =
                 0,
                 note=f"商业有、自研无，约 {n_miss * ha:.3f} ha；不按商业掩膜逐格判失败",
             )
-            if both.sum() >= 1000:
-                for bi, name in enumerate(("R", "G", "B"), start=1):
-                    ov = o.read(bi)[both].astype(np.float64)
-                    tv = t.read(bi)[both].astype(np.float64)
-                    mae = float(np.mean(np.abs(ov - tv)))
-                    ratio = float(ov.mean() / max(tv.mean(), 1e-6))
-                    corr = float(np.corrcoef(ov, tv)[0, 1])
-                    rep.add(f"正射{name}均值", float(ov.mean()), float(tv.mean()),
-                            delta=float(ov.mean() - tv.mean()), tolerance=8.0)
+            n_both = stats["both"]
+            if n_both >= 1000:
+                for bi, name in enumerate(("R", "G", "B")):
+                    s = stats["bands"][bi]
+                    o_mean = s["so"] / n_both
+                    t_mean = s["st"] / n_both
+                    mae = float(s["sad"] / n_both)
+                    ratio = float(o_mean / max(t_mean, 1e-6))
+                    cov = s["sot"] / n_both - o_mean * t_mean
+                    var_o = s["soo"] / n_both - o_mean**2
+                    var_t = s["stt"] / n_both - t_mean**2
+                    corr = float(cov / np.sqrt(var_o * var_t)) if var_o > 0 and var_t > 0 else float("nan")
+                    rep.add(f"正射{name}均值", float(o_mean), float(t_mean),
+                            delta=float(o_mean - t_mean), tolerance=8.0)
                     rep.add(f"正射{name} MAE", mae, 0.0, delta=mae, tolerance=25.0)
                     rep.add(
                         f"正射{name} 相关系数",

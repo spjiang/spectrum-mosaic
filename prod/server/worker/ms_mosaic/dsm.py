@@ -566,6 +566,12 @@ def to_dtm(dsm: Dsm, *, opening_m: float = DTM_OPENING_M) -> Dsm:
     return Dsm(dsm.grid, ground.astype(np.float32), stats)
 
 
+def _crop_span(coord: np.ndarray, size: int) -> tuple[int, int]:
+    lo = int(np.clip(np.floor(coord.min()) - 1, 0, size - 1))
+    hi = int(np.clip(np.ceil(coord.max()) + 2, lo + 1, size))
+    return lo, hi
+
+
 def resample_height(
     z: np.ndarray,
     src: Grid,
@@ -586,6 +592,14 @@ def resample_height(
     # 像元中心，差半个像元。不减 0.5 会把线性坡面整体平移 0.5 格。
     cols = np.asarray(cols, np.float64) - 0.5
     rows = np.asarray(rows, np.float64) - 0.5
+    # 只取窗口覆盖到的那片源格网。整幅 6948×7705 每块各转两份 float64 要 1.2 GB；
+    # 双线性只读 floor 与 floor+1，留 1 格余量即与整幅逐位相同，越界仍落在真实边缘上。
+    if rows.size:
+        r0, r1 = _crop_span(rows, z.shape[0])
+        c0, c1 = _crop_span(cols, z.shape[1])
+        z = z[r0:r1, c0:c1]
+        rows = rows - r0
+        cols = cols - c0
     valid = np.isfinite(z).astype(np.float64)
     proxy = np.where(np.isfinite(z), z, 0.0).astype(np.float64)
     sampled = map_coordinates(proxy, [rows, cols], order=1, mode="nearest", prefilter=False)

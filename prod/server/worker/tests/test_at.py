@@ -8,12 +8,16 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from ms_mosaic.at import (
+    ATResult,
     BAProblem,
     Observation,
     _BA_RESERVE_MB,
     _BA_WORKER_MB,
+    _assemble_band,
+    _damp_solve_band,
     _separable_bands,
     ba_parallel_workers,
+    band_worker_bytes,
     drop_outliers,
     run_at,
     solve_lm,
@@ -248,6 +252,59 @@ def test_drop_outliers_removes_bad_observations_and_orphan_points():
     np.testing.assert_allclose(pts[1], points[2])
 
 
+def test_bundle_adjust_per_camera_matches_joint():
+    """波段互不共享物方点时，逐波段独立 LM 与整块 LM 收敛到同一解。"""
+    from ms_mosaic.at import bundle_adjust
+
+    inputs = _two_band_inputs()
+    cameras, poses, points, observations, image_camera, gps, att = inputs
+    split = bundle_adjust(
+        cameras, poses, points, observations, image_camera, gps, att,
+        free_names=("f", "cx", "cy"), max_iterations=30,
+    )
+    problem = BAProblem(
+        cameras, poses, points, observations, image_camera, gps, att, free_names=("f", "cx", "cy")
+    )
+    x = solve_lm(problem, max_iterations=30, band_parallel=False)
+    j_cams, j_poses, j_pts = problem.unpack(x)
+    for key in cameras:
+        np.testing.assert_allclose(split[0][key].to_vector(), j_cams[key].to_vector(), rtol=1e-4, atol=1e-3)
+    for i in poses:
+        np.testing.assert_allclose(split[1][i].center, j_poses[i].center, atol=1e-3)
+    np.testing.assert_allclose(split[2], j_pts, atol=1e-3)
+    # 两套 LM 停在收敛判据附近的不同点，逐观测残差差在 0.01 px 内
+    np.testing.assert_allclose(split[3], problem.reprojection_px(x), atol=1e-2)
+
+
+def _two_band_inputs():
+    cam_a, poses_a, points_a = _scene(seed=3, n_points=40, grid=(3, 2), step=18.0)
+    cam_b = Camera.initial("450", 2048, 1536, kind="ms").with_vector(TRUE_INTRINSICS * np.array(
+        [0.55, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    ))
+    poses_b = {i + 100: Pose(p.rotation, p.center + np.array([0.0, 80.0, 0.0])) for i, p in poses_a.items()}
+    points_b = points_a + np.array([0.0, 80.0, 0.0])
+    tracks_a, feats_a = _observe(cam_a, poses_a, points_a, pixel_noise=0.2, seed=4)
+    tracks_b, feats_b = _observe(cam_b, poses_b, points_b, pixel_noise=0.2, seed=6)
+    init_a, gps_a, att_a = _perturb(poses_a, pos_sigma=1.0, att_sigma_deg=0.3, seed=7)
+    init_b, gps_b, att_b = _perturb(poses_b, pos_sigma=1.0, att_sigma_deg=0.3, seed=8)
+    cameras = {"Color": Camera.initial("Color", 2048, 1536, kind="rgb"), "450": Camera.initial("450", 2048, 1536, kind="ms")}
+    image_camera = {i: "Color" for i in poses_a}
+    image_camera.update({i: "450" for i in poses_b})
+    points_ta, obs_a = triangulate_tracks(tracks_a, {i: cameras["Color"] for i in poses_a}, init_a, feats_a)
+    points_tb, obs_b = triangulate_tracks(tracks_b, {i: cameras["450"] for i in poses_b}, init_b, feats_b)
+    shift = len(points_ta)
+    obs_b = [Observation(o.image, o.point + shift, o.uv) for o in obs_b]
+    return (
+        cameras,
+        {**init_a, **init_b},
+        np.vstack([points_ta, points_tb]),
+        obs_a + obs_b,
+        image_camera,
+        {**gps_a, **gps_b},
+        {**att_a, **att_b},
+    )
+
+
 def _two_band_problem():
     """两个波段各看各的点，法方程应当块对角。"""
     cam_a, poses_a, points_a = _scene(seed=3, n_points=40, grid=(3, 2), step=18.0)
@@ -292,10 +349,79 @@ def test_band_parallel_matches_joint_solution():
     np.testing.assert_allclose(split, joint, rtol=1e-6, atol=1e-5)
 
 
+def test_chunked_band_assembly_matches_single_pass():
+    """按观测分块累加的法方程必须与一次组装逐项相同。"""
+    problem = _two_band_problem()
+    band = _separable_bands(problem)[0]
+    one = _assemble_band(problem, band, problem.x0, 1.5, chunk=10**9)
+    many = _assemble_band(problem, band, problem.x0, 1.5, chunk=7)
+    np.testing.assert_allclose(many[0], one[0], rtol=1e-10, atol=1e-8)
+    np.testing.assert_allclose(many[1].toarray(), one[1].toarray(), rtol=1e-10, atol=1e-8)
+    for got, want in zip(many[2:], one[2:]):
+        np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-8)
+
+
+def test_band_worker_bytes_covers_measured_peak():
+    """内存模型不能低估单路峰值，否则按它放出的并行路数会把引擎打满。"""
+    import tracemalloc
+
+    problem = _two_band_problem()
+    band = _separable_bands(problem)[0]
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    solved = _damp_solve_band(_assemble_band(problem, band, problem.x0, 1.5, chunk=50), 1e-3)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert solved is not None
+    est = band_worker_bytes(int(band.obs_idx.size), band.n_pts, band.nc, problem.n_free, chunk=50)
+    assert est >= peak
+
+
+def test_ba_parallel_workers_uses_band_size(monkeypatch):
+    """单路按波段规模估：1 GB 一路时 10 GB 剩余能开多路，而不是被 4 GB 固定值压成 1 路。"""
+    monkeypatch.setattr("ms_mosaic.at.cpu_cap", lambda: 10)
+    monkeypatch.setattr("ms_mosaic.at.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.at.resolve_memory_budget", lambda _gb: int(23.4 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.at.process_rss_bytes", lambda: int(4 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(10 * 1024**3))
+    n = ba_parallel_workers(8, per_worker_bytes=1024**3)
+    assert n == (10 * 1024 - _BA_RESERVE_MB) // 1024
+
+
+def test_ba_parallel_workers_subtracts_own_rss(monkeypatch):
+    """任务预算是总量：本进程已占 20 GB 时，23.4 GB 预算只剩 3.4 GB 可分。"""
+    monkeypatch.setattr("ms_mosaic.at.cpu_cap", lambda: 10)
+    monkeypatch.setattr("ms_mosaic.at.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.at.resolve_memory_budget", lambda _gb: int(23.4 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.at.process_rss_bytes", lambda: int(20 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(64 * 1024**3))
+    n = ba_parallel_workers(8, per_worker_bytes=1024**3)
+    assert n == max(1, (int(3.4 * 1024) - _BA_RESERVE_MB) // 1024)
+
+
+def test_summarize_observations_per_image():
+    at = ATResult(
+        cameras={},
+        poses={},
+        points=np.zeros((2, 3)),
+        observations=[
+            Observation(5, 0, np.zeros(2)),
+            Observation(5, 1, np.zeros(2)),
+            Observation(9, 1, np.zeros(2)),
+        ],
+        residuals_px=np.array([1.0, 2.0, 3.0]),
+    )
+    at.summarize_observations(drop=True)
+    assert at.observations == []
+    assert at.obs_counts == {5: 2, 9: 1}
+    assert at.obs_sq_residual == {5: 5.0, 9: 9.0}
+
+
 def test_ba_parallel_workers_caps_by_memory(monkeypatch):
     """24GB 引擎上 8 波段不能全开，否则交会后的平差会被系统杀掉。"""
     monkeypatch.setattr("ms_mosaic.at.cpu_cap", lambda: 10)
     monkeypatch.setattr("ms_mosaic.at.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.at.process_rss_bytes", lambda: 0)
     monkeypatch.setattr(
         "ms_mosaic.at.resolve_memory_budget",
         lambda _gb: int(23.4 * 1024**3),
@@ -313,6 +439,7 @@ def test_ba_parallel_workers_caps_by_memory(monkeypatch):
 
 def test_ba_parallel_workers_keeps_full_when_ram_plenty(monkeypatch):
     monkeypatch.setattr("ms_mosaic.at.cpu_cap", lambda: 10)
+    monkeypatch.setattr("ms_mosaic.at.process_rss_bytes", lambda: 0)
     monkeypatch.setattr("ms_mosaic.at.job_memory_gb", lambda: 48.0)
     monkeypatch.setattr(
         "ms_mosaic.at.resolve_memory_budget",

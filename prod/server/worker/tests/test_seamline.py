@@ -10,6 +10,7 @@ import pytest
 from ms_mosaic.ortho import WarpedStack
 from ms_mosaic.seamline import (
     SeamConfig,
+    SeamCost,
     compose,
     data_cost,
     energy,
@@ -53,6 +54,20 @@ def test_seam_cost_grows_with_view_difference():
     px = np.stack([a, a + 30.0])[:, None]
     s = seam_cost_volume(make_stack(px, np.ones((2, 8, 8))), SeamConfig())
     assert s[0, 1].min() > 25.0
+
+
+def test_seam_cost_on_demand_matches_volume():
+    rng = np.random.default_rng(7)
+    px = (rng.random((5, 3, 12, 10)) * 200).astype(np.float32)
+    px[1, :, :4] = np.nan
+    px[3, :, :, 6:] = np.nan
+    stack = make_stack(px, np.ones((5, 12, 10)))
+    vol = seam_cost_volume(stack, SeamConfig())
+    lazy = SeamCost(stack, SeamConfig())
+    l1, l2 = rng.integers(0, 5, 500), rng.integers(0, 5, 500)
+    r, c = rng.integers(0, 12, 500), rng.integers(0, 10, 500)
+    np.testing.assert_array_equal(lazy[l1, l2, r, c], vol[l1, l2, r, c])
+    assert lazy[l1, l2, r, c].dtype == np.float64
 
 
 def test_single_view_labels_everything_zero():

@@ -28,13 +28,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from ms_mosaic.cpu import cpu_cap
-from ms_mosaic.memory import cap_workers, job_memory_gb, resolve_memory_budget
+from ms_mosaic.memory import cap_workers, job_memory_gb, process_rss_bytes, resolve_memory_budget
 
-# spawn 后每个进程各自解码影像缓存，不能按 fork 的写时复制来估。
-# 按 2GB/进程、36GB 预算会放出 14 个正射进程，任务子进程被系统杀掉（exit -9）。
-# 按 4GB/进程估算，36GB 预算最多 7 个，并仍然不能超过此刻剩余内存。
+# 调用方不知道影像规模时的保守单进程估计。正射/密集应按缓存字节 + 单块工作内存传入实估值。
 TILE_WORKER_MB = 4096
-TILE_RESERVE_MB = 8192
+# 剩余内存是实时读的（已扣本进程），预算也扣了本进程 RSS；这里只留其它容器波动的余量。
+TILE_RESERVE_MB = 1536
+# 单进程除影像缓存外的开销：解释器 + numpy/scipy/cv2/rasterio 约 300 MB，
+# 一个 480² 块的多视角栈、图割与金字塔融合按 10 视角 3 波段约数百 MB。
+TILE_WORK_MB = 1024
 
 Window = tuple[int, int, int, int]
 
@@ -43,15 +45,20 @@ Window = tuple[int, int, int, int]
 CACHE_PER_WORKER = 48
 
 
+def tile_worker_mb(image_bytes: int, *, cache: int = CACHE_PER_WORKER, work_mb: int = TILE_WORK_MB) -> int:
+    """单进程内存估计：缓存满时的影像字节 + 单块工作内存。"""
+    return int(-(-int(cache) * int(image_bytes) // 2**20) + int(work_mb))
+
+
 def default_workers() -> int:
     """默认进程数。有任务 CPU 预算时按预算封顶，否则留一核给系统。"""
     return cpu_cap()
 
 
-def resolve_workers(requested: int | None) -> int:
+def resolve_workers(requested: int | None, *, per_worker_mb: int | None = None) -> int:
     """requested 为 None 取默认值，<=1 表示串行（便于调试与测试）。
 
-    任务内存预算只作上限。进程数还要看此刻剩余内存，避免 14 个正射进程把任务杀掉。
+    进程数 = CPU ∩（任务预算 − 本进程已占 ∩ 此刻剩余）÷ 单进程估计。
     """
     if requested is None:
         n = default_workers()
@@ -61,12 +68,48 @@ def resolve_workers(requested: int | None) -> int:
         return 1
     gb = job_memory_gb()
     budget = resolve_memory_budget(gb if gb is not None and gb > 0 else 0)
+    if budget is not None:
+        budget = max(0, budget - (process_rss_bytes() or 0))
     return cap_workers(
         n,
-        per_worker_mb=TILE_WORKER_MB,
+        per_worker_mb=int(per_worker_mb or TILE_WORKER_MB),
         reserve_mb=TILE_RESERVE_MB,
         budget_bytes=budget,
     )
+
+
+def prefer_oom_kill() -> None:
+    """让内核在内存不足时优先杀计算子进程，而不是持有整个任务状态的主进程。
+
+    子进程被杀时 map_tiles 能收到 BrokenProcessPool 并减半续跑；主进程被杀任务就整段失败。
+    调高 oom_score_adj 不需要特权。
+    """
+    try:
+        with open("/proc/self/oom_score_adj", "w", encoding="ascii") as fh:
+            fh.write("1000")
+    except OSError:
+        pass
+
+
+def peak_rss_mb() -> float:
+    """本进程生命周期内的峰值常驻内存（MB）。
+
+    优先读 VmHWM：Linux 的 ru_maxrss 会经 fork/exec 继承父进程的峰值，
+    spawn 出的子进程报的其实是主进程的数（曾把 1.1 GB 的子进程报成 3.6 GB）。
+    """
+    try:
+        with open("/proc/self/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024.0
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def split_ortho_pools(n_bands: int, tile_workers: int) -> tuple[int, int]:
@@ -119,12 +162,14 @@ def _init_worker(setup: Callable[[], Any]) -> None:
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(var, "1")
+    prefer_oom_kill()
     _WORKER_STATE["ctx"] = setup()
 
 
-def _run_job(fn: Callable[[Any, Window], Any], job: TileJob) -> list[tuple[int, Any]]:
+def _run_job(fn: Callable[[Any, Window], Any], job: TileJob) -> tuple[list[tuple[int, Any]], float]:
     ctx = _WORKER_STATE["ctx"]
-    return [(k, fn(ctx, w)) for k, w in zip(job.indices, job.windows)]
+    out = [(k, fn(ctx, w)) for k, w in zip(job.indices, job.windows)]
+    return out, peak_rss_mb()
 
 
 def map_tiles(
@@ -135,17 +180,22 @@ def map_tiles(
     workers: int | None = None,
     log: Callable[[str], None] | None = None,
     label: str = "分块计算",
+    per_worker_mb: int | None = None,
 ) -> Iterable[tuple[int, Window, Any]]:
     """并行遍历格网块，按完成顺序产出 (块下标, 窗口, 结果)。
 
     setup 与 fn 必须是模块级可 pickle 的对象（不能是 lambda 或闭包）。
     workers <= 1 时在当前进程直接跑，便于打断点调试。
+    per_worker_mb 为单进程内存估计，用于按内存封顶进程数。
     """
     windows = list(windows)
-    n = resolve_workers(workers)
+    n = resolve_workers(workers, per_worker_mb=per_worker_mb)
     total = len(windows)
     if not windows:
         return
+    if log is not None:
+        est = f"，单进程估 {per_worker_mb} MB" if per_worker_mb else ""
+        log(f"{label}：{total} 块，{n} 进程{est}")
 
     if n == 1:
         ctx = setup()
@@ -162,11 +212,10 @@ def map_tiles(
     chunks = spatial_chunks(windows, n * 2)  # 每进程分两段，缓解块间耗时不均
     jobs = [TileJob(c, [windows[k] for k in c]) for c in chunks]
     done = 0
-    if log is not None:
-        log(f"{label}：{total} 块 / {len(jobs)} 段 / {n} 进程")
     ctx = multiprocessing.get_context("spawn")
     remaining = list(jobs)
     n_now = n
+    peak_mb = 0.0
     while remaining:
         finished: list[int] = []
         try:
@@ -179,12 +228,16 @@ def map_tiles(
                 futs = {pool.submit(_run_job, fn, job): i for i, job in enumerate(remaining)}
                 for fut in as_completed(futs):
                     idx = futs[fut]
-                    for k, result in fut.result():
+                    results, job_peak = fut.result()
+                    peak_mb = max(peak_mb, job_peak)
+                    for k, result in results:
                         yield k, windows[k], result
                         done += 1
                         if log is not None and (done == total or done % 10 == 0):
                             log(f"{label} {done}/{total} 块")
                     finished.append(idx)
+            if log is not None and peak_mb > 0:
+                log(f"{label} 子进程实测峰值 {peak_mb:.0f} MB")
             return
         except BrokenProcessPool:
             remaining = [job for i, job in enumerate(remaining) if i not in finished]
