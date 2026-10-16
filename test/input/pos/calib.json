@@ -1,0 +1,13 @@
+{
+  "gain": 0.01,
+  "offset": 0.0,
+  "panel_reflectance": 0.6,
+  "alt_m": 120.0,
+  "focal_mm": 8.0,
+  "pixel_um": 5.5,
+  "lever_e_m": 0.12,
+  "lever_n_m": -0.08,
+  "lever_u_m": 0.05,
+  "bit_depth": 16,
+  "note": "演示定标；gain/offset 不是真实相机实验室系数"
+}

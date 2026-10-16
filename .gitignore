@@ -1,0 +1,51 @@
+# 本目录同步到 https://github.com/spjiang/spectrum-mosaic
+# 大文件 / 本机产物 / 密钥不进公开可部署树
+
+.env
+**/.env
+!**/.env.example
+
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/node_modules/
+**/.DS_Store
+*.pyc
+*.pyo
+
+# 跑数与缓存
+**/runs/
+prod/runs/
+prod/server/worker/runs/
+prod/server/data/output/runs/**
+!prod/server/data/output/runs/.gitkeep
+prod/server/data/input/**
+!prod/server/data/input/.gitkeep
+prod/server/data/.inspect/
+prod/server/data/.worker/
+prod/server/frontend/dist/
+prod/server/.run/
+prod/visual_server/
+
+# 需求测区与商业样例（数十 GB）
+prod/docs/需求/
+**/*.tif
+**/*.TIF
+**/*.tiff
+**/*.jpg
+**/*.JPG
+**/*.jpeg
+**/*.png
+**/*.zip
+**/*.npz
+**/*.las
+**/*.laz
+
+# 旧实验与本机调试
+test/work/
+test/out/
+test/input_bench/
+test/__pycache__/
+qgis-test/
+docs/颜色验证/

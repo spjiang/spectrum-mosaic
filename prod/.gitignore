@@ -1,0 +1,6 @@
+runs/
+source/.pytest_cache/
+source/**/__pycache__/
+*.zip
+*.tif
+docs/需求/测试正式数据/

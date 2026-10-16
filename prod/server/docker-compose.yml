@@ -1,0 +1,112 @@
+name: server
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mosaic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mosaic_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-mosaic_visual}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mosaic} -d ${POSTGRES_DB:-mosaic_visual}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-mosaic}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-mosaic_secret}
+      # 默认 30 分钟未 ack 会掐消费通道。任务已在 Worker 进程内跑，仍把超时拉长以免重投。
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 86400000"
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mosaic}:${POSTGRES_PASSWORD:-mosaic_secret}@postgres:5432/${POSTGRES_DB:-mosaic_visual}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      DATA_ROOTS: /data
+      DEFAULT_INPUT_DIR: /data/input/MAX_20251017/MAX_20251017_001
+      DEFAULT_OUTPUT_DIR: /data/output/runs
+      BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin123}
+      CLI_GUIDE_PATH: /cli_docs/cli-usage.md
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./db/migrations:/db/migrations:ro
+      - ./data:/data
+      - ${DATASET_MAX_20251017:-./data/input/MAX_20251017/MAX_20251017_001}:/data/input/MAX_20251017/MAX_20251017_001:ro
+      - ./worker/docs:/cli_docs:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build: ./worker
+    # 不设 mem_limit：Worker 可用尽 Docker 引擎内存。
+    # Mac Docker Desktop 上这不等于宿主机内存，而是 Settings → Resources → Memory。
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
+      PYTHONPATH: /app
+      MPLBACKEND: Agg
+      DATA_ROOTS: /data
+      WORKER_STATUS_PATH: /data/.worker/status.json
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - ./worker:/app
+      - ./data:/data
+      - ${DATASET_MAX_20251017:-./data/input/MAX_20251017/MAX_20251017_001}:/data/input/MAX_20251017/MAX_20251017_001:ro
+    working_dir: /app
+    shm_size: "16gb"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    init: true
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import numpy, cv2, rasterio, pika, ms_mosaic"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 45s
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  pgdata:
+    name: visual_server_pgdata

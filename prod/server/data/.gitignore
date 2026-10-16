@@ -1,0 +1,12 @@
+# 测区数据（不要提交原始影像）
+input/*
+!input/.gitkeep
+!input/MAX_20251017/
+!input/MAX_20251017/.gitkeep
+output/runs/*
+!output/runs/.gitkeep
+**/.DS_Store
+**/*.tif
+**/*.jpg
+**/*.JPG
+**/*.TIF
