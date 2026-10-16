@@ -675,65 +675,94 @@ def _separable_bands(problem: BAProblem) -> list[_SchurBand] | None:
     return bands
 
 
-def _assemble_band(problem: BAProblem, band: _SchurBand, x: np.ndarray, huber_px: float):
-    """组出一个波段的法方程。与整块组装时该波段对应的子块相同。"""
-    a, d, b, r, centers, rotmats, intr_full = problem.linearize(x, band.obs_idx)
-    if r.size:
-        weight, _ = _huber_weights(r, huber_px)
-        sw = np.sqrt(weight)[:, None, None]
-        a = a * sw
-        d = d * sw
-        b = b * sw
-        rw = r * np.sqrt(weight)[:, None]
-    else:
-        b = np.zeros((0, 2, 3))
-        rw = np.zeros((0, 2))
+def band_worker_bytes(n_obs: int, n_pts: int, nc: int, n_free: int, *, chunk: int = _BA_CHUNK_OBS) -> int:
+    """一路波段平差（组装 + Schur 消元）的峰值内存估计，系数用 tracemalloc 实测标定。
+
+    组装按观测分块，雅可比只驻留一块；跨块累加的 W、消元时的 Y=W·V⁻¹
+    与观测数成正比；降阶矩阵 S 及其副本是 nc² 稠密阵。
+    """
+    width = 6 + int(n_free)
+    per_chunk_obs = min(int(n_obs), int(chunk))
+    w_nnz = int(n_obs) * 18 + int(n_pts) * 3 * int(n_free)
+    return int(
+        per_chunk_obs * _BA_BYTES_PER_CHUNK_OBS * width / 16
+        + w_nnz * _BA_BYTES_PER_W_NNZ
+        + int(n_pts) * _BA_BYTES_PER_POINT
+        + int(nc) * int(nc) * 8 * _BA_DENSE_COPIES
+    )
+
+
+def _assemble_band(
+    problem: BAProblem,
+    band: _SchurBand,
+    x: np.ndarray,
+    huber_px: float,
+    *,
+    chunk: int = _BA_CHUNK_OBS,
+):
+    """组出一个波段的法方程。与整块组装时该波段对应的子块相同。
+
+    JᵀJ、Jᵀr 对观测可加，按块线性化再累加，结果与一次组装相同，
+    但雅可比（每观测约 2 KB）只驻留一块，峰值不再随波段观测数增长。
+    """
+    _, centers, intr_full, _, rotmats = problem.state(x)
     gps_res, att_res, intr_res = problem.prior_residuals(centers, rotmats, intr_full)
     nc = band.nc
     n_obs = int(band.obs_idx.size)
     n_pts = band.n_pts
     width = 6 + problem.n_free
-    if n_obs:
-        jc_blocks = np.concatenate([a, d], axis=2)
-        row_base = np.arange(n_obs) * 2
+    u = np.zeros((nc, nc))
+    w = None
+    g_c = np.zeros(nc)
+    g_p = np.zeros(n_pts * 3)
+    v = np.zeros((n_pts, 3, 3))
+    step = max(1, int(chunk))
+    for start in range(0, n_obs, step):
+        sl = slice(start, start + step)
+        a, d, b, r, _, _, _ = problem.linearize(x, band.obs_idx[sl])
+        m = int(r.shape[0])
+        weight, _ = _huber_weights(r, huber_px)
+        sw = np.sqrt(weight)
+        jc_blocks = np.concatenate([a, d], axis=2) * sw[:, None, None]
+        del a, d
+        b = b * sw[:, None, None]
+        rvec = (r * sw[:, None]).ravel()
+        del r, weight, sw
+        cam_cols = band.cam_cols[sl]
+        point_cols = band.point_cols[sl]
+        row_base = np.arange(m) * 2
         rows = np.repeat(row_base, width)
         jc = coo_matrix(
             (
                 np.concatenate([jc_blocks[:, 0, :].ravel(), jc_blocks[:, 1, :].ravel()]),
                 (
                     np.concatenate([rows, rows + 1]),
-                    np.concatenate([band.cam_cols.ravel(), band.cam_cols.ravel()]),
+                    np.concatenate([cam_cols.ravel(), cam_cols.ravel()]),
                 ),
             ),
-            shape=(n_obs * 2, nc),
+            shape=(m * 2, nc),
         ).tocsr()
+        del jc_blocks, rows
         rows3 = np.repeat(row_base, 3)
         jp = coo_matrix(
             (
                 np.concatenate([b[:, 0, :].ravel(), b[:, 1, :].ravel()]),
                 (
                     np.concatenate([rows3, rows3 + 1]),
-                    np.concatenate([band.point_cols.ravel(), band.point_cols.ravel()]),
+                    np.concatenate([point_cols.ravel(), point_cols.ravel()]),
                 ),
             ),
-            shape=(n_obs * 2, max(n_pts, 1) * 3),
+            shape=(m * 2, n_pts * 3),
         ).tocsr()
-        if n_pts == 0:
-            jp = coo_matrix((n_obs * 2, 0))
-        rvec = rw.ravel()
-        u = np.asarray((jc.T @ jc).todense())
-        w = (jc.T @ jp).tocsr() if n_pts else None
-        g_c = -(jc.T @ rvec)
-        g_p = -(jp.T @ rvec) if n_pts else np.zeros(0)
-        v = np.zeros((n_pts, 3, 3))
-        if n_pts:
-            np.add.at(v, band.point_cols[:, 0] // 3, np.einsum("nki,nkj->nij", b, b))
-    else:
-        u = np.zeros((nc, nc))
-        w = None
-        g_c = np.zeros(nc)
-        g_p = np.zeros(n_pts * 3)
-        v = np.zeros((n_pts, 3, 3))
+        del rows3
+        u += (jc.T @ jc).toarray()
+        part = (jc.T @ jp).tocsr()
+        w = part if w is None else (w + part).tocsr()
+        del part
+        g_c -= jc.T @ rvec
+        g_p -= jp.T @ rvec
+        np.add.at(v, point_cols[:, 0] // 3, np.einsum("nki,nkj->nij", b, b))
+        del jc, jp, b, rvec
 
     local = np.arange(band.n_img)
     for k in range(3):

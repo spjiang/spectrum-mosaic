@@ -22,6 +22,8 @@ prod/server/data/output/**
 !prod/server/data/output/runs/.gitkeep
 prod/server/data/.inspect/
 prod/server/data/.worker/
+prod/server/.run/
+prod/server/frontend/dist/
 
 # 下列与 data 同类、体积过大（GitHub 放不下）；sync 脚本默认也排除。
 # INCLUDE_ALL_DATASETS=1 时可尝试纳入（仍受 100MB 单文件限制）。

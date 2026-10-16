@@ -32,6 +32,8 @@ RSYNC_EXCLUDES=(
   --exclude '**/venv/'
   --exclude '**/node_modules/'
   --exclude '**/.DS_Store'
+  --exclude 'prod/server/.run/'
+  --exclude 'prod/server/frontend/dist/'
   # 唯一指定的数据集目录
   --exclude 'prod/server/data/input/**'
   --exclude 'prod/server/data/output/**'
