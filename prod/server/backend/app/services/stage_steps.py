@@ -518,13 +518,18 @@ def persist_stage_steps(job) -> dict:
     if not any(stages.values()):
         apply_step_clock(job, text, alive=alive, now=now)
         return {"stages": stored}
+    # 拼接线任务的日志只有重跑过的阶段。没出现在新日志里的阶段，保留从原任务复制来的分项。
+    merged = dict(stored)
+    for stage, steps in stages.items():
+        if steps:
+            merged[stage] = steps
     before_timings = dict(getattr(job, "stage_timings", None) or {})
-    if stored != stages:
-        job.stage_steps = stages
+    if stored != merged:
+        job.stage_steps = merged
     apply_step_clock(job, text, alive=alive, now=now)
-    if dict(job.stage_timings or {}) == before_timings and stored == stages:
-        return {"stages": stages}
-    return {"stages": stages}
+    if dict(job.stage_timings or {}) == before_timings and stored == merged:
+        return {"stages": merged}
+    return {"stages": merged}
 
 
 def sync_stage_steps(*, only_running: bool) -> None:

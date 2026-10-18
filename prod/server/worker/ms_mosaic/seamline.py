@@ -42,6 +42,13 @@ class SeamConfig:
     max_cycles: int = MAX_CYCLES
     gradient_weight: float = GRADIENT_WEIGHT
     invalid_cost: float = INVALID_COST
+    # 人工指定优先影像（全局影像号）。有效处数据项低于其余视角，图割轮数不变。
+    # Boykov & Jolly, ICCV 2001：用户约束进数据项，平滑项仍是接缝可见度。
+    prefer_ids: tuple[int, ...] = ()
+    prefer_factor: float = 0.25
+    prefer_margin: float = 1.0
+    # 人工圈定的来源影像，(h, w)，-1 表示仍由图割决定。Boykov & Jolly, ICCV 2001。
+    constraint: np.ndarray | None = None
 
 
 def data_cost(stack: WarpedStack, cfg: SeamConfig) -> np.ndarray:
@@ -52,7 +59,27 @@ def data_cost(stack: WarpedStack, cfg: SeamConfig) -> np.ndarray:
         return np.full(scores.shape, cfg.invalid_cost, np.float64)
     lo, hi = np.nanmin(scores), np.nanmax(scores)
     norm = (scores - lo) / max(hi - lo, 1e-9)
-    return np.where(valid, 1.0 - norm, cfg.invalid_cost).astype(np.float64)
+    cost = np.where(valid, 1.0 - norm, cfg.invalid_cost).astype(np.float64)
+    wanted = {int(i) for i in cfg.prefer_ids}
+    if wanted:
+        # 优先影像之间仍按质量分排序；非优先影像整体抬高，有效处不会压过优先影像。
+        # 平滑项不改，接缝仍可以躲开两张影像差异大的位置。
+        for k, vid in enumerate(stack.views):
+            if int(vid) in wanted:
+                cost[k] = np.where(valid[k], cost[k] * float(cfg.prefer_factor), cost[k])
+            else:
+                cost[k] = np.where(valid[k], cost[k] + float(cfg.prefer_margin), cost[k])
+    forced = cfg.constraint
+    if forced is not None:
+        own_valid = np.zeros(forced.shape, dtype=bool)
+        for k, vid in enumerate(stack.views):
+            own = (forced == int(vid)) & valid[k]
+            own_valid |= own
+            cost[k] = np.where(own, 0.0, cost[k])
+        for k, vid in enumerate(stack.views):
+            ban = own_valid & (forced != int(vid))
+            cost[k] = np.where(ban, cfg.invalid_cost, cost[k])
+    return cost
 
 
 def _view_intensity(stack: WarpedStack) -> np.ndarray:

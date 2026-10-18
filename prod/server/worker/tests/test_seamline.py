@@ -214,6 +214,28 @@ def test_graph_cut_beats_greedy_with_three_views():
         assert got <= 2.0 * best + 1e-6
 
 
+def test_painted_region_locks_that_image():
+    scores = np.stack([np.full((4, 4), 0.95), np.full((4, 4), 0.1)])
+    stack = make_stack(np.zeros((2, 1, 4, 4)), scores)
+    forced = np.full((4, 4), 1, np.int32)
+    labels = optimal_labels(stack, SeamConfig(constraint=forced))
+    assert (labels == 1).all()
+    assert SeamConfig().max_cycles == 3
+
+
+def test_prefer_ids_win_data_term_without_changing_cycles():
+    """指定影像即使质量分更低，数据项仍低于其它有效视角；图割轮数不变。"""
+    scores = np.stack([np.full((4, 4), 0.2), np.full((4, 4), 0.9)])
+    stack = make_stack(np.zeros((2, 1, 4, 4)), scores)
+    plain = data_cost(stack, SeamConfig())
+    preferred = data_cost(stack, SeamConfig(prefer_ids=(0,)))
+    assert plain[1].max() < plain[0].min()
+    assert preferred[0].max() < preferred[1].min()
+    assert SeamConfig().max_cycles == 3
+    labels = optimal_labels(stack, SeamConfig(prefer_ids=(0,)))
+    assert (labels == 0).all()
+
+
 def test_expansion_is_stable_when_already_optimal():
     """已经是最优解时再跑图割不应改变结果。"""
     h = w = 24

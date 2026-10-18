@@ -616,7 +616,8 @@ def _match_on_grid(
         log(
             f"{label}：格网 {grid.width}x{grid.height} @ {grid.gsd:.4f} m，"
             f"±{cfg.z_margin_m:.1f} m × {cfg.n_layers} 层，"
-            f"影像 {img_gsd:.4f} m/px → 金字塔第 {level} 级（{img_gsd * (1 << level):.4f} m/px）"
+            f"影像 {img_gsd:.4f} m/px → 金字塔第 {level} 级（{img_gsd * (1 << level):.4f} m/px，"
+            f"格网越粗用越粗的影像层）"
             f"，残余抗锯齿 {sigma:.2f} px"
         )
 

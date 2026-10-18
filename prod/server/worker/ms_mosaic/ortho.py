@@ -240,6 +240,7 @@ def select_views(
     cameras: dict[int, Camera],
     poses: dict[int, Pose],
     cfg: OrthoConfig,
+    ensure_ids: tuple[int, ...] = (),
 ) -> list[int]:
     """挑出覆盖该块的影像，正下视优先。"""
     row0, col0, rows, cols = window
@@ -264,7 +265,84 @@ def select_views(
             continue
         scored.append((-int(hit.sum()), tilt, idx))
     scored.sort()
-    return [idx for _, _, idx in scored[: cfg.max_views]]
+    chosen = [idx for _, _, idx in scored[: cfg.max_views]]
+    covered = {idx for _, _, idx in scored}
+    for eid in ensure_ids:
+        eid = int(eid)
+        if eid in chosen or eid not in covered:
+            continue
+        if len(chosen) < cfg.max_views:
+            chosen.append(eid)
+        else:
+            chosen[-1] = eid
+    return chosen
+
+
+def _warp_view(
+    camera: Camera,
+    pose: Pose,
+    pts: np.ndarray,
+    has_z: np.ndarray,
+    drop: np.ndarray,
+    *,
+    gsd: float,
+    cfg: OrthoConfig,
+):
+    """一个视角的投影、遮挡和几何质量分。与影像灰度无关。
+
+    返回 (u, v, sel, score)；没有可见点时返回 None。score 只在 sel 上有定义。
+    """
+    u, v, ok = project(camera, pose, pts)
+    inside = ok & camera.in_bounds(u, v, margin=cfg.edge_margin_px) & has_z
+    if not inside.any():
+        return None
+    seen = visibility_zbuffer(
+        camera, pose, pts, u, v, inside,
+        tolerance_m=cfg.occlusion_tolerance_m,
+        drop_m=drop,
+        gsd=gsd,
+        max_sub=cfg.facade_max_samples,
+    )
+    if not seen.any():
+        return None
+    sel = np.nonzero(seen)[0]
+    score = view_score(camera, pose, pts[sel], u[sel], v[sel])
+    return u, v, sel, score
+
+
+def _geometry_key(camera: Camera, shot: int) -> tuple:
+    return (int(shot), int(camera.width), int(camera.height), camera.to_vector().tobytes())
+
+
+def share_rectification(
+    groups: list[tuple[dict[int, Camera], dict[int, Pose], dict[int, int]]],
+) -> bool:
+    """各波段同一曝光的内参和外方位是否相同，从而可以共用投影和遮挡。"""
+    if len(groups) < 2:
+        return False
+    ref_cam = next(iter(groups[0][0].values()))
+    ref_vec = ref_cam.to_vector()
+    poses_by_shot: dict[int, Pose] = {}
+    for cameras, poses, shot_of in groups:
+        cam = next(iter(cameras.values()))
+        if cam.width != ref_cam.width or cam.height != ref_cam.height:
+            return False
+        if not np.array_equal(cam.to_vector(), ref_vec):
+            return False
+        if any(not np.array_equal(c.to_vector(), ref_vec) for c in cameras.values()):
+            return False
+        for idx, shot in shot_of.items():
+            pose = poses[idx]
+            prev = poses_by_shot.get(shot)
+            if prev is None:
+                poses_by_shot[shot] = pose
+                continue
+            if not (
+                np.array_equal(prev.rotation, pose.rotation)
+                and np.array_equal(prev.center, pose.center)
+            ):
+                return False
+    return True
 
 
 def orthorectify_tile(
@@ -275,15 +353,21 @@ def orthorectify_tile(
     poses: dict[int, Pose],
     images: NativeImageCache,
     cfg: OrthoConfig | None = None,
+    geom_cache: dict | None = None,
+    shot_of: dict[int, int] | None = None,
+    ensure_ids: tuple[int, ...] = (),
 ) -> WarpedStack:
-    """把覆盖该块的每个视角都重采样到正射格网上。z 为该块的 DSM 高程。"""
+    """把覆盖该块的每个视角都重采样到正射格网上。z 为该块的 DSM 高程。
+
+    geom_cache 按曝光缓存投影和遮挡。视角上限、立面层数仍取 cfg，不因缓存而减少。
+    """
     cfg = cfg or OrthoConfig()
     row0, col0, rows, cols = window
     xs, ys = grid.cell_centers(window)
     has_z = np.isfinite(z)
     z_mid = float(np.nanmedian(z)) if has_z.any() else 0.0
 
-    views = select_views(grid, window, z_mid, cameras, poses, cfg)
+    views = select_views(grid, window, z_mid, cameras, poses, cfg, ensure_ids)
     if not views or not has_z.any():
         return WarpedStack(window, [], np.zeros((0, 1, rows, cols), np.float32),
                            np.full((0, rows, cols), np.nan, np.float32))
@@ -291,6 +375,7 @@ def orthorectify_tile(
     # 无高程的格网无法做真正射，直接排除
     pts = np.stack([xs.ravel(), ys.ravel(), np.where(has_z, z, z_mid).ravel()], axis=1)
     drop = neighbor_drop(np.where(has_z, z, np.nan)).ravel()
+    has_flat = has_z.ravel()
 
     n_bands = images[views[0]].shape[0]
     pixels = np.full((len(views), n_bands, rows * cols), np.nan, np.float32)
@@ -298,29 +383,26 @@ def orthorectify_tile(
 
     for k, idx in enumerate(views):
         cam, pose = cameras[idx], poses[idx]
-        u, v, ok = project(cam, pose, pts)
-        inside = ok & cam.in_bounds(u, v, margin=cfg.edge_margin_px) & has_z.ravel()
-        if not inside.any():
+        key = None
+        if geom_cache is not None and shot_of is not None and idx in shot_of:
+            key = _geometry_key(cam, shot_of[idx])
+        if key is not None and key in geom_cache:
+            warp = geom_cache[key]
+        else:
+            warp = _warp_view(cam, pose, pts, has_flat, drop, gsd=grid.gsd, cfg=cfg)
+            if key is not None:
+                geom_cache[key] = warp
+        if warp is None:
             continue
-        seen = visibility_zbuffer(
-            cam, pose, pts, u, v, inside,
-            tolerance_m=cfg.occlusion_tolerance_m,
-            drop_m=drop,
-            gsd=grid.gsd,
-            max_sub=cfg.facade_max_samples,
-        )
-        if not seen.any():
-            continue
+        u, v, sel, geo_score = warp
         img = images[idx]
-        sel = np.nonzero(seen)[0]
         for b in range(n_bands):
             pixels[k, b, sel] = _sample_bilinear(img[b], u[sel], v[sel])
-        s = view_score(cam, pose, pts[sel], u[sel], v[sel])
         # 采样越界（返回 nan）的点同样要判无效
         good = np.isfinite(pixels[k, :, sel]).all(axis=1) if n_bands > 1 else np.isfinite(
             pixels[k, 0, sel]
         )
-        scores[k, sel] = np.where(good, s, np.nan)
+        scores[k, sel] = np.where(good, geo_score, np.nan)
 
     return WarpedStack(
         window,

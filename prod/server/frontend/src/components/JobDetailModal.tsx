@@ -3,6 +3,7 @@ import { Button, Descriptions, Modal, Progress, Space, Typography, message } fro
 import { DownloadOutlined, FilePdfOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { formatNo } from "../ids";
+import { gpuLabel } from "../gpuLabel";
 import { attachJobProcesses } from "../processTree";
 import JobActions from "./JobActions";
 import JobProcessTable from "./JobProcessTable";
@@ -155,6 +156,16 @@ export default function JobDetailModal({
               </Descriptions.Item>
               <Descriptions.Item label="任务 CPU">
                 {job.cpus ? `${job.cpus} 核` : "自动（按引擎 CPU）"}
+              </Descriptions.Item>
+              <Descriptions.Item label="任务 GPU">{gpuLabel(job.gpu ?? job.params_snapshot?.gpu)}</Descriptions.Item>
+              <Descriptions.Item label="任务显存">
+                {job.gpu_memory_gb ? `${job.gpu_memory_gb} GB` : "自动（空闲显存 85%）"}
+              </Descriptions.Item>
+              <Descriptions.Item label="原始分辨率">
+                {job.native_gsd_m ? `${Number(job.native_gsd_m).toFixed(4)} m` : "—"}
+              </Descriptions.Item>
+              <Descriptions.Item label="拼图分辨率">
+                {job.ortho_gsd_m ? `${Number(job.ortho_gsd_m).toFixed(4)} m` : "—"}
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">{formatJobDateTime(job.created_at)}</Descriptions.Item>
               <Descriptions.Item label="结束时间">{formatJobDateTime(job.finished_at)}</Descriptions.Item>

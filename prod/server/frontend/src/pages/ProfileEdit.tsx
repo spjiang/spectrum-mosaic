@@ -93,6 +93,16 @@ function FieldEditor({
           options={STAGES.map((s) => ({ value: s, label: `${STAGE_META[s].label}（${s}）` }))}
           onChange={(v) => setValues({ ...values, [d.key]: v || null })}
         />
+      ) : d.key === "color_correction" ? (
+        <Select
+          style={{ width: "100%" }}
+          value={values[d.key] === "on" || values[d.key] === "off_for_ms" ? "on" : "off"}
+          options={[
+            { value: "off", label: "否" },
+            { value: "on", label: "是（只校正 RGB）" },
+          ]}
+          onChange={(v) => setValues({ ...values, [d.key]: v })}
+        />
       ) : d.key === "bands" ? (
         <Select
           mode="tags"

@@ -120,6 +120,8 @@ cd /Users/jiangshengping/wwwroot/shenzhen/spectrum/algorithm/projects/数据融�
 | `--match-reference-color` / `--no-match-reference-color` | `match_reference_color` |
 | `--memory-gb` | `memory_gb` |
 | `--cpus` | `cpus` |
+| `--gpu` | `gpu`（`auto` / `off` / 卡号） |
+| `--gpu-memory-gb` | `gpu_memory_gb` |
 
 ### 2 影像编目（S1_catalog · Catalog）
 

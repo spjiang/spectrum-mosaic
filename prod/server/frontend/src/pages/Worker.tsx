@@ -46,6 +46,13 @@ type Inspect = {
     processes?: Proc[];
     memory?: Memory;
     host_memory?: { mem_total_mb?: number | null; mem_available_mb?: number | null };
+    gpus?: {
+      runtime?: boolean;
+      available?: boolean;
+      reason?: string;
+      validated_stages?: string[];
+      devices?: { index: number; name: string; total_mb: number; free_mb: number; capability?: string }[];
+    };
   } | null;
 };
 
@@ -496,6 +503,30 @@ export default function WorkerPage() {
         </Row>
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0, fontSize: 12 }}>
           引擎可见总量是 Docker 分配给 Linux 虚拟机的内存，不是 macOS 宿主机全部内存。要用 36GB 任务预算，请把 Docker Desktop → Settings → Resources → Memory 调到 ≥ 36GB。
+        </Typography.Paragraph>
+      </Card>
+
+      <Card className="mosaic-panel" title="显卡">
+        {w?.gpus?.devices?.length ? (
+          <Table
+            size="small"
+            rowKey="index"
+            pagination={false}
+            dataSource={w.gpus.devices}
+            columns={[
+              { title: "卡号", dataIndex: "index", width: 70 },
+              { title: "型号", dataIndex: "name" },
+              { title: "计算能力", dataIndex: "capability", width: 100 },
+              { title: "显存总量", dataIndex: "total_mb", width: 120, render: (v: number) => fmtMb(v) },
+              { title: "当前空闲", dataIndex: "free_mb", width: 120, render: (v: number) => fmtMb(v) },
+            ]}
+          />
+        ) : null}
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0, fontSize: 12 }}>
+          {w?.gpus?.available
+            ? `GPU 运行库已就绪。已通过验收、会用 GPU 的阶段：${(w.gpus.validated_stages || []).join("、") || "暂无，全部走 CPU"}。`
+            : `${w?.gpus?.reason || "计算节点未上报显卡"}，任务全部使用 CPU，结果相同。`}
+          显卡信息每 60 秒刷新一次。
         </Typography.Paragraph>
       </Card>
 

@@ -313,6 +313,8 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "014_flatten_edge_and_profile.sql")
     _ensure_sql_named(db, "015_edge_trim_zero.sql")
     _ensure_sql_named(db, "016_job_stage_steps.sql")
+    _ensure_sql_named(db, "017_gpu.sql")
+    _ensure_sql_named(db, "018_product_options.sql")
     _migrate_legacy_source_paths(db)
     user = db.scalar(select(User).where(User.username == settings.bootstrap_admin_user))
     if user is None:

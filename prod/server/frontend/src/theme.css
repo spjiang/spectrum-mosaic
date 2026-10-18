@@ -315,6 +315,452 @@ body,
   gap: 4px;
 }
 
+.job-action-popover .ant-popover-inner {
+  padding: 10px;
+}
+
+.job-action-card {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 460px;
+}
+
+.job-action-tile {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 36px;
+  padding: 2px 6px 2px 2px;
+  border: 1px solid var(--mosaic-border);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.job-action-tile .ant-btn {
+  flex: 1;
+  justify-content: flex-start;
+  height: 30px;
+  padding-inline: 8px;
+  border-radius: 8px;
+  font-weight: 600;
+  box-shadow: none;
+  white-space: nowrap;
+}
+
+.job-action-tile.is-primary .ant-btn {
+  color: #fff;
+  background: var(--mosaic-primary);
+  border-color: var(--mosaic-primary);
+}
+
+.job-action-tile.is-primary .ant-btn:not(:disabled):hover {
+  color: #fff;
+  background: #155a9e;
+  border-color: #155a9e;
+}
+
+.job-action-tile.is-green .ant-btn {
+  color: #fff;
+  background: var(--mosaic-success);
+  border-color: var(--mosaic-success);
+}
+
+.job-action-tile.is-green .ant-btn:not(:disabled):hover {
+  color: #fff;
+  background: #178554;
+  border-color: #178554;
+}
+
+.job-action-tile.is-amber .ant-btn {
+  color: #fff;
+  background: var(--mosaic-warning);
+  border-color: var(--mosaic-warning);
+}
+
+.job-action-tile.is-amber .ant-btn:not(:disabled):hover {
+  color: #fff;
+  background: #b87305;
+  border-color: #b87305;
+}
+
+.job-action-tile.is-danger .ant-btn {
+  color: #fff;
+  background: var(--mosaic-danger);
+  border-color: var(--mosaic-danger);
+}
+
+.job-action-tile.is-danger .ant-btn:not(:disabled):hover {
+  color: #fff;
+  background: #b32e0b;
+  border-color: #b32e0b;
+}
+
+.job-action-tile .ant-btn:disabled {
+  color: #94a3b8;
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+}
+
+.seam-page-card .ant-card-head-title {
+  font-weight: 650;
+}
+
+.seam-page-card.is-editor {
+  height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+}
+
+.seam-page-card.is-editor > .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.seam-page-card.is-editor .seam-workspace {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.seam-record-table .ant-table-thead > tr > th {
+  background: #f8fafc;
+  font-weight: 650;
+}
+
+.seam-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 12px;
+  height: calc(100vh - 250px);
+  min-height: 520px;
+}
+
+.seam-workspace.is-readonly {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.seam-stage {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  border-radius: 12px;
+  background: #0b1220;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.seam-viewport {
+  max-width: 100%;
+  max-height: 100%;
+  transform-origin: 0 0;
+}
+
+.seam-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.seam-zoom {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.seam-zoom .ant-btn {
+  color: #fff;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.seam-zoom .ant-btn:disabled {
+  color: rgba(255, 255, 255, 0.35);
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.seam-zoom-label {
+  min-width: 52px;
+  color: #fff;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.seam-toolbar {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.seam-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.seam-tool-help {
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: help;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.seam-tool-help:hover {
+  color: #fff;
+}
+
+.seam-toolbar .ant-btn {
+  color: #fff;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.seam-toolbar .ant-btn-primary {
+  color: #fff;
+  background: var(--mosaic-primary);
+  border-color: var(--mosaic-primary);
+}
+
+.seam-toolbar .ant-btn-dangerous {
+  color: #fff;
+  background: var(--mosaic-danger);
+  border-color: var(--mosaic-danger);
+}
+
+.seam-toolbar .ant-btn:disabled {
+  color: rgba(255, 255, 255, 0.35);
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.seam-inspector {
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.seam-inspector-empty {
+  color: var(--mosaic-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 8px 2px;
+}
+
+.seam-crop,
+.seam-hero {
+  position: relative;
+  margin: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0b1220;
+}
+
+.seam-crop img,
+.seam-hero img {
+  display: block;
+  width: 100%;
+  height: 148px;
+  object-fit: cover;
+}
+
+.seam-crop figcaption,
+.seam-hero figcaption {
+  padding: 6px 8px 8px;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.seam-photo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.seam-photo-card {
+  position: relative;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0b1220;
+}
+
+.seam-photo-card.is-on {
+  border-color: #d4380d;
+}
+
+.seam-photo-card button:first-child {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #e2e8f0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.seam-photo-zoom {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.seam-photo-zoom:hover {
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.seam-photo-modal {
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.seam-photo-modal img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.seam-photo-grid img,
+.seam-photo-empty {
+  display: block;
+  width: 100%;
+  height: 72px;
+  object-fit: cover;
+  background: #1e293b;
+}
+
+.seam-photo-grid span {
+  display: block;
+  padding: 4px 6px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.seam-flow {
+  width: 320px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.seam-step {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--mosaic-border);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.seam-step.is-current {
+  border-color: var(--mosaic-primary);
+  background: #f3f8fd;
+}
+
+.seam-step-no {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--mosaic-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 22px;
+  text-align: center;
+}
+
+.seam-step-title {
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+
+.seam-step p {
+  margin: 0 0 8px;
+  color: var(--mosaic-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.seam-step-status {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
+.seam-image-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seam-image-option img,
+.seam-image-option-empty {
+  width: 72px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #e8eef5;
+  flex: none;
+}
+
+.seam-image-preview {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--mosaic-muted);
+  font-size: 12px;
+}
+
+.seam-image-preview img {
+  width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #111;
+}
+
 .progress-help {
   max-width: 360px;
   font-size: 12px;

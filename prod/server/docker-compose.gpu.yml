@@ -1,0 +1,21 @@
+# 有 NVIDIA 显卡的机器叠加使用：
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# 只换 worker 的镜像并把显卡交给它，其余服务不变。
+# 只想给 worker 部分显卡时，把 count 改成 device_ids: ["0"] 之类。
+services:
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile.gpu
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${MOSAIC_GPUS:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import numpy, cv2, rasterio, pika, ms_mosaic, cupy"]

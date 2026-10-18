@@ -450,7 +450,12 @@ def write_quality_pdf(payload: dict, path: Path) -> Path:
                 ("融合层级", ortho.get("blend", "中")),
                 ("颜色校正", ortho.get("color_correction", "禁用")),
                 ("最大倾斜角", f"{ortho.get('max_tilt_deg', 60)} 度"),
-                ("分辨率", f"{_fmt(ortho.get('gsd'))} m"),
+                ("原始分辨率", f"{_fmt(ortho.get('native_gsd'))} m" if ortho.get("native_gsd") else "—"),
+                ("拼图分辨率", f"{_fmt(ortho.get('gsd'))} m"),
+                (
+                    "密集匹配金字塔",
+                    f"第 {ortho.get('pyramid_level')} 级" if ortho.get("pyramid_level") is not None else "—",
+                ),
             ]
         )
     )

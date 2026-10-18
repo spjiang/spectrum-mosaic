@@ -22,6 +22,7 @@ _PATH_KEYS = (
 )
 _FLOAT_KEYS = (
     "memory_gb",
+    "gpu_memory_gb",
     "min_agl_m",
     "max_tilt_deg",
     "sigma_xy_m",
@@ -60,6 +61,7 @@ _BOOL_KEYS = (
 )
 _STR_KEYS = (
     "products_dir_name",
+    "gpu",
     "run_mode",
     "start_stage",
     "stop_after_stage",
@@ -117,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(_flag("benchmark_dir"), type=Path, default=None, help="比对参考目录（Web: benchmark_dir）")
     parser.add_argument(_flag("memory_gb"), type=float, default=None, help="任务内存预算 GB（Web: memory_gb）")
     parser.add_argument(_flag("cpus"), type=int, default=None, help="任务 CPU 核数（Web: cpus）")
+    parser.add_argument(_flag("gpu"), default=None, help="任务 GPU：auto / off / 卡号（Web: gpu），默认 auto")
+    parser.add_argument(_flag("gpu_memory_gb"), type=float, default=None, help="任务显存上限 GB，0 为空闲显存 85%%（Web: gpu_memory_gb）")
 
     parser.add_argument(_flag("max_index"), type=int, default=None, help="最大影像编号（Web: max_index）")
     parser.add_argument(_flag("max_frames"), type=int, default=None, help="最大曝光数（Web: max_frames）")
@@ -189,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         _flag("color_correction"),
         default=None,
-        help="颜色校正（Web: color_correction），如 off_for_ms",
+        help="RGB 偏色处理（Web: color_correction）。默认 off；on 只校正 RGB",
     )
     parser.add_argument(_flag("workers_ortho"), type=int, default=None, help="正射并行度（Web: workers_ortho）")
     parser.add_argument(

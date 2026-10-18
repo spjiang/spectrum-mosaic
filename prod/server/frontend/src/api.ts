@@ -193,6 +193,95 @@ export const api = {
   jobs: () => request<any[]>("/api/jobs"),
   job: (id: string) => request<any>(`/api/jobs/${id}`),
   createJob: (body: any) => request("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
+  nativeGsd: (inputDir: string) =>
+    request<{
+      native_gsd_m: number;
+      n_samples: number;
+      choices: { scale: number; ortho_gsd_m: number; dsm_gsd_m: number }[];
+    }>(`/api/tools/native-gsd?input_dir=${encodeURIComponent(inputDir)}`),
+  evaluateJob: (id: string, n: number) =>
+    request<{
+      n_requested: number;
+      n_used: number;
+      threshold_px: number;
+      rms_px: number;
+      max_px: number;
+      mean_px: number;
+      n_over: number;
+      within_tolerance: boolean;
+      gsd_m: number;
+      message: string;
+    }>(`/api/jobs/${id}/evaluate`, { method: "POST", body: JSON.stringify({ n }) }),
+  seamVersions: (id: string) =>
+    request<{
+      current: { id: string; label: string; created_at: string; note: string } | null;
+      versions: {
+        id: string;
+        label: string;
+        created_at: string;
+        note: string;
+        change?: { summary: string; places: { where: string; name: string; image_id: number }[] };
+      }[];
+    }>(`/api/jobs/${id}/seam-versions`),
+  seamMap: (id: string, version?: string) =>
+    request<{ width: number; height: number; features: { image_id: number; points: number[][] }[] }>(
+      `/api/jobs/${id}/seam-map${version ? `?version=${encodeURIComponent(version)}` : ""}`,
+    ),
+  rgbPreview: async (id: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(`/api/jobs/${id}/rgb-preview.png`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<Blob>(() => {});
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "RGB 拼图读取失败"));
+    return res.blob();
+  },
+  seamPreview: async (id: string, version?: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const query = version ? `?version=${encodeURIComponent(version)}` : "";
+    const res = await fetch(`/api/jobs/${id}/seam-preview.png${query}`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<Blob>(() => {});
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "正射预览失败"));
+    return res.blob();
+  },
+  reseamJob: (id: string, body: { prefer_ids?: string; regions?: { image_id: number; points: number[][] }[]; clear_edits?: boolean }) =>
+    request<any>(`/api/jobs/${id}/seam`, { method: "POST", body: JSON.stringify(body) }),
+  cancelReseam: (id: string) => request<any>(`/api/jobs/${id}/seam-cancel`, { method: "POST" }),
+  seamBranch: (id: string, version: string) =>
+    request<any>(`/api/jobs/${id}/seam-branch`, { method: "POST", body: JSON.stringify({ version }) }),
+  seamTasks: () => request<any[]>("/api/jobs/seam-tasks"),
+  createSeamTask: (sourceJobId: string) =>
+    request<any>("/api/jobs/seam-tasks", { method: "POST", body: JSON.stringify({ source_job_id: sourceJobId }) }),
+  seamCandidates: (id: string, x: number, y: number) =>
+    request<{ images: { image_id: number; name: string; center_offset: number }[] }>(
+      `/api/jobs/${id}/seam-candidates?x=${encodeURIComponent(x)}&y=${encodeURIComponent(y)}`,
+    ),
+  seamCandidatesMany: (id: string, points: number[][]) =>
+    request<{ images: { image_id: number; name: string; center_offset: number }[] }>(
+      `/api/jobs/${id}/seam-candidates`,
+      { method: "POST", body: JSON.stringify({ points }) },
+    ),
+  seamImage: async (id: string, imageId: number, maxSide?: number) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const query = maxSide ? `?max_side=${encodeURIComponent(maxSide)}` : "";
+    const res = await fetch(`/api/jobs/${id}/seam-image/${imageId}${query}`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<Blob>(() => {});
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "原始影像读取失败"));
+    return res.blob();
+  },
   jobAction: (id: string, action: string, body?: any) =>
     request(`/api/jobs/${id}/${action}`, { method: "POST", body: JSON.stringify(body || {}) }),
   deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: "DELETE" }),

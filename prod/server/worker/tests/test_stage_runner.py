@@ -52,3 +52,37 @@ def test_run_stages_forwards_template_params(tmp_path: Path, monkeypatch):
     assert captured["edge_trim_m"] == 20.0
     assert captured["flatten_edge_win_m"] == 40.0
     assert captured["flatten_edge_band_m"] == 80.0
+    assert captured["seam_prefer_ids"] == ()
+
+
+def test_run_stages_parses_seam_prefer_ids(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+
+    def fake_run_mosaic(inp, out, **kwargs):
+        captured.update(kwargs)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr("ms_mosaic.stage_runner.run_mosaic", fake_run_mosaic)
+    monkeypatch.setattr("ms_mosaic.stage_runner.set_job_cpus", lambda *_a, **_k: None)
+    monkeypatch.setattr("ms_mosaic.stage_runner.resolve_cpu_budget", lambda *_a, **_k: 4)
+    inp = tmp_path / "in"
+    inp.mkdir()
+    run_stages(
+        inp,
+        tmp_path / "out",
+        params={"seam_prefer_ids": "3， 8,x,12", "run_mode": "full", "color_correction": ""},
+    )
+    assert captured["seam_prefer_ids"] == (3, 8, 12)
+    assert captured["color_correction"] == "off"
+
+
+def test_run_stages_sets_and_resets_job_gpu(tmp_path: Path, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr("ms_mosaic.stage_runner.run_mosaic", lambda *_a, **_k: {"status": "succeeded"})
+    monkeypatch.setattr("ms_mosaic.stage_runner.set_job_cpus", lambda *_a, **_k: None)
+    monkeypatch.setattr("ms_mosaic.stage_runner.set_job_gpu", lambda *a: calls.append(a))
+
+    inp = tmp_path / "in"
+    inp.mkdir()
+    run_stages(inp, tmp_path / "out", params={"gpu": "1", "gpu_memory_gb": "6", "run_mode": "full"})
+    assert calls == [("1", 6.0), (None, None)]

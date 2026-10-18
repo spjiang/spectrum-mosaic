@@ -10,6 +10,7 @@ MENU_KEYS = (
     "execute",
     "profiles",
     "jobs",
+    "seam",
     "worker",
     "health",
     "settings",
@@ -22,13 +23,13 @@ MENU_KEYS = (
 )
 ADMIN_LOCK = ("users", "roles", "permissions", "audit")
 # 命令行说明对所有登录角色开放，已保存的菜单里缺了也要补回
-PUBLIC_MENUS = ("cli",)
+PUBLIC_MENUS = ("cli", "seam")
 
 DEFAULT_MENUS: dict[str, list[str]] = {
     "admin": list(MENU_KEYS),
-    "configurator": ["profiles", "jobs", "settings", "inspect", "cli"],
-    "executor": ["execute", "profiles", "jobs", "inspect", "cli"],
-    "viewer": ["profiles", "jobs", "inspect", "cli"],
+    "configurator": ["profiles", "jobs", "seam", "settings", "inspect", "cli"],
+    "executor": ["execute", "profiles", "jobs", "seam", "inspect", "cli"],
+    "viewer": ["profiles", "jobs", "seam", "inspect", "cli"],
 }
 
 

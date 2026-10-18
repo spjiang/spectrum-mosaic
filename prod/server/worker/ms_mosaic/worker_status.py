@@ -330,7 +330,17 @@ def snapshot() -> dict[str, Any]:
         "processes": processes,
         "memory": memory,
         "host_memory": _host_memory(),
+        "gpus": _gpus(),
     }
+
+
+def _gpus() -> dict[str, Any]:
+    try:
+        from ms_mosaic.gpu import summary
+
+        return summary()
+    except Exception as exc:  # noqa: BLE001
+        return {"runtime": False, "available": False, "reason": f"显卡探测失败（{exc}）", "devices": []}
 
 
 def write_status(path: Path | None = None) -> Path:

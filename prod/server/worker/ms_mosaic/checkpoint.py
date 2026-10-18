@@ -53,6 +53,23 @@ def _cam_from_dict(data: dict[str, Any]) -> Camera:
     return Camera(**{name: data[name] for name in _CAM_FIELDS})
 
 
+def _gps_xy(sparse: SparseResult, pose_ids: list[int]) -> np.ndarray:
+    """与 pose_ids 对齐的 GNSS 平面坐标（与外方位同一投影）。没有的位置记 nan。"""
+    gps = getattr(getattr(sparse, "block", None), "gps", None) or {}
+    rows = []
+    for idx in pose_ids:
+        raw = gps.get(idx)
+        if raw is None:
+            rows.append((np.nan, np.nan))
+            continue
+        arr = np.asarray(raw, float).reshape(-1)
+        if arr.size < 2 or not np.isfinite(arr[0]) or not np.isfinite(arr[1]):
+            rows.append((np.nan, np.nan))
+        else:
+            rows.append((float(arr[0]), float(arr[1])))
+    return np.asarray(rows, float).reshape(-1, 2)
+
+
 def save_sparse(
     path: Path,
     sparse: SparseResult,
@@ -98,6 +115,7 @@ def save_sparse(
         pose_R=pose_r,
         pose_C=pose_c,
         pose_ids=np.asarray(pose_ids, np.int64),
+        gps_xy=_gps_xy(sparse, pose_ids),
         image_ids=np.asarray(image_ids, np.int64),
         # 质量报告用的摘要：续跑时不再有完整匹配/轨迹/观测，靠这些保持统计一致
         pair_stats=np.asarray(

@@ -12,10 +12,11 @@ import {
   Select,
   Slider,
   Space,
+  Tooltip,
   Typography,
   message,
 } from "antd";
-import { PlayCircleOutlined } from "@ant-design/icons";
+import { PlayCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
@@ -93,6 +94,29 @@ function jobCpus(job: any): number {
   return asPositiveNumber(job?.cpus ?? job?.params_snapshot?.cpus);
 }
 
+function pickGpu(raw: unknown): string {
+  if (raw == null || raw === "") return "auto";
+  const text = String(raw).trim().toLowerCase();
+  if (["off", "none", "cpu", "false", "no"].includes(text)) return "off";
+  if (/^\d+$/.test(text)) return String(Number(text));
+  return "auto";
+}
+
+function jobGpu(job: any): string {
+  return pickGpu(job?.gpu ?? job?.params_snapshot?.gpu);
+}
+
+function jobGpuMemoryGb(job: any): number {
+  return asPositiveNumber(job?.gpu_memory_gb ?? job?.params_snapshot?.gpu_memory_gb);
+}
+
+type GpuDevice = { index: number; name: string; total_mb: number; free_mb: number; capability?: string };
+
+function gpuSliderMax(devices: GpuDevice[]): number {
+  const mb = Math.max(0, ...devices.map((d) => d.total_mb || 0));
+  return mb > 0 ? Math.floor(mb / 1024) : 16;
+}
+
 export default function ExecutePage() {
   const { roles } = useAuth();
   const allowRun = canExecute(roles);
@@ -103,11 +127,17 @@ export default function ExecutePage() {
   const [profiles, setProfiles] = useState<any[]>([]);
   const [profileId, setProfileId] = useState<number | undefined>();
   const [inputDir, setInputDir] = useState("");
+  const [nativeGsd, setNativeGsd] = useState<number | null>(null);
+  const [gsdSamples, setGsdSamples] = useState(0);
+  const [gsdNote, setGsdNote] = useState("");
+  const [orthoScale, setOrthoScale] = useState(1);
   const [outputDir, setOutputDir] = useState("");
   const [memoryGb, setMemoryGb] = useState<number | null>(watchId ? 0 : 36);
   const [engineRamGb, setEngineRamGb] = useState<number | null>(null);
   const [cpus, setCpus] = useState<number>(0);
   const [engineCpu, setEngineCpu] = useState<number | null>(null);
+  const [gpu, setGpu] = useState<string>("auto");
+  const [gpuMemoryGb, setGpuMemoryGb] = useState<number>(0);
   const [job, setJob] = useState<any>(null);
   const [inspect, setInspect] = useState<any>(null);
   const [logs, setLogs] = useState("");
@@ -134,6 +164,8 @@ export default function ExecutePage() {
             setMemoryGb(typeof gb === "number" && gb > 0 ? gb : 36);
             const n = preferred.values?.cpus ?? defaults.cpus;
             setCpus(typeof n === "number" && n > 0 ? n : 0);
+            setGpu(pickGpu(preferred.values?.gpu ?? defaults.gpu));
+            setGpuMemoryGb(asPositiveNumber(preferred.values?.gpu_memory_gb ?? defaults.gpu_memory_gb));
           }
         }
       })
@@ -160,6 +192,10 @@ export default function ExecutePage() {
       const gb = p?.values?.memory_gb;
       setMemoryGb(pickMemoryGb(gb, memorySliderMax(engineRamGb)));
       setCpus(pickCpus(p?.values?.cpus, cpuSliderMax(engineCpu)));
+      if (p) {
+        setGpu(pickGpu(p.values?.gpu));
+        setGpuMemoryGb(asPositiveNumber(p.values?.gpu_memory_gb));
+      }
       return;
     }
     let cancelled = false;
@@ -170,6 +206,8 @@ export default function ExecutePage() {
         setJob(j);
         setMemoryGb(jobMemoryGb(j));
         setCpus(jobCpus(j));
+        setGpu(jobGpu(j));
+        setGpuMemoryGb(jobGpuMemoryGb(j));
       })
       .catch((e: any) => {
         if (!cancelled) {
@@ -229,6 +267,37 @@ export default function ExecutePage() {
     setCpus((cur) => (cur && cur > engineCpu ? engineCpu : cur));
   }, [engineCpu]);
 
+  useEffect(() => {
+    const dir = inputDir.trim();
+    if (!dir.startsWith("/data")) {
+      setNativeGsd(null);
+      setGsdSamples(0);
+      setGsdNote(dir ? "输入目录须位于 /data 下" : "");
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      api
+        .nativeGsd(dir)
+        .then((r) => {
+          if (cancelled) return;
+          setNativeGsd(r.native_gsd_m);
+          setGsdSamples(r.n_samples);
+          setGsdNote("");
+        })
+        .catch((e: any) => {
+          if (cancelled) return;
+          setNativeGsd(null);
+          setGsdSamples(0);
+          setGsdNote(e.message || "读不出原始分辨率");
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [inputDir]);
+
   const summary = selected?.values || {};
   const busy = Boolean(job && ACTIVE.includes(job.status));
   const jobState = job ? jobComputeState(job, inspect) : "none";
@@ -242,6 +311,27 @@ export default function ExecutePage() {
   const cpuMarks: Record<number, string> = { 0: "0" };
   if (cpuMax > 8) cpuMarks[8] = "8";
   cpuMarks[cpuMax] = String(cpuMax);
+  const gpuInfo = inspect?.worker?.gpus;
+  const gpuDevices: GpuDevice[] = Array.isArray(gpuInfo?.devices) ? gpuInfo.devices : [];
+  const gpuReady = Boolean(gpuInfo?.available);
+  const gpuMax = gpuSliderMax(gpuDevices);
+  const gpuMarks: Record<number, string> = { 0: "0", [gpuMax]: String(gpuMax) };
+  const gpuOptions = [
+    { value: "auto", label: "自动（选空闲显存最多的卡）" },
+    { value: "off", label: "不用 GPU" },
+    ...gpuDevices.map((d) => ({
+      value: String(d.index),
+      label: `GPU ${d.index} ${d.name}（空闲 ${(d.free_mb / 1024).toFixed(1)} / ${(d.total_mb / 1024).toFixed(1)} GB）`,
+    })),
+  ];
+  if (!gpuOptions.some((o) => o.value === gpu)) {
+    gpuOptions.push({ value: gpu, label: `GPU ${gpu}（当前节点未检测到）` });
+  }
+  const gpuStatus = gpuReady
+    ? `计算节点有 ${gpuDevices.length} 张可用显卡。已通过验收的阶段：${
+        (gpuInfo?.validated_stages || []).map((s: string) => stageLabel(s)).join("、") || "暂无，全部走 CPU"
+      }。`
+    : `计算节点${gpuInfo?.reason ? `：${gpuInfo.reason}` : "未上报显卡"}，任务会使用 CPU，结果相同。`;
 
   return (
     <Row gutter={[16, 16]}>
@@ -271,6 +361,8 @@ export default function ExecutePage() {
                   const gb = p?.values?.memory_gb;
                   setMemoryGb(pickMemoryGb(gb, memMax));
                   setCpus(pickCpus(p?.values?.cpus, cpuMax));
+                  setGpu(pickGpu(p?.values?.gpu));
+                  setGpuMemoryGb(asPositiveNumber(p?.values?.gpu_memory_gb));
                 }}
               />
             </div>
@@ -283,6 +375,59 @@ export default function ExecutePage() {
                 value={inputDir}
                 onChange={(e) => setInputDir(e.target.value)}
               />
+              <div style={{ marginTop: 10 }}>
+                <span className="title-with-help">
+                  <Typography.Text type="secondary">降低分辨率</Typography.Text>
+                  <Tooltip
+                    title={
+                      nativeGsd
+                        ? `像元越小，分辨率越高。当前原始像元 ${nativeGsd.toFixed(4)} m，比降低后的 ${(nativeGsd * 4).toFixed(4)} m 更细。选「降低到 1/2」或「降低到 1/4」是把像元放大，分辨率变低，正射更快。`
+                        : "像元越小，分辨率越高。数字越小，一个像元盖住的地面越小、看得越细。选「降低到 1/2」或「降低到 1/4」是把像元放大，分辨率变低，正射更快。"
+                    }
+                  >
+                    <button type="button" className="param-help-btn" aria-label="降低分辨率说明">
+                      <QuestionCircleOutlined />
+                    </button>
+                  </Tooltip>
+                </span>
+                {summary.grid_reference ? (
+                  <div style={{ marginTop: 6 }}>
+                    <Typography.Text>已锁定交付格网，不按这里的倍数改分辨率。</Typography.Text>
+                    {nativeGsd ? (
+                      <Typography.Text type="secondary">
+                        {" "}
+                        影像原始分辨率 {nativeGsd.toFixed(4)} m（{gsdSamples} 张 Color）
+                      </Typography.Text>
+                    ) : null}
+                  </div>
+                ) : (
+                  <>
+                    <Select
+                      style={{ width: "100%", marginTop: 6 }}
+                      disabled={!allowRun || nativeGsd == null}
+                      value={orthoScale}
+                      options={[1, 2, 4].map((scale) => ({
+                        value: scale,
+                        label: nativeGsd
+                          ? scale === 1
+                            ? `不降低　${nativeGsd.toFixed(4)} m`
+                            : `降低到 1/${scale}　${(nativeGsd * scale).toFixed(4)} m`
+                          : scale === 1
+                            ? "不降低"
+                            : `降低到 1/${scale}`,
+                      }))}
+                      onChange={(v) => setOrthoScale(v)}
+                    />
+                    <div style={{ marginTop: 4 }}>
+                      <Typography.Text type="secondary">
+                        {nativeGsd
+                          ? `原始分辨率 ${nativeGsd.toFixed(4)} m（${gsdSamples} 张 Color）。选 1/2、1/4 会把像元放大，正射更快。`
+                          : gsdNote || "填写测区目录后自动读取原始分辨率"}
+                      </Typography.Text>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
             <div>
               <Typography.Text type="secondary">成果目录</Typography.Text>
@@ -340,6 +485,42 @@ export default function ExecutePage() {
                   : "为本任务预留的 CPU。0 表示系统自动分配。本测区建议 8 核。"}
               </Typography.Paragraph>
             </div>
+            <div>
+              <Typography.Text type="secondary">任务 GPU</Typography.Text>
+              <Select
+                style={{ width: "100%", marginTop: 6 }}
+                disabled={!allowRun}
+                value={gpu}
+                options={gpuOptions}
+                onChange={(v) => setGpu(v)}
+              />
+              <Typography.Paragraph type="secondary" style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.55 }}>
+                {gpuStatus}
+              </Typography.Paragraph>
+            </div>
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <Typography.Text type="secondary">任务显存</Typography.Text>
+                <Typography.Text strong>
+                  {gpu === "off" ? "不使用" : gpuMemoryGb ? `${gpuMemoryGb} GB` : "自动"}
+                </Typography.Text>
+              </div>
+              <div className="memory-slider">
+                <Slider
+                  min={0}
+                  max={gpuMax}
+                  step={0.5}
+                  disabled={!allowRun || gpu === "off"}
+                  value={Math.min(gpuMemoryGb, gpuMax)}
+                  onChange={(v) => setGpuMemoryGb(typeof v === "number" ? v : 0)}
+                  marks={gpuMarks}
+                  tooltip={{ formatter: (v) => (v ? `${v} GB` : "自动") }}
+                />
+              </div>
+              <Typography.Paragraph type="secondary" style={{ margin: "0 0 0", fontSize: 12, lineHeight: 1.55 }}>
+                0 表示用所选显卡当前空闲显存的 85%。配得再高也不会超过空闲显存；显存不够时自动分批，仍不够则该阶段改用 CPU。
+              </Typography.Paragraph>
+            </div>
             <Typography.Paragraph type="secondary" style={{ marginBottom: 0, fontSize: 12 }}>
               每次开始处理会在成果目录下自动建立时间戳子目录，不覆盖上次结果。
             </Typography.Paragraph>
@@ -365,6 +546,8 @@ export default function ExecutePage() {
                       <Descriptions.Item label="workers_at">{summary.workers_at ?? "—"}</Descriptions.Item>
                       <Descriptions.Item label="memory_gb">{String(summary.memory_gb ?? 0)}</Descriptions.Item>
                       <Descriptions.Item label="cpus">{String(summary.cpus ?? 0)}</Descriptions.Item>
+                      <Descriptions.Item label="gpu">{String(summary.gpu ?? "auto")}</Descriptions.Item>
+                      <Descriptions.Item label="gpu_memory_gb">{String(summary.gpu_memory_gb ?? 0)}</Descriptions.Item>
                     </Descriptions>
                   ),
                 },
@@ -411,7 +594,20 @@ export default function ExecutePage() {
                     profile_id: profileId,
                     input_dir: inputDir,
                     output_dir: outputDir,
-                    params: { memory_gb: memoryGb ?? 0, cpus: cpus ?? 0 },
+                    params: {
+                      memory_gb: memoryGb ?? 0,
+                      cpus: cpus ?? 0,
+                      gpu,
+                      gpu_memory_gb: gpu === "off" ? 0 : gpuMemoryGb,
+                      ...(nativeGsd != null && !summary.grid_reference
+                        ? {
+                            ortho_scale: orthoScale,
+                            native_gsd_m: nativeGsd,
+                            ortho_gsd_m: nativeGsd * orthoScale,
+                            dsm_gsd: nativeGsd * orthoScale * 2,
+                          }
+                        : {}),
+                    },
                   });
                   setJob(j);
                   setSearchParams({ job: j.id });

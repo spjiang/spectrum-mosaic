@@ -21,6 +21,7 @@ import {
   AppstoreOutlined,
   ToolOutlined,
   AuditOutlined,
+  EditOutlined,
 } from "@ant-design/icons";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
@@ -29,6 +30,7 @@ import ExecutePage from "../pages/Execute";
 import ProfilesListPage from "../pages/ProfilesList";
 import ProfileEditPage from "../pages/ProfileEdit";
 import JobsPage from "../pages/Jobs";
+import SeamPage from "../pages/Seam";
 import CliGuidePage from "../pages/CliGuide";
 import HealthPage from "../pages/Health";
 import WorkerPage from "../pages/Worker";
@@ -58,6 +60,7 @@ const TITLE: Record<string, string> = {
   execute: "新建处理",
   profiles: "处理方案",
   jobs: "处理记录",
+  seam: "拼接线处理",
   worker: "计算节点",
   health: "系统监控",
   settings: "系统配置",
@@ -73,6 +76,7 @@ const MENU_ICON: Record<MenuKey, ReactNode> = {
   execute: <PlayCircleOutlined />,
   profiles: <ProfileOutlined />,
   jobs: <UnorderedListOutlined />,
+  seam: <EditOutlined />,
   worker: <CloudServerOutlined />,
   health: <HeartOutlined />,
   settings: <SettingOutlined />,
@@ -265,6 +269,14 @@ function AppShellBody({
             />
             <Route path="/profiles/:id/edit" element={<ProfileEditPage />} />
             <Route path="/jobs" element={<JobsPage />} />
+            <Route
+              path="/seam"
+              element={
+                <Guard allow={canMenu("seam")}>
+                  <SeamPage />
+                </Guard>
+              }
+            />
             <Route
               path="/worker"
               element={

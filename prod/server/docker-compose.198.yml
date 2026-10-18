@@ -1,0 +1,44 @@
+# 198 叠加：数据在 /home/spectrum-mosaic，Worker 用已装好的 GPU 环境，显存和核数封顶。
+# docker-compose -f docker-compose.yml -f docker-compose.198.yml up -d --build
+services:
+  backend:
+    environment:
+      CORS_ORIGINS: http://10.17.19.198:8080,http://127.0.0.1:8080,http://localhost:8080
+    volumes:
+      - /home/spectrum-mosaic/data/MAX_20251017:/data/input/MAX_20251017:ro
+      - /home/spectrum-mosaic/data/S810原始数据:/data/input/S810原始数据:ro
+
+  worker:
+    build: !reset null
+    image: python:3.11-slim
+    entrypoint: ["/opt/env/bin/python", "-m", "ms_mosaic.worker_main"]
+    working_dir: /app
+    mem_limit: 64g
+    cpus: 32
+    runtime: nvidia
+    environment:
+      RABBITMQ_URL: amqp://mosaic:mosaic_secret@rabbitmq:5672/
+      PYTHONPATH: /app
+      MPLBACKEND: Agg
+      DATA_ROOTS: /data
+      WORKER_STATUS_PATH: /data/.worker/status.json
+      LD_LIBRARY_PATH: /opt/env/lib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      MOSAIC_GPU_TRIAL_STAGES: S5_ortho
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - /home/spectrum-mosaic/env:/opt/env:ro
+      - ./worker:/app
+      - ./data:/data
+      - /home/spectrum-mosaic/data/MAX_20251017:/data/input/MAX_20251017:ro
+      - /home/spectrum-mosaic/data/S810原始数据:/data/input/S810原始数据:ro
+    healthcheck:
+      test: ["CMD", "/opt/env/bin/python", "-c", "import numpy, cv2, rasterio, pika, ms_mosaic, cupy"]
+
+  frontend:
+    ports:
+      - "8080:80"

@@ -18,6 +18,7 @@ export type MenuKey =
   | "execute"
   | "profiles"
   | "jobs"
+  | "seam"
   | "worker"
   | "health"
   | "settings"
@@ -50,6 +51,7 @@ export const MENU_CATALOG: MenuDef[] = [
   { key: "execute", label: "新建处理", path: "/execute", group: "作业管理", roles: ["admin", "executor"], hint: "创建正射与 DSM 处理任务" },
   { key: "profiles", label: "处理方案", path: "/profiles", group: "作业管理", roles: ["admin", "configurator", "executor", "viewer"], hint: "查看与维护处理参数方案" },
   { key: "jobs", label: "处理记录", path: "/jobs", group: "作业管理", roles: ["admin", "configurator", "executor", "viewer"], hint: "查看任务进度、结果与历史" },
+  { key: "seam", label: "拼接线处理", path: "/seam", group: "作业管理", roles: ["admin", "configurator", "executor", "viewer"], hint: "新建拼接线处理，选择任务后进入处理" },
   { key: "worker", label: "计算节点", path: "/worker", group: "系统管理", roles: ["admin"], hint: "监控计算进程与任务队列" },
   { key: "health", label: "系统监控", path: "/health", group: "系统管理", roles: ["admin"], hint: "查看数据库、消息队列与计算服务状态" },
   { key: "settings", label: "系统配置", path: "/settings", group: "系统管理", roles: ["admin", "configurator"], hint: "配置数据路径等运行参数" },

@@ -1,0 +1,35 @@
+# GPU 版 worker：CUDA 12.2 运行库 + CuPy。宿主机需要 NVIDIA 驱动 ≥ 535 和 nvidia-container-toolkit。
+# 与 Dockerfile 的区别只在底座和 requirements-gpu.txt；没有显卡时同样能跑，全部走 CPU。
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+        libgomp1 \
+        libglib2.0-0 \
+        libexpat1 \
+        g++ \
+    && python3.11 -m venv /opt/venv \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH=/opt/venv/bin:$PATH
+
+COPY requirements-worker.txt requirements-gpu.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements-gpu.txt \
+    && apt-get purge -y --auto-remove g++ python3.11-dev software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ms_mosaic ./ms_mosaic
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    MPLBACKEND=Agg \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+CMD ["python", "-m", "ms_mosaic.worker_main"]

@@ -444,6 +444,7 @@ def build_quality_payload(
     n_usable: int,
     cameras_info: dict,
     figures: dict[str, str] | None = None,
+    color_correction: str = "禁用",
 ) -> dict[str, Any]:
     by_index = {im.index: im for im in block.images}
     names = {im.index: im.path.name for im in block.images}
@@ -583,7 +584,9 @@ def build_quality_payload(
             "gsd": dsm.grid.gsd * 0.5,
             "mode": "基于DSM逐像素拼接",
             "blend": "中",
-            "color_correction": "禁用",
+            "color_correction": color_correction,
+            "native_gsd": dense_stats.get("image_gsd"),
+            "pyramid_level": dense_stats.get("pyramid_level"),
             "max_tilt_deg": 60,
         },
         "cameras": cameras_info,

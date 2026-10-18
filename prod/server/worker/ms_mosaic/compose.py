@@ -23,9 +23,11 @@ from ms_mosaic.blend import (
 )
 from ms_mosaic.camera import Camera, Pose
 from ms_mosaic.dsm import resample_height
+from ms_mosaic.gpu import describe as describe_gpu
+from ms_mosaic.gpu import select as select_gpu
 from ms_mosaic.grid import Grid, erode_coverage, refine_coverage_mask
-from ms_mosaic.ortho import NativeImageCache, OrthoConfig, orthorectify_tile
-from ms_mosaic.parallel import CACHE_PER_WORKER, map_tiles, tile_worker_mb
+from ms_mosaic.ortho import NativeImageCache, OrthoConfig, orthorectify_tile, share_rectification
+from ms_mosaic.parallel import CACHE_PER_WORKER, map_tiles, resolve_workers, tile_worker_mb
 from ms_mosaic.products import (
     RGB_BAND,
     RasterWriter,
@@ -37,6 +39,9 @@ from ms_mosaic.products import (
 from ms_mosaic.seamline import SeamConfig, optimal_labels
 
 ORTHO_TILE = 384
+# 每个多光谱波段自己留一份影像缓存。一块最多 12 个视角，24 张够相邻块复用。
+# 七个波段若挤在同一个 48 张的缓存里，换波段就会把上一波段的影像挤掉，每块都重新读盘。
+MS_IMAGES_PER_BAND = 24
 # 块与块之间必须有足够重叠，并且按权重融合。旧写法 overlap=16 再硬裁内芯，
 # 每块独立解增益、独立选拼接线，相邻 384 格亮度可差 70，图上就是左侧那些方块。
 ORTHO_OVERLAP = 48
@@ -48,6 +53,11 @@ def _ortho_setup(payload: dict):
     if path:
         ctx["dsm_z"] = np.load(path, mmap_mode="r")
     ctx["images"] = NativeImageCache(payload["paths"], limit=CACHE_PER_WORKER)
+    device = payload.get("gpu_device")
+    if device is not None:
+        from ms_mosaic.ortho_gpu import limit_device_memory
+
+        limit_device_memory(device, payload["gpu_budget_per_proc"])
     return ctx
 
 
@@ -86,10 +96,41 @@ def _feather_weight(
     return np.clip(dist / float(2 * overlap), 0.0, 1.0).astype(np.float32)
 
 
+def _seam_labels(ctx: dict, window: tuple[int, int, int, int], stack, edits):
+    from dataclasses import replace
+
+    from ms_mosaic.seam_edit import rasterize_window
+
+    cfg = ctx["seam_cfg"]
+    if edits:
+        burned = rasterize_window(ctx["grid"], window, edits)
+        if burned is not None:
+            cfg = replace(cfg, constraint=burned)
+    return optimal_labels(stack, cfg)
+
+
 def _stack_for_window(ctx: dict, window: tuple[int, int, int, int]):
+    from ms_mosaic.seam_edit import ensure_ids_for
+
     z = resample_height(ctx["dsm_z"], ctx["dsm_grid"], ctx["grid"], window)
-    return orthorectify_tile(
-        ctx["grid"], window, z, ctx["cameras"], ctx["poses"], ctx["images"], ctx["ortho_cfg"]
+    edits = ctx.get("seam_edits") or []
+    ensure = ensure_ids_for(ctx["grid"], window, edits) if edits else ()
+    device = ctx.get("gpu_device")
+    if device is None:
+        return orthorectify_tile(
+            ctx["grid"],
+            window,
+            z,
+            ctx["cameras"],
+            ctx["poses"],
+            ctx["images"],
+            ctx["ortho_cfg"],
+            ensure_ids=ensure,
+        )
+    from ms_mosaic.ortho_gpu import orthorectify_tile_on
+
+    return orthorectify_tile_on(
+        device, ctx["grid"], window, z, ctx["cameras"], ctx["poses"], ctx["images"], ctx["ortho_cfg"]
     )
 
 
@@ -108,7 +149,7 @@ def _ortho_fn(ctx: dict, window: tuple[int, int, int, int]):
     gains = ctx.get("gains") or {}
     if gains:
         stack = apply_gains(stack, gains)
-    labels = optimal_labels(stack, ctx["seam_cfg"])
+    labels = _seam_labels(ctx, window, stack, ctx.get("seam_edits") or [])
     mosaic = multiband_blend(stack, labels)
     return mosaic, labels, list(stack.views)
 
@@ -128,6 +169,8 @@ def render_band(
     gain: bool | None = None,
     log=None,
     scratch_root: Path | str | None = None,
+    seam_cfg: SeamConfig | None = None,
+    seam_edits: list | None = None,
 ) -> BandRaster:
     """整幅正射（浮点，落盘累加）+ 拼接线标号。标号是块内视角下标，views 是全局影像 id。
 
@@ -148,9 +191,19 @@ def render_band(
         "poses": poses,
         "paths": paths,
         "ortho_cfg": OrthoConfig(),
-        "seam_cfg": SeamConfig(),
+        "seam_cfg": seam_cfg or SeamConfig(),
+        "seam_edits": seam_edits or [],
         "gains": {},
     }
+    per_worker_mb = tile_worker_mb(image_bytes)
+    choice = select_gpu("S5_ortho")
+    if log is not None:
+        log(describe_gpu(f"正射 {group_name(band)} ({band})", choice))
+    if choice.device is not None:
+        # 同一张卡由本波段的各块进程分用；超出各自份额时该块分批或改用 CPU
+        procs = resolve_workers(workers, per_worker_mb=per_worker_mb)
+        payload["gpu_device"] = choice.device
+        payload["gpu_budget_per_proc"] = max(1, choice.budget_bytes // max(1, procs))
     try:
         return _render_band_with_payload(
             grid,
@@ -161,7 +214,7 @@ def render_band(
             workers=workers,
             use_gain=use_gain,
             log=log,
-            per_worker_mb=tile_worker_mb(image_bytes),
+            per_worker_mb=per_worker_mb,
             scratch_root=scratch_root,
         )
     finally:
@@ -231,6 +284,131 @@ def _render_band_with_payload(
     return raster
 
 
+def _ms_setup(payload: dict):
+    ctx = dict(payload)
+    path = payload.get("dsm_z_path")
+    if path:
+        ctx["dsm_z"] = np.load(path, mmap_mode="r")
+    limit = int(payload["cache_per_band"])
+    ctx["images"] = {
+        band: NativeImageCache(spec["paths"], limit=limit)
+        for band, spec in payload["bands"].items()
+    }
+    return ctx
+
+
+def _ms_fn(ctx: dict, window: tuple[int, int, int, int]):
+    """一块上先算几何，再逐波段取样、图割、融合。图割轮数与单波段相同。
+
+    每个波段仍用自己的影像号做视角筛选。命中数和倾角相同时，排序会落到影像号上，
+    各波段选中的曝光可以不完全一样。几何只在真正用到的那一次曝光上计算并复用。
+    """
+    z = resample_height(ctx["dsm_z"], ctx["dsm_grid"], ctx["grid"], window)
+    geom: dict = {}
+    out = []
+    for band in ctx["band_order"]:
+        spec = ctx["bands"][band]
+        edits = (ctx.get("seam_edits_by_band") or {}).get(band) or []
+        ensure = ()
+        if edits:
+            from ms_mosaic.seam_edit import ensure_ids_for
+
+            ensure = ensure_ids_for(ctx["grid"], window, edits)
+        stack = orthorectify_tile(
+            ctx["grid"],
+            window,
+            z,
+            spec["cameras"],
+            spec["poses"],
+            ctx["images"][band],
+            ctx["ortho_cfg"],
+            geom_cache=geom,
+            shot_of=spec["shot_of"],
+            ensure_ids=ensure,
+        )
+        if stack.pixels.shape[0] == 0:
+            out.append((band, np.zeros((0,), np.float32), np.zeros((0,), np.int16), []))
+            continue
+        labels = _seam_labels(ctx, window, stack, edits)
+        mosaic = multiband_blend(stack, labels)
+        out.append((band, mosaic, labels, list(stack.views)))
+    return out
+
+
+def render_ms_bands(
+    grid: Grid,
+    dsm_z: np.ndarray,
+    dsm_grid: Grid,
+    bands: list[tuple[str, dict, dict, dict, dict]],
+    *,
+    tile: int = ORTHO_TILE,
+    overlap: int = ORTHO_OVERLAP,
+    workers: int | None = None,
+    log=None,
+    scratch_root: Path | str | None = None,
+    seam_cfg: SeamConfig | None = None,
+    seam_edits_by_band: dict | None = None,
+) -> dict[str, BandRaster]:
+    """多光谱一次正射。同一曝光的投影和遮挡只算一次，各波段仍各自取样、选拼接线、融合。
+
+    bands 的每项是 (波段名, cameras, poses, paths, shot_of)。
+    视角上限、立面采样层数、图割轮数用 OrthoConfig / SeamConfig 的默认值，与分波段正射相同。
+    """
+    names = [name for name, *_ in bands]
+    if any(name == RGB_BAND for name in names):
+        raise ValueError("Color 的焦距与多光谱不同，不能并入共用几何")
+    if not share_rectification([(c, p, s) for _, c, p, _, s in bands]):
+        raise ValueError("多光谱波段的内参或外方位不一致，不能共用几何")
+    windows = list(grid.tiles(tile, overlap=overlap))
+    any_cam = next(iter(bands[0][1].values()))
+    image_bytes = any_cam.width * any_cam.height * 2
+    # 每个波段一份缓存，同时驻留；工作内存仍按一块（一个波段的图割）估计
+    cache_slots = MS_IMAGES_PER_BAND * len(bands)
+    shared = _share_array(np.asarray(dsm_z))
+    payload = {
+        "grid": grid,
+        "dsm_z_path": str(shared),
+        "dsm_grid": dsm_grid,
+        "band_order": names,
+        "bands": {
+            name: {"cameras": cams, "poses": poses, "paths": paths, "shot_of": shot_of}
+            for name, cams, poses, paths, shot_of in bands
+        },
+        "ortho_cfg": OrthoConfig(),
+        "seam_cfg": seam_cfg or SeamConfig(),
+        "seam_edits_by_band": seam_edits_by_band or {},
+        "cache_per_band": MS_IMAGES_PER_BAND,
+    }
+    rasters = {name: BandRaster(grid, 1, scratch_root=scratch_root) for name in names}
+    try:
+        for _, window, tiles in map_tiles(
+            windows,
+            partial(_ms_setup, payload),
+            _ms_fn,
+            workers=workers,
+            log=log,
+            label=f"正射多光谱（几何共用 {'/'.join(names)}）",
+            per_worker_mb=tile_worker_mb(image_bytes, cache=cache_slots),
+        ):
+            weight = _feather_weight(window, overlap, grid)
+            for band, mosaic, labels, views in tiles:
+                if mosaic.size == 0 or not views:
+                    continue
+                rasters[band].add_tile(window, mosaic, labels, views, weight)
+        for raster in rasters.values():
+            raster.flush()
+        return rasters
+    except BaseException:
+        for raster in rasters.values():
+            raster.close()
+        raise
+    finally:
+        try:
+            shared.unlink()
+        except OSError:
+            pass
+
+
 class BandRaster:
     """整幅正射的加权累加器，落在本地磁盘的 memmap 上。
 
@@ -255,7 +433,7 @@ class BandRaster:
         self._labels1 = open_memmap(self.dir / "labels.npy", mode="w+", dtype=np.int16, shape=(h, w))
         self.label_w = open_memmap(self.dir / "label_w.npy", mode="w+", dtype=np.float32, shape=(h, w))
         self.views: list[int] = []
-        self._view_set: set[int] = set()
+        self._view_pos: dict[int, int] = {}
 
     @property
     def n_bands(self) -> int:
@@ -279,12 +457,29 @@ class BandRaster:
         self.wsum[sl] += w
         lw = np.asarray(self.label_w[sl])
         better = w > lw
-        self._labels1[sl] = np.where(better, tile_l.astype(np.int16) + 1, self._labels1[sl])
+        # tile_l 是这块自己的视角序号。拼接线导出用整幅 views 的下标，
+        # 两块的「第 0 张」往往不是同一张影像，不能直接存局部序号。
+        local = np.asarray(tile_l)
+        stored = np.zeros(local.shape, np.int16)
+        valid = local >= 0
+        lut = np.full(max(len(views), int(local.max()) + 1 if local.size else 1), -1, np.int16)
+        for i, v in enumerate(views):
+            vid = int(v)
+            pos = self._view_pos.get(vid)
+            if pos is None:
+                pos = len(self.views)
+                self._view_pos[vid] = pos
+                self.views.append(vid)
+            if i < lut.shape[0]:
+                lut[i] = pos
+        if np.any(valid):
+            idx = local[valid].astype(np.intp)
+            ok = (idx >= 0) & (idx < lut.shape[0]) & (lut[np.clip(idx, 0, lut.shape[0] - 1)] >= 0)
+            mapped = np.zeros(idx.shape, np.int16)
+            mapped[ok] = lut[idx[ok]] + 1
+            stored[valid] = mapped
+        self._labels1[sl] = np.where(better, stored, self._labels1[sl])
         self.label_w[sl] = np.where(better, w, lw)
-        for v in views:
-            if v not in self._view_set:
-                self._view_set.add(v)
-                self.views.append(v)
 
     def strip(self, r0: int, r1: int) -> np.ndarray:
         """第 r0:r1 行的浮点融合结果，无贡献处为 nan。"""
@@ -298,7 +493,7 @@ class BandRaster:
 
     @property
     def labels(self) -> np.ndarray:
-        """整幅拼接线标号（块内视角下标，-1 为无）。仅拼接线导出用，会整幅读入。"""
+        """整幅拼接线标号（self.views 的下标，-1 为无）。仅拼接线导出用，会整幅读入。"""
         return np.asarray(self._labels1, np.int16) - 1
 
     def to_array(self) -> np.ndarray:

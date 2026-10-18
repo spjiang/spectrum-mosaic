@@ -38,6 +38,18 @@ docker compose up -d --build
 
 不要同时再开本机 `run_worker.sh`，否则两个 Worker 会抢同一条队列。
 
+### 有 NVIDIA 显卡时
+
+宿主机需要 NVIDIA 驱动 ≥ 535 和 nvidia-container-toolkit。叠加 GPU 配置启动，只换 worker 镜像：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+只给 worker 部分显卡：`.env` 里设 `MOSAIC_GPUS=0` 或 `MOSAIC_GPUS=0,1`。
+
+启动后在「计算节点」页看「显卡」：列出卡号、型号、显存，并写明哪些阶段已经用 GPU。新建处理里「任务 GPU」默认自动；没有显卡的机器不用改任何配置，全部走 CPU。
+
 ## 本机 Worker（仅调试主程序、不走容器时）
 
 ```bash
@@ -58,6 +70,7 @@ Worker 消费 `mosaic.jobs`，调用 `run_stages`，回传进度到 `mosaic.prog
 | 阶段控制 | `run_mode`: full / until_stage / step；执行台「继续下一阶段」 |
 | 溯源 | `job_runs.params_snapshot` + 目录字段 + 日志/报告下载 |
 | CLI 教学 | 前端「命令行教学」页 = `worker/docs/cli-usage.md` |
+| GPU | 新建处理配置「任务 GPU / 任务显存」；自动选卡，没卡或未验收阶段走 CPU |
 
 ## 不部署可视化时
 

@@ -59,6 +59,53 @@ def test_map_tiles_parallel_matches_serial():
     assert serial == parallel
 
 
+def _die_once_setup(marker):
+    return marker
+
+
+def _die_once(marker, window):
+    """第一个进程算到 (0,0) 块时自杀，模拟被系统 OOM 回收。"""
+    import os
+
+    if window[:2] == (0, 0) and not os.path.exists(marker):
+        open(marker, "w").close()
+        os._exit(137)
+    return _window_checksum(None, window)
+
+
+def test_map_tiles_recovers_in_subprocess_after_kill(tmp_path):
+    """子进程被杀后要换新子进程续跑，结果完整且与串行相同；不能退回主进程计算。"""
+    from functools import partial
+
+    windows = [(r, c, 6, 6) for r in range(0, 24, 6) for c in range(0, 18, 6)]
+    marker = str(tmp_path / "died")
+    logs = []
+    got = {
+        k: result
+        for k, _, result in map_tiles(
+            windows, partial(_die_once_setup, marker), _die_once, workers=2, log=logs.append
+        )
+    }
+    assert Path(marker).exists()
+    assert got == {k: _window_checksum(None, w) for k, w in enumerate(windows)}
+    assert any("被系统回收" in m for m in logs)
+
+
+def test_pending_reservation_lowers_workers(monkeypatch):
+    """别的波段刚预约、子进程还没涨上去的内存，也要从可用里扣掉。"""
+    from ms_mosaic.parallel import reserve_memory, resolve_workers
+
+    monkeypatch.setattr("ms_mosaic.parallel.cpu_cap", lambda requested=None: 8 if requested is None else min(8, int(requested)))
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: 0)
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(10 * 1024**3))
+    free = resolve_workers(None, per_worker_mb=1000)
+    with reserve_memory(4000, lambda: 1000):
+        assert resolve_workers(None, per_worker_mb=1000) == free - 3
+    assert resolve_workers(None, per_worker_mb=1000) == free
+
+
 def test_paste_tile_drops_overlap_halo():
     from ms_mosaic.dense import paste_tile
 
@@ -100,8 +147,8 @@ def test_resolve_workers_uses_per_worker_estimate(monkeypatch):
     monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
     monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: int(2 * 1024**3))
     monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(10 * 1024**3))
-    per = tile_worker_mb(2048 * 1536 * 3)  # Color 原始位深 48 张 ≈ 432MB + 1GB
-    assert 1400 < per < 1500
+    per = tile_worker_mb(2048 * 1536 * 3)  # Color 原始位深 48 张 ≈ 432MB + 640MB，实测峰值 1039MB
+    assert 1039 < per < 1150
     assert resolve_workers(None, per_worker_mb=per) == (10 * 1024 - 1536) // per
 
 

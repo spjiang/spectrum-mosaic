@@ -98,6 +98,21 @@ def test_band_raster_matches_in_memory_accumulation(tmp_path: Path):
     np.testing.assert_allclose(raster.strip(10, 20), want[:, 10:20], rtol=1e-6, equal_nan=True)
     assert raster.views == [7, 9]
     assert raster.labels.min() == -1 and raster.labels.max() == 0
+
+
+def test_tile_labels_are_global_view_indices(tmp_path: Path):
+    """两块的局部第 0 张不是同一张影像，整幅标号必须记成 views 里的同一位置。"""
+    grid = _grid(10, 20)
+    raster = BandRaster(grid, 1, scratch_root=tmp_path)
+    tile = np.ones((1, 10, 10), np.float32)
+    wr = np.ones((10, 10), np.float32)
+    raster.add_tile((0, 0, 10, 10), tile, np.ones((10, 10), np.int16), [7, 9], wr)
+    raster.add_tile((0, 10, 10, 10), tile, np.zeros((10, 10), np.int16), [9, 11], wr)
+    lab = raster.labels
+    assert raster.views == [7, 9, 11]
+    assert np.all(lab[:, :10] == 1)
+    assert np.all(lab[:, 10:] == 1)
+    raster.close()
     d = raster.dir
     raster.close()
     assert not d.exists()

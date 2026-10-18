@@ -8,6 +8,7 @@ from typing import Any
 
 from ms_mosaic.control import ControlState
 from ms_mosaic.cpu import resolve_cpu_budget, set_job_cpus
+from ms_mosaic.gpu import set_job_gpu
 from ms_mosaic.pipeline import run_mosaic
 from ms_mosaic.progress import NullReporter, ProgressReporter, global_percent_for, stage_index
 
@@ -49,6 +50,22 @@ def _as_bool(value: Any, default: bool) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _as_id_list(value: Any) -> tuple[int, ...]:
+    if value is None or value == "":
+        return ()
+    if isinstance(value, str):
+        value = [p for p in value.replace("，", ",").split(",") if p.strip()]
+    if not isinstance(value, (list, tuple)):
+        return ()
+    out = []
+    for item in value:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
 def _as_path(value: Any) -> Path | None:
     if not value:
         return None
@@ -72,10 +89,12 @@ def run_stages(
     reporter = reporter or NullReporter()
     control = control or ControlState()
     set_job_cpus(resolve_cpu_budget(params.get("cpus")))
+    set_job_gpu(params.get("gpu"), _as_float(params.get("gpu_memory_gb")))
     try:
         return _run_stages_body(input_dir, out_dir, params=params, reporter=reporter, control=control)
     finally:
         set_job_cpus(None)
+        set_job_gpu(None, None)
 
 
 def _run_stages_body(
@@ -158,7 +177,9 @@ def _run_stages_body(
             z_margin_m=_as_float(params.get("z_margin_m")),
             spike_tolerance_m=_as_float(params.get("spike_tolerance_m")),
             max_fill_gap_m=_as_float(params.get("max_fill_gap_m")),
-            color_correction=params.get("color_correction") or "off_for_ms",
+            color_correction=params.get("color_correction") or "off",
+            seam_prefer_ids=_as_id_list(params.get("seam_prefer_ids")),
+            seam_edit_path=_as_path(params.get("seam_edit_path")),
             seamline_enabled=_as_bool(params.get("seamline_enabled"), True),
             write_pdf_report=_as_bool(params.get("write_pdf_report"), True),
             write_json_report=_as_bool(params.get("write_json_report"), True),

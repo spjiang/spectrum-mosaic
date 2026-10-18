@@ -8,8 +8,18 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ms_mosaic.compose import render_band, write_band_product
-from ms_mosaic.parallel import resolve_workers, split_ortho_pools, tile_worker_mb
+from ms_mosaic.compose import render_band, render_ms_bands, write_band_product
+from ms_mosaic.gpu import select as select_gpu
+from ms_mosaic.ortho import share_rectification
+from ms_mosaic.parallel import (
+    growth_since_now,
+    reserve_memory,
+    resolve_workers,
+    split_ortho_pools,
+    tile_worker_mb,
+)
+
+WRITE_BYTES_PER_CELL = 8
 from ms_mosaic.dense import DenseConfig, compute_height_field
 from ms_mosaic.dsm import (
     Dsm,
@@ -25,6 +35,7 @@ from ms_mosaic.grid import (
     coverage_from_footprints,
     erode_coverage,
     estimate_dsm_gsd,
+    estimate_native_gsd,
     estimate_z_margin_m,
     grid_from_footprints,
     ground_reference_z,
@@ -54,6 +65,7 @@ from ms_mosaic.report_pdf import write_quality_pdf
 from ms_mosaic.control import ControlState
 from ms_mosaic.progress import NullReporter, ProgressReporter, global_percent_for, stage_index
 from ms_mosaic.scene import BAND_ORDER, PRIMARY_BAND, transfer_band
+from ms_mosaic.seamline import SeamConfig
 
 COMMERCIAL_PRODUCTS = "拼图结果"
 _log_lock = threading.Lock()
@@ -203,6 +215,8 @@ def run_mosaic(
     edge_trim_m: float | None = None,
     flatten_edge_win_m: float | None = None,
     flatten_edge_band_m: float | None = None,
+    seam_prefer_ids: tuple[int, ...] | None = None,
+    seam_edit_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """完整交付：空三 → DSM → 真正射 → 拼接线/融合 → 正射成果 + PDF 报告。
 
@@ -221,7 +235,8 @@ def run_mosaic(
     dense_workers = workers_dense if workers_dense is not None else workers
     ortho_workers = workers_ortho if workers_ortho is not None else workers
     fill_gap = MAX_FILL_GAP_M if max_fill_gap_m is None else float(max_fill_gap_m)
-    rgb_gain = (color_correction or "off_for_ms").strip().lower() not in ("off", "false", "0", "none")
+    rgb_gain = (color_correction or "off").strip().lower() not in ("off", "false", "0", "none")
+    seam_cfg = SeamConfig(prefer_ids=tuple(int(i) for i in (seam_prefer_ids or ())))
     products_dir.mkdir(parents=True, exist_ok=True)
     extras_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(cache_dir) if cache_dir is not None else out_dir / "cache" / "features"
@@ -322,6 +337,11 @@ def run_mosaic(
             dsm_gsd = estimate_dsm_gsd(sparse.camera, dense_poses, ground_z)
             log(f"DSM GSD 由航高/焦距估计为 {dsm_gsd:.6f} m（正射为其一半）")
         grid = grid_from_footprints(cams, dense_poses, ground_z, dsm_gsd, block.crs)
+    native = estimate_native_gsd(sparse.camera, dense_poses, ground_z)
+    log(
+        f"处理记录：原始分辨率 {native:.6f} m/px，拼图分辨率 {float(dsm_gsd) * ORTHO_OVER_DSM:.6f} m/px，"
+        f"DSM {float(dsm_gsd):.6f} m"
+    )
     coverage = smooth_coverage_mask(
         coverage_from_footprints(grid, cams, dense_poses, ground_z), grid.gsd
     )
@@ -458,6 +478,19 @@ def run_mosaic(
         band_m=80.0 if flatten_edge_band_m is None else float(flatten_edge_band_m),
     )
 
+    from ms_mosaic.seam_edit import load_seam_edits, translate_edits
+
+    seam_edits = load_seam_edits(seam_edit_path, ortho_grid) if seam_edit_path else []
+    if seam_edits:
+        log(f"拼接线按图上圈定的 {len(seam_edits)} 块锁定来源影像，其余仍由图割决定")
+    color_to_shot = {im.index: im.shot_index for im in block.by_band(PRIMARY_BAND)}
+
+    def _edits_for(band: str):
+        if not seam_edits or band == PRIMARY_BAND:
+            return seam_edits
+        shot_to_image = {im.shot_index: im.index for im in block.by_band(band)}
+        return translate_edits(seam_edits, color_to_shot, shot_to_image)
+
     def _run_band(band: str, band_workers: int | None):
         cameras, poses, paths = transfer_band(block, at.cameras, at.poses, band)
         if not poses:
@@ -475,6 +508,8 @@ def run_mosaic(
             workers=band_workers,
             gain=rgb_gain if band == RGB_BAND else False,
             log=log,
+            seam_cfg=seam_cfg,
+            seam_edits=_edits_for(band),
         )
         if band == RGB_BAND and ref_dir is not None and (radiometric_normalize or match_reference_color):
             # 全局仿射辐射归一化：只改档位，不动纹理与局部对比。自研输出忠实于
@@ -492,8 +527,11 @@ def run_mosaic(
     def _commit_band(band: str, raster, mosaic) -> None:
         out_path = products_dir / group_name(band)
         try:
-            # 足迹已按 edge_trim_m 收过，这里只清 RGB 全 0，不再二次腐蚀
-            write_band_product(mosaic if mosaic is not None else raster, ortho_grid, band, out_path, trim_m=0)
+            # 写出要整幅掩膜、连通域标号与补洞临时量，约每格 8 B；预约让并发波段别在这时扩池
+            write_mb = ortho_grid.width * ortho_grid.height * WRITE_BYTES_PER_CELL >> 20
+            with reserve_memory(write_mb, growth_since_now()):
+                # 足迹已按 edge_trim_m 收过，这里只清 RGB 全 0，不再二次腐蚀
+                write_band_product(mosaic if mosaic is not None else raster, ortho_grid, band, out_path, trim_m=0)
             files["bands"][band] = str(out_path)
             log(f"已写出 {out_path.name}（{band} 完成）")
             keep = band == RGB_BAND or band == PRIMARY_BAND
@@ -520,20 +558,57 @@ def run_mosaic(
         got = _run_band(band, ortho_workers)
         if got:
             _commit_band(*got)
-    n_par, per = split_ortho_pools(len(ms_bands), tile_n)
-    if len(ms_bands) > 1 and n_par > 1:
-        log(f"多光谱正射并发 {n_par} 波段 × {per} 进程（块进程合计 ≤ {tile_n}）")
-        with ThreadPoolExecutor(max_workers=n_par) as pool:
-            futs = [pool.submit(_run_band, band, per) for band in ms_bands]
-            for fut in as_completed(futs):
-                got = fut.result()
+    ms_specs = []
+    for band in ms_bands:
+        cameras, poses, paths = transfer_band(block, at.cameras, at.poses, band)
+        if not poses:
+            log(f"跳过 {band}：没有对应的空三外方位")
+            continue
+        shot_of = {im.index: im.shot_index for im in block.by_band(band) if im.index in poses}
+        ms_specs.append((band, cameras, poses, paths, shot_of))
+    groups = [(c, p, s) for _, c, p, _, s in ms_specs]
+    share = len(ms_specs) > 1 and select_gpu("S5_ortho").device is None and share_rectification(groups)
+    if share:
+        names = [name for name, *_ in ms_specs]
+        log(
+            f"多光谱正射几何共用 {'/'.join(names)}，{tile_n} 进程。"
+            f"视角上限、立面层数、图割轮数与分波段相同"
+        )
+        rasters = render_ms_bands(
+            ortho_grid,
+            ortho_z,
+            dsm.grid,
+            ms_specs,
+            workers=tile_n,
+            log=log,
+            seam_cfg=seam_cfg,
+            seam_edits_by_band={name: _edits_for(name) for name in names},
+        )
+        pending = list(rasters.items())
+        try:
+            for band, raster in pending:
+                _commit_band(band, raster, None)
+        except BaseException:
+            for _, raster in pending:
+                raster.close()
+            raise
+    else:
+        if len(ms_specs) > 1 and select_gpu("S5_ortho").device is None:
+            log("多光谱内参或外方位不一致，分波段正射")
+        n_par, per = split_ortho_pools(len(ms_specs), tile_n)
+        if len(ms_specs) > 1 and n_par > 1:
+            log(f"多光谱正射并发 {n_par} 波段 × {per} 进程（块进程合计 ≤ {tile_n}）")
+            with ThreadPoolExecutor(max_workers=n_par) as pool:
+                futs = [pool.submit(_run_band, band, per) for band, *_ in ms_specs]
+                for fut in as_completed(futs):
+                    got = fut.result()
+                    if got:
+                        _commit_band(*got)
+        else:
+            for band, *_ in ms_specs:
+                got = _run_band(band, ortho_workers)
                 if got:
                     _commit_band(*got)
-    else:
-        for band in ms_bands:
-            got = _run_band(band, ortho_workers)
-            if got:
-                _commit_band(*got)
     timings["ortho"] = time.time() - t_ortho
     reporter.stage_done("S5_ortho", timings["ortho"])
     early = _barrier(control, reporter, "S5_ortho")
@@ -606,6 +681,7 @@ def run_mosaic(
         n_scanned=sparse.counts.get("n_shots", 0),
         n_usable=n_shots,
         cameras_info=cam_info,
+        color_correction="RGB 开启，多光谱关闭" if rgb_gain else "关闭",
     )
     primary = [im for im in block.primary() if im.index in at.poses]
     primary_cam = at.cameras.get(PRIMARY_BAND) or next(iter(at.cameras.values()), None)

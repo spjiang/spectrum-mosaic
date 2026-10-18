@@ -118,6 +118,16 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
     up: "配高不会超过 Docker CPU limit",
     off: "0 表示按引擎 CPU 封顶",
   },
+  gpu: {
+    examples: ["auto", "off", "0"],
+    tips: ["auto=选空闲显存最多的卡；没有显卡、没装 GPU 运行库或该阶段未通过验收时自动走 CPU，结果相同"],
+    off: "off 表示整个任务只用 CPU",
+  },
+  gpu_memory_gb: {
+    examples: ["0", "12"],
+    tips: ["0=所选显卡空闲显存的 85%；配高了不会超过空闲显存"],
+    down: "显存不够时自动分批；仍不够则该阶段改用 CPU",
+  },
   sigma_xy_m: {
     examples: ["3.0"],
     up: "更信影像、平面可能漂，适合 POS 很差",
@@ -192,9 +202,9 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
     down: "只留 Color 则没有多光谱产品",
   },
   color_correction: {
-    examples: ["off_for_ms", "on", "off"],
-    up: "on / off_for_ms：RGB 航带亮度更匀；多光谱始终不加增益",
-    off: "off：RGB 也不做增益，接缝处可能一道亮一道暗",
+    examples: ["off", "on"],
+    up: "on：只对 RGB 做全图曝光增益；多光谱始终不加",
+    off: "off（默认）：RGB 也不做增益，航带亮度保持原片",
   },
   seamline_enabled: {
     examples: ["true"],

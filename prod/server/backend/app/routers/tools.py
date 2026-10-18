@@ -4,11 +4,13 @@ import asyncio
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
 from app.auth import require_roles
+from app.config import Settings, get_settings
 from app.models import User
+from app.services.resolution import measure_native_gsd, resolve_input_dir
 from app.services.inspect_media import (
     ALLOWED,
     MAX_BYTES,
@@ -21,6 +23,15 @@ from app.services.inspect_media import (
 )
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
+
+
+@router.get("/native-gsd")
+def native_gsd(
+    input_dir: str = Query(...),
+    settings: Settings = Depends(get_settings),
+    _: User = Depends(require_roles("admin", "configurator", "executor", "viewer")),
+) -> dict:
+    return measure_native_gsd(resolve_input_dir(input_dir, settings))
 
 _CHUNK = 1024 * 1024
 

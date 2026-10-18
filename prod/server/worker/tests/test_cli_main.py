@@ -73,3 +73,11 @@ def test_preset_rgb_preview_forces_color(tmp_path):
     )
     params = args_to_params(args)
     assert params["bands"] == ["Color"]
+
+
+def test_gpu_flags_map_to_web_keys(tmp_path):
+    p = build_parser()
+    args = p.parse_args(["--input-dir", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--gpu", "1", "--gpu-memory-gb", "6"])
+    params = args_to_params(args)
+    assert params["gpu"] == "1"
+    assert params["gpu_memory_gb"] == 6.0

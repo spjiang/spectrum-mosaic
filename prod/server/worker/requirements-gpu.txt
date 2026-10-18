@@ -1,0 +1,3 @@
+-r requirements-worker.txt
+# CUDA 12.x 运行库（驱动 ≥ 525）。没有显卡的机器不要装，worker 会自动走 CPU。
+cupy-cuda12x>=13.0,<14

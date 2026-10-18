@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ from app.config import Settings
 from app.models import JobRun, JobRunLog, ParamDefinition, ParamProfile, ParamProfileValue
 from app.presets import RGB_PREVIEW_VALUES
 from app.services.mq import MQPublisher
+from app.services.resolution import apply_resolution_choice
 from app.services.params import assert_param_values
 from app.services.paths import detach_derived_dirs, stamp_run_output_dir, validate_paths
 from app.services.stage_steps import persist_stage_steps
@@ -27,6 +30,15 @@ LIVE = ACTIVE | {"awaiting_continue"}
 TERMINAL = {"succeeded", "failed", "cancelled"}
 # 运行中必须先暂停再删；排队/等待/已结束可直接删
 DELETABLE = {"paused", "queued", "awaiting_continue"} | TERMINAL
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def stage_rank(stage: str | None) -> int:
@@ -148,6 +160,32 @@ def parse_cpus(params: dict[str, Any] | None) -> int | None:
     return val
 
 
+def parse_gpu(params: dict[str, Any] | None) -> str:
+    """auto / off / 卡号，与 Worker 的 ms_mosaic.gpu.parse_gpu_setting 同一规则。"""
+    raw = (params or {}).get("gpu")
+    if raw is None:
+        return "auto"
+    text = str(raw).strip().lower()
+    if text in ("off", "none", "cpu", "false", "no"):
+        return "off"
+    if text.isdigit():
+        return str(int(text))
+    return "auto"
+
+
+def parse_gpu_memory_gb(params: dict[str, Any] | None) -> float | None:
+    raw = (params or {}).get("gpu_memory_gb")
+    if raw is None or raw == "":
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    return val
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -245,6 +283,9 @@ def create_job(
     detach_derived_dirs(snap, original_out)
     snap["input_dir"] = input_dir
     snap["output_dir"] = output_dir
+    # 只有这次提交带了倍数才按航片重算 GSD。模版默认值不改已经写好的 dsm_gsd。
+    if params.get("ortho_scale") not in (None, ""):
+        apply_resolution_choice(snap, input_dir, settings)
     assert_param_values(list(db.scalars(select(ParamDefinition))), snap)
     paths = resolve_paths(snap, input_dir, output_dir)
     for k, v in paths.items():
@@ -267,6 +308,10 @@ def create_job(
         report_pdf_path=paths["report_pdf_path"],
         memory_gb=parse_memory_gb(snap),
         cpus=parse_cpus(snap),
+        gpu=parse_gpu(snap),
+        gpu_memory_gb=parse_gpu_memory_gb(snap),
+        native_gsd_m=_optional_float(snap.get("native_gsd_m")),
+        ortho_gsd_m=_optional_float(snap.get("ortho_gsd_m")),
         message="已入库",
     )
     db.add(job)
@@ -276,7 +321,7 @@ def create_job(
     append_run_log(
         db,
         job.id,
-        f"配置已快照入库 模版id={pid} v={pver} 共{len(snap)}项 input={paths['input_dir']} output={paths['output_dir']} 内存={parse_memory_gb(snap) or 0:g}GB CPU={parse_cpus(snap) or 0}",
+        f"配置已快照入库 模版id={pid} v={pver} 共{len(snap)}项 input={paths['input_dir']} output={paths['output_dir']} 内存={parse_memory_gb(snap) or 0:g}GB CPU={parse_cpus(snap) or 0} GPU={parse_gpu(snap)} 显存={parse_gpu_memory_gb(snap) or 0:g}GB",
     )
     _dump_snapshot_file(job)
 
@@ -330,6 +375,145 @@ def create_job(
         job = db.get(JobRun, job.id)
     db.refresh(job)
     return job
+
+
+def _copy_bytes(src: Path, dest: Path) -> None:
+    """复制文件。只读来源，不移动、不硬链接。"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.copying")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dest)
+
+
+def _seam_source_dirs(source: JobRun) -> tuple[Path, Path]:
+    """正射所在目录，以及拼接线附件所在目录。当前成果为空时用最近一次留档。"""
+    snap = source.params_snapshot or {}
+    products_name = str(snap.get("products_dir_name") or "拼图结果")
+    live = Path(source.products_dir) if source.products_dir else Path(source.output_dir) / products_name
+    extras = Path(source.output_dir) / "附件"
+    if live.is_dir() and any(p.suffix.lower() == ".tif" for p in live.iterdir() if p.is_file()):
+        return live, extras
+    index_path = extras / "versions" / "index.json"
+    if index_path.is_file():
+        try:
+            rows = json.loads(index_path.read_text(encoding="utf-8")).get("versions") or []
+        except (OSError, json.JSONDecodeError):
+            rows = []
+        for row in reversed(rows):
+            folder = extras / "versions" / str(row.get("id") or "")
+            if folder.is_dir() and any(p.suffix.lower() == ".tif" for p in folder.iterdir() if p.is_file()):
+                return folder, folder
+    raise HTTPException(400, "来源任务没有正射成果，不能建立拼接线处理")
+
+
+def materialize_seam_workspace(source: JobRun, dest_root: Path) -> dict[str, str]:
+    """把来源成果复制到新目录。来源文件的内容和位置都不改。"""
+    snap = source.params_snapshot or {}
+    products_name = str(snap.get("products_dir_name") or "拼图结果")
+    src_products, src_extras = _seam_source_dirs(source)
+    if dest_root.exists():
+        raise HTTPException(400, "输出目录已存在")
+    dest_products = dest_root / products_name
+    dest_products.mkdir(parents=True)
+    for item in src_products.iterdir():
+        if item.is_file() and item.suffix.lower() in {".tif", ".tiff"}:
+            _copy_bytes(item, dest_products / item.name)
+    extras = dest_root / "附件"
+    extras.mkdir()
+    for name in ("seamlines.geojson", "seam_preview.png", "seam_preview.json"):
+        src = src_extras / name
+        if src.is_file():
+            _copy_bytes(src, extras / name)
+    (dest_root / "logs").mkdir()
+    (dest_root / "process").mkdir()
+    return {
+        "output_dir": str(dest_root),
+        "products_dir": str(dest_products),
+        "log_dir": str(dest_root / "logs"),
+        "process_dir": str(dest_root / "process"),
+        "cache_dir": str(source.cache_dir or ""),
+    }
+
+
+def create_seam_task(db: Session, *, user_id: int | None, source_id: uuid.UUID) -> JobRun:
+    """新建一条拼接线处理：复制来源成果，生成独立任务，不投递计算。"""
+    source = db.get(JobRun, source_id)
+    if source is None:
+        raise HTTPException(404, "来源任务不存在")
+    if (source.params_snapshot or {}).get("job_kind") == "seam":
+        raise HTTPException(400, "请选择正射任务，不要选择拼接线处理记录")
+    if source.status != "succeeded":
+        raise HTTPException(400, "来源任务还没有成功成果")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = Path(source.output_dir).parent / f"seam_{stamp}"
+    n = 2
+    while dest.exists():
+        dest = dest.with_name(f"seam_{stamp}_{n}")
+        n += 1
+    paths = materialize_seam_workspace(source, dest)
+    snap = dict(source.params_snapshot or {})
+    snap.update(
+        {
+            "job_kind": "seam",
+            "source_job_id": str(source.id),
+            "source_seq": int(source.seq),
+            "input_dir": source.input_dir,
+            "output_dir": paths["output_dir"],
+            "products_dir": paths["products_dir"],
+        }
+    )
+    snap.pop("seam_edit_path", None)
+    snap.pop("seam_prefer_ids", None)
+    timings = {
+        key: value
+        for key, value in dict(source.stage_timings or {}).items()
+        if key != "_open" and not isinstance(value, dict)
+    }
+    steps = dict(source.stage_steps or {})
+    now = _utcnow()
+    job = JobRun(
+        id=uuid.uuid4(),
+        created_by=user_id,
+        profile_id=source.profile_id,
+        profile_version=source.profile_version,
+        status="succeeded",
+        run_attempt=1,
+        params_snapshot=snap,
+        input_dir=source.input_dir,
+        output_dir=paths["output_dir"],
+        cache_dir=paths["cache_dir"] or None,
+        log_dir=paths["log_dir"],
+        process_dir=paths["process_dir"],
+        products_dir=paths["products_dir"],
+        current_stage=source.current_stage or "S6_report",
+        completed_stage=source.completed_stage or source.current_stage or "S6_report",
+        global_percent=100,
+        stage_timings=timings,
+        stage_steps=steps,
+        stage_progress=100,
+        message=f"拼接线处理 · 来源任务 #{source.seq}",
+        n_shots=source.n_shots,
+        memory_gb=source.memory_gb,
+        cpus=source.cpus,
+        gpu=source.gpu,
+        gpu_memory_gb=source.gpu_memory_gb,
+        native_gsd_m=source.native_gsd_m,
+        ortho_gsd_m=source.ortho_gsd_m,
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        finished_at=now,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    append_run_log(db, job.id, f"拼接线处理已建立，来源任务 #{source.seq}，成果已复制，来源文件未改动")
+    return job
+
+
+def list_seam_tasks(db: Session) -> list[JobRun]:
+    rows = list(db.scalars(select(JobRun).order_by(JobRun.created_at.desc()).limit(200)))
+    return [row for row in rows if (row.params_snapshot or {}).get("job_kind") == "seam"]
 
 
 def _existing_dsm(snap: dict[str, Any]) -> str | None:
@@ -458,6 +642,8 @@ def control_job(
             job.params_snapshot = snap
             job.memory_gb = parse_memory_gb(snap)
             job.cpus = parse_cpus(snap)
+            job.gpu = parse_gpu(snap)
+            job.gpu_memory_gb = parse_gpu_memory_gb(snap)
             job.status = "running"
             job.run_attempt += 1
             _publish_job_or_fail(
@@ -481,6 +667,8 @@ def control_job(
         job.params_snapshot = snap
         job.memory_gb = parse_memory_gb(snap)
         job.cpus = parse_cpus(snap)
+        job.gpu = parse_gpu(snap)
+        job.gpu_memory_gb = parse_gpu_memory_gb(snap)
         job.status = "running"
         job.run_attempt += 1
         job.finished_at = None
@@ -520,6 +708,8 @@ def control_job(
         job.params_snapshot = snap
         job.memory_gb = parse_memory_gb(snap)
         job.cpus = parse_cpus(snap)
+        job.gpu = parse_gpu(snap)
+        job.gpu_memory_gb = parse_gpu_memory_gb(snap)
         assert_single_running(db, except_id=job.id)
         job.status = "running"
         job.run_attempt += 1
@@ -582,6 +772,8 @@ def control_job(
         job.params_snapshot = snap
         job.memory_gb = parse_memory_gb(snap)
         job.cpus = parse_cpus(snap)
+        job.gpu = parse_gpu(snap)
+        job.gpu_memory_gb = parse_gpu_memory_gb(snap)
         assert_single_running(db)
         job.status = "running"
         job.run_attempt += 1
@@ -600,6 +792,159 @@ def control_job(
         append_run_log(db, job.id, "收到继续请求，已下发下一阶段", commit=False)
     else:
         raise HTTPException(400, f"未知动作 {action}")
+    job.updated_at = _utcnow()
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def evaluate_job(job: JobRun, n: int) -> dict[str, Any]:
+    from app.services.gps_check import load_pose_and_gps, ortho_gsd_of, pixel_errors, summarize
+
+    if n < 1 or n > 500:
+        raise HTTPException(400, "评估点数须在 1 到 500 之间")
+    at = _existing_at(dict(job.params_snapshot or {}))
+    if not at:
+        raise HTTPException(400, "还没有空三检查点，跑完空三后才能评估")
+    pose, gps, _crs = load_pose_and_gps(Path(at))
+    gsd = ortho_gsd_of(job.ortho_gsd_m, dict(job.params_snapshot or {}))
+    return summarize(pixel_errors(pose, gps, gsd), n=n, gsd_m=gsd)
+
+
+def reseam_job(
+    db: Session,
+    mq: MQPublisher,
+    job_id: uuid.UUID,
+    prefer_ids: str,
+    regions: list | None = None,
+    clear_edits: bool = False,
+) -> JobRun:
+    """按用户指定的影像重算拼接线。复用 DSM，从正射重跑，图割轮数不变。"""
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    if job.status in {"queued", "running"}:
+        raise HTTPException(400, "任务还在跑，结束后才能改拼接线")
+    text = (prefer_ids or "").strip().replace("，", ",")
+    snap = dict(job.params_snapshot or {})
+    snap.pop("seam_cancel_token", None)
+    snap["seam_prefer_ids"] = text
+    from app.services.seam_map import (
+        archive_current_products,
+        clear_seam_edit,
+        describe_edit,
+        restore_archived_products,
+        write_seam_edit,
+    )
+
+    if clear_edits:
+        from app.services.seam_map import EDIT_NAME, _extras_dir
+
+        saved = (_extras_dir(job) / EDIT_NAME).is_file() or bool(snap.get("seam_edit_path"))
+        if not saved:
+            raise HTTPException(400, "当前就是自动拼接线，没有需要重算的改动")
+        clear_seam_edit(job)
+        snap.pop("seam_edit_path", None)
+    elif regions:
+        snap["seam_edit_path"] = write_seam_edit(job, regions)
+    dsm_before = _existing_dsm(snap)
+    if not dsm_before:
+        raise HTTPException(400, "没有 DSM，不能只重算拼接线")
+    archived = archive_current_products(job, describe_edit(job, regions, clear_edits))
+    snap["reuse_dsm"] = (archived or {}).get("dsm") or dsm_before
+    snap["start_stage"] = "S5_ortho"
+    assert_single_running(db, except_id=job.id)
+    job.params_snapshot = snap
+    job.memory_gb = parse_memory_gb(snap)
+    job.cpus = parse_cpus(snap)
+    job.gpu = parse_gpu(snap)
+    job.gpu_memory_gb = parse_gpu_memory_gb(snap)
+    _reenter_stage(job, "S5_ortho")
+    job.status = "running"
+    job.run_attempt += 1
+    job.finished_at = None
+    job.error_summary = None
+    kept = f"，上一版已保留为{archived['label']}" if archived else ""
+    if clear_edits:
+        job.message = f"按自动拼接线重算正射{kept}"
+    elif regions:
+        job.message = f"按图上 {len(regions)} 块范围重算拼接线{kept}"
+    else:
+        job.message = ("按指定影像重算拼接线" if text else "按自动拼接线重算正射") + kept
+    _write_control(job, pause=False, cancel=False)
+    _publish_job_or_fail(
+        db,
+        mq,
+        job,
+        {
+            "schema_version": 1,
+            "job_id": str(job.id),
+            "run_attempt": job.run_attempt,
+            "params_snapshot": snap,
+            "action": "reseam",
+        },
+        job.message,
+    )
+    if job.status == "failed" and archived:
+        restore_archived_products(job, archived)
+        snap["reuse_dsm"] = dsm_before
+        job.params_snapshot = snap
+        job.message = "队列投递失败，拼图结果已放回，没有另存版本"
+    job.updated_at = _utcnow()
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def branch_seam_copy(db: Session, job_id: uuid.UUID, version_id: str) -> JobRun:
+    """从选定成果复制一份再进入拼接。源文件保持原样，修改记录新增一条。"""
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    if job.status in {"queued", "running", "paused"}:
+        raise HTTPException(400, "任务还在跑，结束后才能基于某一版复制修改")
+    from app.services.seam_map import start_seam_copy
+
+    record = start_seam_copy(job, version_id or "current")
+    job.message = str((record.get("change") or {}).get("summary") or "已复制一份成果，可以拼接修改")
+    append_run_log(db, job.id, job.message, commit=False)
+    job.updated_at = _utcnow()
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def cancel_reseam_job(db: Session, mq: MQPublisher, job_id: uuid.UUID) -> JobRun:
+    """停掉正在重算的正射，并把留档的上一版移回拼图结果。"""
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    if job.status not in {"queued", "running", "paused"}:
+        raise HTTPException(400, "现在没有正在进行的拼接线重算")
+    if job.status in {"queued", "running"}:
+        _write_control(job, pause=True, cancel=True)
+        try:
+            mq.publish_control({"schema_version": 1, "job_id": str(job.id), "action": "kill"})
+        except Exception as exc:  # noqa: BLE001
+            append_run_log(db, job.id, f"取消重算的停止消息投递失败: {exc}", level="error", commit=False)
+    from app.services.seam_map import list_product_versions, restore_archived_products
+
+    versions = list_product_versions(job)["versions"]
+    if not versions:
+        raise HTTPException(400, "没有可退回的上一版成果")
+    last = versions[-1]
+    restore_archived_products(job, last)
+    snap = dict(job.params_snapshot or {})
+    products = last.get("products_dir")
+    if products and (Path(products) / "DSM.tif").is_file():
+        snap["reuse_dsm"] = str(Path(products) / "DSM.tif")
+    snap["seam_cancel_token"] = job.run_attempt
+    job.params_snapshot = snap
+    job.status = "succeeded"
+    job.finished_at = _utcnow()
+    job.error_summary = None
+    job.message = f"已取消拼接线重算，成果已回到{last.get('label') or '上一版'}"
+    append_run_log(db, job.id, job.message, commit=False)
     job.updated_at = _utcnow()
     db.commit()
     db.refresh(job)
@@ -854,6 +1199,15 @@ def apply_event(db: Session, payload: dict[str, Any]) -> JobRun | None:
         return None
     event = payload.get("event")
     stage = payload.get("stage_id")
+    if (job.params_snapshot or {}).get("seam_cancel_token") and event in {
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "succeeded",
+        "awaiting_continue",
+    }:
+        return job
     was_running = job.status == "running"
     if event == "stage_done" and stage:
         if stage_rank(str(stage)) >= stage_rank(job.completed_stage):

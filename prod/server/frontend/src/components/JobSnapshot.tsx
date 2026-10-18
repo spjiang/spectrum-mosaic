@@ -12,6 +12,8 @@ const HIGHLIGHT = [
   "workers_at",
   "memory_gb",
   "cpus",
+  "gpu",
+  "gpu_memory_gb",
   "benchmark_dir",
   "match_reference_color",
   "reuse_dsm",

@@ -92,6 +92,46 @@ class JobContinue(BaseModel):
     stop_after_stage: str | None = None
 
 
+class EvaluateIn(BaseModel):
+    n: int = 20
+
+
+class EvaluateOut(BaseModel):
+    n_requested: int
+    n_used: int
+    threshold_px: float
+    rms_px: float
+    max_px: float
+    mean_px: float
+    n_over: int
+    within_tolerance: bool
+    gsd_m: float
+    message: str
+
+
+class SeamRegionIn(BaseModel):
+    image_id: int
+    points: list[list[float]]
+
+
+class SeamPreferIn(BaseModel):
+    prefer_ids: str = ""
+    regions: list[SeamRegionIn] = Field(default_factory=list)
+    clear_edits: bool = False
+
+
+class SeamBranchIn(BaseModel):
+    version: str = "current"
+
+
+class SeamTaskCreate(BaseModel):
+    source_job_id: UUID
+
+
+class SeamPointsIn(BaseModel):
+    points: list[list[float]] = Field(default_factory=list)
+
+
 class JobsClearedOut(BaseModel):
     deleted: int
 
@@ -124,10 +164,15 @@ class JobListOut(BaseModel):
     n_shots: int | None = None
     memory_gb: float | None = None
     cpus: int | None = None
+    gpu: str | None = None
+    gpu_memory_gb: float | None = None
+    native_gsd_m: float | None = None
+    ortho_gsd_m: float | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    has_rgb: bool = False
 
     class Config:
         from_attributes = True

@@ -9,6 +9,7 @@ from app.services.rbac import _ensure_public
 
 def test_cli_stays_on_every_saved_menu():
     assert "cli" in _ensure_public(["profiles", "jobs"])
+    assert "seam" in _ensure_public(["profiles", "jobs"])
     assert _ensure_public(["cli", "inspect"]).count("cli") == 1
 
 

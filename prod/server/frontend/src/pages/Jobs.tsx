@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Input, InputNumber, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
-import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Button, Card, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
+import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useJobs } from "../jobsContext";
 import { formatNo } from "../ids";
+import { gpuLabel } from "../gpuLabel";
 import { STAGE_META, STAGES } from "../stages";
 import JobStatusTag from "../components/JobStatusTag";
-import JobActions from "../components/JobActions";
+import JobRowMenu from "../components/JobRowMenu";
 import JobStageFlow from "../components/JobStageFlow";
 import JobProcessTable from "../components/JobProcessTable";
 import JobDetailModal from "../components/JobDetailModal";
@@ -41,12 +42,11 @@ const COL_W = {
   procs: 150,
   memory: 96,
   cpus: 72,
+  gpu: 90,
   created: 170,
   finished: 170,
   elapsed: 110,
-  input: 220,
-  output: 240,
-  actions: 430,
+  actions: 96,
 };
 
 export default function JobsPage() {
@@ -64,8 +64,12 @@ export default function JobsPage() {
   const [inspect, setInspect] = useState<any>(null);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [detailId, setDetailId] = useState<string | undefined>();
+  const [evalJob, setEvalJob] = useState<any>(null);
+  const [evalN, setEvalN] = useState(20);
+  const [evalBusy, setEvalBusy] = useState(false);
+  const [evalResult, setEvalResult] = useState<any>(null);
   const nav = useNavigate();
-  const { widths, setWidth, total } = useColumnWidths("jobs-table-v4", COL_W);
+  const { widths, setWidth, total } = useColumnWidths("jobs-table-v7", COL_W);
 
   async function reload() {
     await refresh();
@@ -264,6 +268,7 @@ export default function JobsPage() {
               render: (v: string, r: any) => (
                 <Space size={4} wrap>
                   <JobStatusTag status={v} />
+                  {String(r.message || "").startsWith("拼接线处理") ? <Tag color="blue">拼接线</Tag> : null}
                   {r.compute_state === "orphan" ? <Tag color="orange">进程脱离</Tag> : null}
                   {r.compute_state === "stale" ? <Tag>未在计算</Tag> : null}
                 </Space>
@@ -293,6 +298,11 @@ export default function JobsPage() {
               dataIndex: "cpus",
               render: (v: number) => (v ? `${v} 核` : "自动"),
             }),
+            col("gpu", {
+              title: "GPU",
+              dataIndex: "gpu",
+              render: (v: string | null) => gpuLabel(v),
+            }),
             col("created", {
               title: "创建时间",
               dataIndex: "created_at",
@@ -307,52 +317,70 @@ export default function JobsPage() {
               title: "总耗时",
               render: (_: unknown, r: any) => jobElapsedHours(r),
             }),
-            col("input", {
-              title: "输入",
-              dataIndex: "input_dir",
-              ellipsis: true,
-              render: (v: string) => <Typography.Text copyable={{ text: v }}>{v}</Typography.Text>,
-            }),
-            col("output", {
-              title: "输出",
-              dataIndex: "output_dir",
-              ellipsis: true,
-              render: (v: string) => <Typography.Text copyable={{ text: v }}>{v}</Typography.Text>,
-            }),
             col("actions", {
               title: "操作",
               render: (_: unknown, r: any) => (
-                <Space wrap size={4}>
-                  <Button size="small" type="link" onClick={() => setDetailId(r.id)}>
-                    详情
-                  </Button>
-                  <Button
-                    size="small"
-                    type="link"
-                    icon={<DownloadOutlined />}
-                    onClick={async () => {
-                      try {
-                        await api.openJobReport(r.id);
-                      } catch (e: any) {
-                        message.error(e.message);
-                      }
-                    }}
-                  >
-                    报告
-                  </Button>
-                  <Button size="small" type="link" icon={<DownloadOutlined />} onClick={() => downloadParams(r)}>
-                    参数
-                  </Button>
-                  <Button size="small" type="link" onClick={() => nav(`/execute?job=${r.id}`)}>
-                    {LIVE.includes(r.status) ? "监控" : "查看"}
-                  </Button>
-                  <JobActions job={r} inspect={inspect} computeState={r.compute_state} onChanged={() => reload()} />
-                </Space>
+                <JobRowMenu
+                  job={r}
+                  hasRgb={Boolean(r.has_rgb)}
+                  inspect={inspect}
+                  computeState={r.compute_state}
+                  allowRun={allowRun}
+                  onDetail={() => setDetailId(r.id)}
+                  onEvaluate={() => {
+                    setEvalJob(r);
+                    setEvalN(20);
+                    setEvalResult(null);
+                  }}
+                  onReport={async () => {
+                    try {
+                      await api.openJobReport(r.id);
+                    } catch (e: any) {
+                      message.error(e.message);
+                    }
+                  }}
+                  onParams={() => downloadParams(r)}
+                  onOpen={() => nav(`/execute?job=${r.id}`)}
+                  onSeam={() => nav(`/seam?job=${r.id}`)}
+                  onChanged={() => reload()}
+                />
               ),
             }),
           ]}
         />
       </Card>
+
+      <Modal
+        title={evalJob ? `评估任务 ${formatNo(evalJob.seq)}` : "评估"}
+        open={Boolean(evalJob)}
+        onCancel={() => setEvalJob(null)}
+        okText="开始评估"
+        confirmLoading={evalBusy}
+        onOk={async () => {
+          if (!evalJob) return;
+          setEvalBusy(true);
+          try {
+            setEvalResult(await api.evaluateJob(evalJob.id, evalN));
+          } catch (e: any) {
+            message.error(e.message || String(e));
+          } finally {
+            setEvalBusy(false);
+          }
+        }}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Typography.Text type="secondary">和外方位对应的 GPS 比平面偏差，按拼图像素计。标准 2 px。</Typography.Text>
+          <InputNumber min={1} max={500} value={evalN} onChange={(v) => setEvalN(typeof v === "number" ? v : 20)} addonBefore="点数" />
+          {evalResult ? (
+            <Typography.Paragraph style={{ marginBottom: 0 }}>
+              {evalResult.message}
+              <br />
+              均方根 {Number(evalResult.rms_px).toFixed(2)} px，平均 {Number(evalResult.mean_px).toFixed(2)} px，
+              拼图分辨率 {Number(evalResult.gsd_m).toFixed(4)} m
+            </Typography.Paragraph>
+          ) : null}
+        </Space>
+      </Modal>
 
       <JobDetailModal
         open={Boolean(detailId)}

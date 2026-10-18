@@ -11,6 +11,8 @@ import pytest
 from ms_mosaic.camera import Pose, project
 from ms_mosaic.grid import Grid
 from ms_mosaic.ortho import (
+    FACADE_MAX_SAMPLES,
+    MAX_VIEWS_PER_TILE,
     NativeImageCache,
     OrthoConfig,
     best_view_mosaic,
@@ -18,9 +20,12 @@ from ms_mosaic.ortho import (
     orthorectify_tile,
     overlap_count,
     select_views,
+    share_rectification,
     view_score,
     visibility_zbuffer,
 )
+from ms_mosaic.blend import multiband_blend
+from ms_mosaic.seamline import MAX_CYCLES, SeamConfig, optimal_labels
 from synthetic import BASE_Z, FLIGHT_Z, NADIR_GRID, MemoryCache, render_survey
 
 CRS = "EPSG:32647"
@@ -311,6 +316,129 @@ def test_overlap_count_matches_view_availability():
     assert n.max() <= len(stack.views)
     # 重叠度与逐视角有效掩膜必须一致
     np.testing.assert_array_equal(n, np.isfinite(stack.scores).sum(axis=0).astype(np.uint8))
+
+
+def test_shared_geometry_matches_each_band_and_skips_repeat_zbuffer(monkeypatch):
+    """同一曝光的投影和遮挡只算一次。像素、质量分、拼接线与分波段正射逐项相同。"""
+    survey = render_survey(NADIR_GRID[:3], relief=6.0)
+    grid = Grid.from_bounds((673026.0, 2620026.0, 673034.0, 2620034.0), 0.25, CRS)
+    gx, gy = grid.cell_centers()
+    z = survey.terrain(gx, gy).astype(np.float32)
+    window = (0, 0, grid.height, grid.width)
+    shift = 1000
+    cams_b = {i + shift: survey.cameras[i] for i in survey.cameras}
+    poses_b = {i + shift: survey.poses[i] for i in survey.poses}
+    images_b = {i + shift: np.ascontiguousarray(survey.images[i] * 0.5) for i in survey.images}
+    shot_a = {i: i for i in survey.cameras}
+    shot_b = {i + shift: i for i in survey.cameras}
+    assert share_rectification([
+        (survey.cameras, survey.poses, shot_a),
+        (cams_b, poses_b, shot_b),
+    ])
+
+    calls = {"n": 0}
+    real = visibility_zbuffer
+
+    def counted(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("ms_mosaic.ortho.visibility_zbuffer", counted)
+    cache: dict = {}
+    stack_a = orthorectify_tile(
+        grid, window, z, survey.cameras, survey.poses, MemoryCache(survey.images),
+        geom_cache=cache, shot_of=shot_a,
+    )
+    once = calls["n"]
+    assert once > 0
+    stack_b = orthorectify_tile(
+        grid, window, z, cams_b, poses_b, MemoryCache(images_b),
+        geom_cache=cache, shot_of=shot_b,
+    )
+    assert calls["n"] == once
+    assert len(stack_a.views) <= OrthoConfig().max_views
+
+    solo_a = orthorectify_tile(
+        grid, window, z, survey.cameras, survey.poses, MemoryCache(survey.images)
+    )
+    solo_b = orthorectify_tile(
+        grid, window, z, cams_b, poses_b, MemoryCache(images_b)
+    )
+    np.testing.assert_array_equal(stack_a.pixels, solo_a.pixels)
+    np.testing.assert_array_equal(stack_a.scores, solo_a.scores)
+    np.testing.assert_array_equal(stack_b.pixels, solo_b.pixels)
+    np.testing.assert_array_equal(stack_b.scores, solo_b.scores)
+    np.testing.assert_array_equal(
+        optimal_labels(stack_a, SeamConfig()), optimal_labels(solo_a, SeamConfig())
+    )
+    np.testing.assert_array_equal(
+        optimal_labels(stack_b, SeamConfig()), optimal_labels(solo_b, SeamConfig())
+    )
+    labels_a = optimal_labels(stack_a, SeamConfig())
+    labels_b = optimal_labels(stack_b, SeamConfig())
+    np.testing.assert_array_equal(multiband_blend(stack_a, labels_a), multiband_blend(solo_a, labels_a))
+    np.testing.assert_array_equal(multiband_blend(stack_b, labels_b), multiband_blend(solo_b, labels_b))
+    assert not np.array_equal(stack_a.pixels, stack_b.pixels)
+
+
+def test_shared_ms_keeps_view_facade_and_seam_settings():
+    """提速不得改视角上限、立面层数、图割轮数。"""
+    assert OrthoConfig().max_views == MAX_VIEWS_PER_TILE == 12
+    assert OrthoConfig().facade_max_samples == FACADE_MAX_SAMPLES == 64
+    assert SeamConfig().max_cycles == MAX_CYCLES == 3
+
+
+def test_ms_tile_matches_separate_bands_and_rejects_color():
+    """共用入口的一块结果与分波段正射相同，Color 不能混进来。"""
+    from ms_mosaic.compose import _ms_fn, render_ms_bands
+
+    survey = render_survey(NADIR_GRID[:3], relief=6.0)
+    grid = Grid.from_bounds((673026.0, 2620026.0, 673034.0, 2620034.0), 0.25, CRS)
+    gx, gy = grid.cell_centers()
+    z = survey.terrain(gx, gy).astype(np.float32)
+    window = (0, 0, grid.height, grid.width)
+    shift = 1000
+    bands = {
+        "450nm": (survey.cameras, survey.poses, MemoryCache(survey.images), {i: i for i in survey.cameras}),
+        "550nm": (
+            {i + shift: survey.cameras[i] for i in survey.cameras},
+            {i + shift: survey.poses[i] for i in survey.poses},
+            MemoryCache({i + shift: np.ascontiguousarray(survey.images[i] * 0.5) for i in survey.images}),
+            {i + shift: i for i in survey.cameras},
+        ),
+    }
+    ctx = {
+        "dsm_z": z,
+        "dsm_grid": grid,
+        "grid": grid,
+        "band_order": list(bands),
+        "bands": {
+            name: {"cameras": cams, "poses": poses, "shot_of": shot_of}
+            for name, (cams, poses, _images, shot_of) in bands.items()
+        },
+        "images": {name: images for name, (*_, images, _shot) in bands.items()},
+        "ortho_cfg": OrthoConfig(),
+        "seam_cfg": SeamConfig(),
+    }
+    got = {band: (mosaic, labels, views) for band, mosaic, labels, views in _ms_fn(ctx, window)}
+    for name, (cams, poses, images, _shot) in bands.items():
+        stack = orthorectify_tile(grid, window, z, cams, poses, images)
+        labels = optimal_labels(stack, SeamConfig())
+        np.testing.assert_array_equal(got[name][0], multiband_blend(stack, labels))
+        np.testing.assert_array_equal(got[name][1], labels)
+        assert got[name][2] == list(stack.views)
+    with pytest.raises(ValueError, match="Color"):
+        render_ms_bands(grid, z, grid, [("Color", survey.cameras, survey.poses, {}, {0: 0})])
+
+
+def test_share_rectification_rejects_different_focal():
+    survey = render_survey([(0.0, 0.0)])
+    cam = survey.cameras[0]
+    other = type(cam)(**{**cam.__dict__, "f": cam.f * 1.05, "key": "other"})
+    assert not share_rectification([
+        ({1: cam}, {1: survey.poses[0]}, {1: 7}),
+        ({2: other}, {2: survey.poses[0]}, {2: 7}),
+    ])
 
 
 def test_native_image_cache_shapes_and_eviction(tmp_path):
