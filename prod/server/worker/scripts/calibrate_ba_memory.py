@@ -63,7 +63,7 @@ def peak(problem: BAProblem, band, chunk: int) -> int:
     tracemalloc.start()
     tracemalloc.reset_peak()
     assembled = _assemble_band(problem, band, problem.x0, at_mod.HUBER_SCALE_PX, chunk=chunk)
-    solved = _damp_solve_band(assembled, 1e-3)
+    solved = _damp_solve_band(assembled, 1e-3, chunk=chunk)
     _, top = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     del assembled, solved

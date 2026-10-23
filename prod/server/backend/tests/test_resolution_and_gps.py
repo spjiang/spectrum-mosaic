@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 from app.services.geodesy import utm_to_wgs84, wgs84_to_utm
 from app.services.gps_check import pixel_errors, sample_errors, summarize
-from app.services.resolution import gsd_m, jpeg_size
+from app.services.resolution import gsd_m, jpeg_size, needs_resolution_choice
 
 
 def test_utm_roundtrip_matches_rasterio_reference():
@@ -14,6 +14,15 @@ def test_utm_roundtrip_matches_rasterio_reference():
     lat, lon = utm_to_wgs84(x, y, zone=50, south=False)
     assert lat == pytest.approx(22.55, abs=1e-6)
     assert lon == pytest.approx(114.05, abs=1e-6)
+
+
+def test_profile_scale_without_dsm_gsd_needs_resolution():
+    """API 只带模版、没带倍数时，也要把倍数写成 GSD，否则格网会随自标定焦距漂。"""
+    assert needs_resolution_choice({}, {"ortho_scale": 1}) is True
+    assert needs_resolution_choice({}, {"ortho_scale": 1, "dsm_gsd": 0.093}) is False
+    assert needs_resolution_choice({"ortho_scale": 2}, {"ortho_scale": 1, "dsm_gsd": 0.093}) is True
+    assert needs_resolution_choice({}, {}) is False
+    assert needs_resolution_choice({}, {"ortho_scale": 1, "grid_reference": "/ref"}) is False
 
 
 def test_gsd_is_height_over_scaled_focal():

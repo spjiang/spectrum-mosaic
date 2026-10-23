@@ -20,12 +20,13 @@ GNSS 位置先验直接进法方程，以及畸变参数分阶段释放而不是
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import least_squares
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_array
 from scipy.spatial.transform import Rotation
 
 from ms_mosaic.camera import INTRINSIC_NAMES, Camera, Pose
@@ -45,13 +46,16 @@ HUBER_SCALE_PX = 1.5
 MIN_TRIANGULATION_ANGLE_DEG = 1.0
 MIN_OBS_PER_TRACK = 2
 # 分波段平差的内存模型，系数由 scripts/calibrate_ba_memory.py 用 tracemalloc 实测拟合：
-# 24 万观测/8 万点单路峰值 245 MB（分块）/ 349 MB（不分块）。
+# 24 万观测/8 万点单路峰值 236 MB（4 万一块）/ 610 MB（不分块）。
 # 线程各自的 malloc arena 与碎片 tracemalloc 量不到，乘 1.25 兜底。
 _BA_CHUNK_OBS = 200_000
-_BA_BYTES_PER_CHUNK_OBS = 600  # 一块雅可比（width=16 时）
-_BA_BYTES_PER_OBS = 600  # 跨块累加的 W 与消元时的 Y=W·V⁻¹
+# 降阶时一次处理的观测对数；每对的中间量约 600 B，与一块雅可比同量级
+_BA_PAIR_CHUNK = 200_000
+_BA_BYTES_PER_CHUNK_OBS = 2100  # 一块雅可比与逐观测 JᵀJ（width=16 时）
+_BA_FIXED_BYTES = 1 << 20  # einsum / nditer 缓冲等与规模无关的开销
+_BA_BYTES_PER_OBS = 600  # 逐观测的 W 位姿块、W·V⁻¹ 与配对索引
 _BA_BYTES_PER_POINT = 1450  # V、V⁻¹ 块对角与 g_p
-_BA_DENSE_COPIES = 4  # U、U+λD、S 与 Y·Wᵀ 稠密结果
+_BA_DENSE_COPIES = 4  # U、U+λD/S、按影像对累加的消元块与一份转置
 _BA_SAFETY = 1.25
 # 不知道波段规模时的保守单路估计
 _BA_WORKER_MB = 4096
@@ -685,17 +689,65 @@ def _huber_weights(residual: np.ndarray, delta_px: float) -> tuple[np.ndarray, n
 
 @dataclass
 class _SchurBand:
-    """一个波段在降阶法方程里的列、观测和物方点。"""
+    """一个波段在降阶法方程里的影像、观测和物方点。
+
+    obs_img / obs_pt 是各观测在波段内的影像号与点号。pair_a / pair_b 是同一物方点上
+    两两不同的观测（a 在 b 前），按影像对 pair_key = img_a·n_img + img_b 排好序，
+    消元时据此把 W V⁻¹ Wᵀ 逐个 6x6 块累加到影像对上。
+    """
 
     cam: int
     img_ids: np.ndarray
     obs_idx: np.ndarray
     point_ids: np.ndarray
-    cam_cols: np.ndarray
-    point_cols: np.ndarray
+    obs_img: np.ndarray
+    obs_pt: np.ndarray
+    pair_a: np.ndarray
+    pair_b: np.ndarray
+    pair_key: np.ndarray
     n_img: int
     n_pts: int
     nc: int
+
+
+def _track_pairs(obs_img: np.ndarray, obs_pt: np.ndarray, n_img: int):
+    """同一物方点上的观测两两配对（a 在 b 前，不含自身），按影像对排序。
+
+    W V⁻¹ Wᵀ 在相机块 (i, k) 上的值是看到同一点的观测对之和
+    （Triggs et al. 2000 §6.1；Ceres SchurEliminator），结构只与轨迹有关，算一次即可。
+    """
+    n = int(obs_pt.size)
+    empty = np.zeros(0, dtype=np.intp)
+    if n < 2:
+        return empty, empty, empty.astype(np.int64)
+    order = np.argsort(obs_pt, kind="stable")
+    pt_sorted = obs_pt[order]
+    ends = np.append(np.flatnonzero(np.diff(pt_sorted)) + 1, n)
+    group_end = np.repeat(ends, np.diff(np.concatenate([[0], ends])))
+    after = group_end - np.arange(n) - 1
+    total = int(after.sum())
+    if total == 0:
+        return empty, empty, empty.astype(np.int64)
+    first = np.repeat(np.arange(n), after)
+    offset = np.arange(total) - np.repeat(np.cumsum(after) - after, after)
+    a = order[first]
+    b = order[first + 1 + offset]
+    key = obs_img[a].astype(np.int64) * n_img + obs_img[b]
+    perm = np.argsort(key, kind="stable")
+    return a[perm], b[perm], key[perm]
+
+
+def _group_sum(index: np.ndarray, values: np.ndarray, n: int) -> np.ndarray:
+    """values 的首维按 index 分组求和到 n 组。
+
+    用稀疏指示矩阵乘稠密阵：一遍顺序扫描、释放 GIL，比 np.add.at 的逐元素路径快得多。
+    """
+    m = int(index.shape[0])
+    if m == 0:
+        return np.zeros((n,) + values.shape[1:])
+    flat = np.ascontiguousarray(values).reshape(m, -1)
+    indicator = csr_array((np.ones(m), (index, np.arange(m))), shape=(n, m))
+    return (indicator @ flat).reshape((n,) + values.shape[1:])
 
 
 def _separable_bands(problem: BAProblem) -> list[_SchurBand] | None:
@@ -721,29 +773,24 @@ def _separable_bands(problem: BAProblem) -> list[_SchurBand] | None:
         point_ids = np.unique(problem.obs_point[obs_idx]) if obs_idx.size else np.zeros(0, dtype=int)
         n_img = int(img_ids.size)
         n_pts = int(point_ids.size)
-        local_of = np.full(problem.n_img, -1, dtype=int)
+        local_of = np.full(problem.n_img, -1, dtype=np.intp)
         local_of[img_ids] = np.arange(n_img)
-        if obs_idx.size:
-            local_img = local_of[problem.obs_image[obs_idx]]
-            pose_cols = local_img[:, None] * 6 + np.arange(6)[None, :]
-            intr_cols = n_img * 6 + np.arange(problem.n_free)[None, :]
-            intr_cols = np.broadcast_to(intr_cols, (obs_idx.size, problem.n_free)).copy()
-            cam_cols = np.concatenate([pose_cols, intr_cols], axis=1)
-            point_of = np.full(problem.n_pts, -1, dtype=int)
-            point_of[point_ids] = np.arange(n_pts)
-            local_pts = point_of[problem.obs_point[obs_idx]]
-            point_cols = local_pts[:, None] * 3 + np.arange(3)[None, :]
-        else:
-            cam_cols = np.zeros((0, 6 + problem.n_free), dtype=int)
-            point_cols = np.zeros((0, 3), dtype=int)
+        point_of = np.full(problem.n_pts, -1, dtype=np.intp)
+        point_of[point_ids] = np.arange(n_pts)
+        obs_img = local_of[problem.obs_image[obs_idx]]
+        obs_pt = point_of[problem.obs_point[obs_idx]]
+        pair_a, pair_b, pair_key = _track_pairs(obs_img, obs_pt, n_img)
         bands.append(
             _SchurBand(
                 cam=cam,
                 img_ids=img_ids,
                 obs_idx=obs_idx,
                 point_ids=point_ids,
-                cam_cols=cam_cols,
-                point_cols=point_cols,
+                obs_img=obs_img,
+                obs_pt=obs_pt,
+                pair_a=pair_a,
+                pair_b=pair_b,
+                pair_key=pair_key,
                 n_img=n_img,
                 n_pts=n_pts,
                 nc=n_img * 6 + problem.n_free,
@@ -762,7 +809,8 @@ def band_worker_bytes(n_obs: int, n_pts: int, nc: int, n_free: int, *, chunk: in
     width = 6 + int(n_free)
     per_chunk_obs = min(int(n_obs), int(chunk))
     raw = (
-        per_chunk_obs * _BA_BYTES_PER_CHUNK_OBS * width / 16
+        _BA_FIXED_BYTES
+        + per_chunk_obs * _BA_BYTES_PER_CHUNK_OBS * width / 16
         + int(n_obs) * _BA_BYTES_PER_OBS
         + int(n_pts) * _BA_BYTES_PER_POINT
         + int(nc) * int(nc) * 8 * _BA_DENSE_COPIES
@@ -780,6 +828,11 @@ def _assemble_band(
 ):
     """组出一个波段的法方程。与整块组装时该波段对应的子块相同。
 
+    每个观测只连一张影像的位姿、本波段内参和一个物方点，所以：
+    U 的位姿部分是逐影像 6x6 块对角，加上位姿-内参与内参-内参两条；
+    W 拆成逐观测的 6x3 位姿块与逐点的 n_free x 3 内参块。
+    这些块直接按观测算出再分组求和，不经过通用稀疏矩阵乘。
+
     JᵀJ、Jᵀr 对观测可加，按块线性化再累加，结果与一次组装相同，
     但雅可比（每观测约 2 KB）只驻留一块，峰值不再随波段观测数增长。
     """
@@ -788,61 +841,51 @@ def _assemble_band(
     nc = band.nc
     n_obs = int(band.obs_idx.size)
     n_pts = band.n_pts
-    width = 6 + problem.n_free
-    u = np.zeros((nc, nc))
-    w = None
-    g_c = np.zeros(nc)
-    g_p = np.zeros(n_pts * 3)
+    n_img = band.n_img
+    n_free = problem.n_free
+    width = 6 + n_free
+    img_h = np.zeros((n_img, width, width))
+    img_g = np.zeros((n_img, width))
+    w_pose = np.empty((n_obs, 6, 3))
+    w_intr = np.zeros((n_pts, n_free, 3))
+    g_p = np.zeros((n_pts, 3))
     v = np.zeros((n_pts, 3, 3))
     step = max(1, int(chunk))
     for start in range(0, n_obs, step):
         sl = slice(start, start + step)
         a, d, b, r, _, _, _ = problem.linearize(x, band.obs_idx[sl])
-        m = int(r.shape[0])
         weight, _ = _huber_weights(r, huber_px)
         sw = np.sqrt(weight)
-        jc_blocks = np.concatenate([a, d], axis=2) * sw[:, None, None]
+        jc = np.concatenate([a, d], axis=2) * sw[:, None, None]
         del a, d
         b = b * sw[:, None, None]
-        rvec = (r * sw[:, None]).ravel()
-        del r, weight, sw
-        cam_cols = band.cam_cols[sl]
-        point_cols = band.point_cols[sl]
-        row_base = np.arange(m) * 2
-        rows = np.repeat(row_base, width)
-        jc = coo_matrix(
-            (
-                np.concatenate([jc_blocks[:, 0, :].ravel(), jc_blocks[:, 1, :].ravel()]),
-                (
-                    np.concatenate([rows, rows + 1]),
-                    np.concatenate([cam_cols.ravel(), cam_cols.ravel()]),
-                ),
-            ),
-            shape=(m * 2, nc),
-        ).tocsr()
-        del jc_blocks, rows
-        rows3 = np.repeat(row_base, 3)
-        jp = coo_matrix(
-            (
-                np.concatenate([b[:, 0, :].ravel(), b[:, 1, :].ravel()]),
-                (
-                    np.concatenate([rows3, rows3 + 1]),
-                    np.concatenate([point_cols.ravel(), point_cols.ravel()]),
-                ),
-            ),
-            shape=(m * 2, n_pts * 3),
-        ).tocsr()
-        del rows3
-        u += (jc.T @ jc).toarray()
-        part = (jc.T @ jp).tocsr()
-        w = part if w is None else (w + part).tocsr()
-        del part
-        g_c -= jc.T @ rvec
-        g_p -= jp.T @ rvec
-        np.add.at(v, point_cols[:, 0] // 3, np.einsum("nki,nkj->nij", b, b))
-        del jc, jp, b, rvec
+        r = r * sw[:, None]
+        del weight, sw
+        img = band.obs_img[sl]
+        pt = band.obs_pt[sl]
+        img_h += _group_sum(img, np.einsum("nki,nkj->nij", jc, jc), n_img)
+        img_g += _group_sum(img, np.einsum("nki,nk->ni", jc, r), n_img)
+        jb = np.einsum("nki,nkj->nij", jc, b)
+        w_pose[sl] = jb[:, :6]
+        w_intr += _group_sum(pt, jb[:, 6:], n_pts)
+        g_p += _group_sum(pt, np.einsum("nki,nk->ni", b, r), n_pts)
+        v += _group_sum(pt, np.einsum("nki,nkj->nij", b, b), n_pts)
+        del jc, b, r, jb
 
-    local = np.arange(band.n_img)
+    n_pose = n_img * 6
+    local = np.arange(n_img)
+    u = np.zeros((nc, nc))
+    pose_pose = np.zeros((n_img, 6, n_img, 6))
+    pose_pose[local, :, local, :] = img_h[:, :6, :6]
+    u[:n_pose, :n_pose] = pose_pose.reshape(n_pose, n_pose)
+    del pose_pose
+    pose_intr = img_h[:, :6, 6:].reshape(n_pose, n_free)
+    u[:n_pose, n_pose:] = pose_intr
+    u[n_pose:, :n_pose] = pose_intr.T
+    u[n_pose:, n_pose:] = img_h[:, 6:, 6:].sum(axis=0)
+    g_c = -np.concatenate([img_g[:, :6].ravel(), img_g[:, 6:].sum(axis=0)])
+    g_p = -g_p.ravel()
+
     for k in range(3):
         dcols = local * 6 + k
         ccols = local * 6 + 3 + k
@@ -854,34 +897,117 @@ def _assemble_band(
     cols = band.n_img * 6 + np.arange(problem.n_free)
     u[cols, cols] += inv_sigma**2
     g_c[cols] -= intr_res[band.cam] * inv_sigma
-    return u, w, g_c, g_p, v
+    return _BandNormal(u=u, w_pose=w_pose, w_intr=w_intr, g_c=g_c, g_p=g_p, v=v, band=band)
 
 
-def _damp_solve_band(assembled, lam: float):
-    """加阻尼并做这个波段的 Schur 消元。奇异时返回 None，让外层加大 λ。"""
-    u, w, g_c, g_p, v = assembled
-    n_pts = v.shape[0]
-    u_d = u + np.diag(lam * np.maximum(np.diag(u), 1e-9))
+@dataclass
+class _BandNormal:
+    """一个波段的法方程。W 不存成稀疏阵，而是按结构拆开：
+
+    w_pose[o]：第 o 个观测所在影像的位姿与其物方点之间的 6x3 块；
+    w_intr[j]：本波段内参与第 j 个物方点之间的 n_free x 3 块。
+    """
+
+    u: np.ndarray
+    w_pose: np.ndarray
+    w_intr: np.ndarray
+    g_c: np.ndarray
+    g_p: np.ndarray
+    v: np.ndarray
+    band: _SchurBand
+
+
+def _pair_schur(z_pose: np.ndarray, w_pose: np.ndarray, band: _SchurBand, *, chunk: int) -> np.ndarray:
+    """同一物方点上不同观测 (a, b) 的 Z_a W_bᵀ（Z = W V⁻¹），按影像对累加，含 (b, a) 的转置项。
+
+    返回 (n_img, n_img, 6, 6)。配对已按影像对排序，一块内用 reduceat 合并相同影像对，
+    合并后影像对互不相同，直接按下标累加。
+    """
+    n = band.n_img
+    acc = np.zeros((n * n, 6, 6))
+    for start in range(0, int(band.pair_key.size), max(1, int(chunk))):
+        sl = slice(start, start + chunk)
+        key = band.pair_key[sl]
+        blocks = np.matmul(z_pose[band.pair_a[sl]], w_pose[band.pair_b[sl]].transpose(0, 2, 1))
+        head = np.flatnonzero(np.concatenate([[True], key[1:] != key[:-1]]))
+        acc[key[head]] += np.add.reduceat(blocks, head, axis=0)
+        del blocks
+    acc = acc.reshape(n, n, 6, 6)
+    return acc + acc.transpose(1, 0, 3, 2)
+
+
+def _damp_solve_band(normal: _BandNormal, lam: float, *, chunk: int = _BA_CHUNK_OBS):
+    """加阻尼并做这个波段的 Schur 消元。奇异时返回 None，让外层加大 λ。
+
+    S = U − W V⁻¹ Wᵀ 按块直接算：位姿-位姿块来自同一观测（对角）与同点观测对；
+    位姿-内参、内参-内参来自逐点内参块。数学上与稀疏阵相乘相同，只是求和次序不同。
+    """
+    band = normal.band
+    n_pts = band.n_pts
+    n_img = band.n_img
+    n_obs = int(band.obs_idx.size)
+    n_free = normal.w_intr.shape[1]
+    n_pose = n_img * 6
+    u_d = normal.u + np.diag(lam * np.maximum(np.diag(normal.u), 1e-9))
     if n_pts == 0:
         try:
-            dc = np.linalg.solve(u_d, g_c)
+            dc = np.linalg.solve(u_d, normal.g_c)
         except np.linalg.LinAlgError:
             return None
         return dc, np.zeros((0, 3))
+    v = normal.v
     v_d = v + lam * np.maximum(v.diagonal(axis1=1, axis2=2), 1e-9)[:, :, None] * np.eye(3)
     try:
         v_inv = np.linalg.inv(v_d)
     except np.linalg.LinAlgError:
         return None
-    v_inv_sp = _block_diag_3x3(v_inv)
-    y = (w @ v_inv_sp).tocsr()
-    s = u_d - np.asarray((y @ w.T).todense())
-    rhs = g_c - y @ g_p
+    w_pose = normal.w_pose
+    w_intr = normal.w_intr
+    g_p = normal.g_p.reshape(n_pts, 3)
+    q = np.einsum("nij,nj->ni", v_inv, g_p)
+    z_intr = np.matmul(w_intr, v_inv)
+
+    z_pose = np.empty_like(w_pose)
+    same_obs = np.zeros((n_img, 6, 6))
+    pose_intr = np.zeros((n_img, 6, n_free))
+    yg_pose = np.zeros((n_img, 6))
+    step = max(1, int(chunk))
+    for start in range(0, n_obs, step):
+        sl = slice(start, start + step)
+        img = band.obs_img[sl]
+        pt = band.obs_pt[sl]
+        wp = w_pose[sl]
+        zp = np.matmul(wp, v_inv[pt])
+        z_pose[sl] = zp
+        same_obs += _group_sum(img, np.matmul(zp, wp.transpose(0, 2, 1)), n_img)
+        pose_intr += _group_sum(img, np.matmul(zp, w_intr[pt].transpose(0, 2, 1)), n_img)
+        yg_pose += _group_sum(img, np.einsum("nij,nj->ni", wp, q[pt]), n_img)
+        del zp
+
+    pose_pose = _pair_schur(z_pose, w_pose, band, chunk=_BA_PAIR_CHUNK)
+    del z_pose
+    local = np.arange(n_img)
+    pose_pose[local, local] += same_obs
+    s = u_d
+    s[:n_pose, :n_pose] -= pose_pose.transpose(0, 2, 1, 3).reshape(n_pose, n_pose)
+    del pose_pose
+    cross = pose_intr.reshape(n_pose, n_free)
+    s[:n_pose, n_pose:] -= cross
+    s[n_pose:, :n_pose] -= cross.T
+    s[n_pose:, n_pose:] -= np.einsum("nik,njk->ij", z_intr, w_intr)
+    rhs = normal.g_c - np.concatenate([yg_pose.ravel(), np.einsum("nij,nj->i", w_intr, q)])
     try:
         dc = np.linalg.solve(s, rhs)
     except np.linalg.LinAlgError:
         return None
-    dp = np.einsum("nij,nj->ni", v_inv, (g_p - (w.T @ dc)).reshape(n_pts, 3))
+
+    dc_pose = dc[:n_pose].reshape(n_img, 6)
+    wt_dc = np.einsum("nij,i->nj", w_intr, dc[n_pose:])
+    for start in range(0, n_obs, step):
+        sl = slice(start, start + step)
+        contrib = np.einsum("nij,ni->nj", w_pose[sl], dc_pose[band.obs_img[sl]])
+        wt_dc += _group_sum(band.obs_pt[sl], contrib, n_pts)
+    dp = np.einsum("nij,nj->ni", v_inv, g_p - wt_dc)
     return dc, dp
 
 
@@ -1298,6 +1424,47 @@ def _camera_groups(
     return groups
 
 
+def _ba_process_init() -> None:
+    """平差子进程：每路已是进程，BLAS 再开线程会超订。"""
+    import os
+
+    for var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ.setdefault(var, "1")
+
+
+def _solve_camera_group(job: dict):
+    """一个波段的独立 LM。顶层函数才能被 spawn 进程导入。"""
+    g: _CameraGroup = job["group"]
+    local_of = np.full(int(job["n_global_pts"]), -1, np.int64)
+    local_of[g.point_ids] = np.arange(g.point_ids.size)
+    sub_obs = [
+        Observation(o.image, int(local_of[o.point]), o.uv) for o in job["observations"]
+    ]
+    problem = BAProblem(
+        {g.key: job["camera"]},
+        job["poses"],
+        job["points"],
+        sub_obs,
+        {i: g.key for i in g.image_ids},
+        job["gps"],
+        job["att"],
+        sigma_xyz=job["sigma_xyz"],
+        sigma_attitude_rad=job["sigma_attitude_rad"],
+        free_names=job["free_names"],
+        intrinsic_prior=job["prior"],
+    )
+    del sub_obs
+    x = solve_lm(problem, max_iterations=job["max_iterations"], verbose=job["verbose"])
+    cams, sub_out, pts = problem.unpack(x)
+    return g, cams, sub_out, pts, problem.reprojection_px(x)
+
+
 def _bundle_adjust_by_camera(
     groups: list[_CameraGroup],
     cameras: dict[str, Camera],
@@ -1325,54 +1492,49 @@ def _bundle_adjust_by_camera(
     if log is not None:
         avail = available_bytes()
         tail = f"，此刻剩余 {avail / 2**30:.1f} GB" if avail is not None else ""
-        log(f"平差按波段独立求解 {workers}/{len(groups)} 路（单路约 {per_worker / 2**30:.1f} GB{tail}）")
+        kind = "进程" if workers > 1 else "路"
+        log(f"平差按波段独立求解 {workers}/{len(groups)} {kind}（单路约 {per_worker / 2**30:.1f} GB{tail}）")
 
-    def solve_group(g: _CameraGroup):
-        local_of = np.full(int(points.shape[0]), -1, np.int64)
-        local_of[g.point_ids] = np.arange(g.point_ids.size)
-        sub_obs = [
-            Observation(observations[k].image, int(local_of[observations[k].point]), observations[k].uv)
-            for k in g.obs_idx
-        ]
-        sub_poses = {i: poses[i] for i in g.image_ids}
-        prior = {g.key: (intrinsic_prior or cameras)[g.key]}
-        problem = BAProblem(
-            {g.key: cameras[g.key]},
-            sub_poses,
-            points[g.point_ids],
-            sub_obs,
-            {i: g.key for i in g.image_ids},
-            {i: gps[i] for i in g.image_ids},
-            {i: attitude_rotation[i] for i in g.image_ids},
-            sigma_xyz=sigma_xyz,
-            sigma_attitude_rad=sigma_attitude_rad,
-            free_names=free_names,
-            intrinsic_prior=prior,
+    n_global = int(points.shape[0])
+    jobs = []
+    for g in groups:
+        jobs.append(
+            {
+                "group": g,
+                "n_global_pts": n_global,
+                "camera": cameras[g.key],
+                "poses": {i: poses[i] for i in g.image_ids},
+                "points": points[g.point_ids],
+                "observations": [observations[int(k)] for k in g.obs_idx],
+                "gps": {i: gps[i] for i in g.image_ids},
+                "att": {i: attitude_rotation[i] for i in g.image_ids},
+                "sigma_xyz": sigma_xyz,
+                "sigma_attitude_rad": sigma_attitude_rad,
+                "free_names": free_names,
+                "prior": {g.key: (intrinsic_prior or cameras)[g.key]},
+                "max_iterations": max_iterations,
+                "verbose": verbose,
+            }
         )
-        del sub_obs
-        x = solve_lm(problem, max_iterations=max_iterations, verbose=verbose)
-        cams, sub_out, pts = problem.unpack(x)
-        return g, cams, sub_out, pts, problem.reprojection_px(x)
+
+    if workers > 1:
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=ctx, initializer=_ba_process_init
+        ) as pool:
+            results = list(pool.map(_solve_camera_group, jobs))
+    else:
+        results = [_solve_camera_group(job) for job in jobs]
 
     out_cameras = dict(cameras)
     out_poses = dict(poses)
     out_points = np.array(points, copy=True)
     residual = np.zeros(len(observations))
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = pool.map(solve_group, groups)
-            for g, cams, sub_out, pts, res in results:
-                out_cameras.update(cams)
-                out_poses.update(sub_out)
-                out_points[g.point_ids] = pts
-                residual[g.obs_idx] = res
-    else:
-        for g in groups:
-            g, cams, sub_out, pts, res = solve_group(g)
-            out_cameras.update(cams)
-            out_poses.update(sub_out)
-            out_points[g.point_ids] = pts
-            residual[g.obs_idx] = res
+    for g, cams, sub_out, pts, res in results:
+        out_cameras.update(cams)
+        out_poses.update(sub_out)
+        out_points[g.point_ids] = pts
+        residual[g.obs_idx] = res
     return out_cameras, out_poses, out_points, residual
 
 

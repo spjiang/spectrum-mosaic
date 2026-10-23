@@ -119,6 +119,22 @@ def measure_native_gsd(input_dir: Path, *, sample: int = _SAMPLE) -> dict:
     }
 
 
+def needs_resolution_choice(params: dict, snap: dict) -> bool:
+    """提交时要不要按航片写成 DSM/正射 GSD。
+
+    锁定交付格网时不改。模版已经写好 dsm_gsd 时也不改，避免覆盖人工分辨率。
+    模版只有倍数、没有 dsm_gsd 时必须写：否则 worker 会在空三之后用自标定焦距
+    重估，格网随 f 漂移（S810 任务 #5 正射从 1221 块变成 1517 块就是这个原因）。
+    """
+    if snap.get("grid_reference"):
+        return False
+    if params.get("ortho_scale") not in (None, ""):
+        return True
+    if snap.get("dsm_gsd") not in (None, ""):
+        return False
+    return snap.get("ortho_scale") not in (None, "")
+
+
 def apply_resolution_choice(snap: dict, input_dir: str, settings: Settings) -> None:
     """用户选了拼图倍数时，用实测原始分辨率写入 DSM/正射 GSD。
 

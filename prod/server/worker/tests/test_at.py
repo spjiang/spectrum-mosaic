@@ -8,6 +8,7 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from ms_mosaic.at import (
+    CALIBRATION_STAGES,
     ATResult,
     BAProblem,
     Observation,
@@ -18,6 +19,7 @@ from ms_mosaic.at import (
     _separable_bands,
     ba_parallel_workers,
     band_worker_bytes,
+    bundle_adjust,
     drop_outliers,
     run_at,
     solve_lm,
@@ -295,8 +297,6 @@ def test_drop_outliers_removes_bad_observations_and_orphan_points():
 
 def test_bundle_adjust_per_camera_matches_joint():
     """波段互不共享物方点时，逐波段独立 LM 与整块 LM 收敛到同一解。"""
-    from ms_mosaic.at import bundle_adjust
-
     inputs = _two_band_inputs()
     cameras, poses, points, observations, image_camera, gps, att = inputs
     split = bundle_adjust(
@@ -346,7 +346,7 @@ def _two_band_inputs():
     )
 
 
-def _two_band_problem():
+def _two_band_problem(free_names=("f", "cx", "cy")):
     """两个波段各看各的点，法方程应当块对角。"""
     cam_a, poses_a, points_a = _scene(seed=3, n_points=40, grid=(3, 2), step=18.0)
     cam_b = Camera.initial("450", 2048, 1536, kind="ms").with_vector(TRUE_INTRINSICS * np.array(
@@ -375,7 +375,7 @@ def _two_band_problem():
     observations = obs_a + obs_b
     problem = BAProblem(
         cameras, poses_init, points, observations, image_camera, gps, att,
-        free_names=("f", "cx", "cy"),
+        free_names=free_names,
     )
     return problem
 
@@ -390,16 +390,125 @@ def test_band_parallel_matches_joint_solution():
     np.testing.assert_allclose(split, joint, rtol=1e-6, atol=1e-5)
 
 
+def test_bundle_adjust_process_pool_matches_sequential(monkeypatch):
+    """多波段走 spawn 进程时，解与串行逐波段相同（方程独立，只是换执行器）。"""
+    inputs = _two_band_inputs()
+    cameras, poses, points, observations, image_camera, gps, att = inputs
+    monkeypatch.setattr("ms_mosaic.at.ba_parallel_workers", lambda *a, **k: 1)
+    seq = bundle_adjust(
+        cameras, poses, points, observations, image_camera, gps, att,
+        free_names=("f", "cx", "cy"), max_iterations=20,
+    )
+    monkeypatch.setattr("ms_mosaic.at.ba_parallel_workers", lambda *a, **k: 2)
+    par = bundle_adjust(
+        cameras, poses, points, observations, image_camera, gps, att,
+        free_names=("f", "cx", "cy"), max_iterations=20,
+    )
+    for key in cameras:
+        np.testing.assert_allclose(par[0][key].to_vector(), seq[0][key].to_vector(), rtol=1e-9, atol=1e-9)
+    for i in poses:
+        np.testing.assert_allclose(par[1][i].center, seq[1][i].center, atol=1e-9)
+        np.testing.assert_allclose(par[1][i].rotation, seq[1][i].rotation, atol=1e-9)
+    np.testing.assert_allclose(par[2], seq[2], atol=1e-9)
+    np.testing.assert_allclose(par[3], seq[3], atol=1e-9)
+
+
 def test_chunked_band_assembly_matches_single_pass():
     """按观测分块累加的法方程必须与一次组装逐项相同。"""
     problem = _two_band_problem()
     band = _separable_bands(problem)[0]
     one = _assemble_band(problem, band, problem.x0, 1.5, chunk=10**9)
     many = _assemble_band(problem, band, problem.x0, 1.5, chunk=7)
-    np.testing.assert_allclose(many[0], one[0], rtol=1e-10, atol=1e-8)
-    np.testing.assert_allclose(many[1].toarray(), one[1].toarray(), rtol=1e-10, atol=1e-8)
-    for got, want in zip(many[2:], one[2:]):
-        np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-8)
+    for name in ("u", "w_pose", "w_intr", "g_c", "g_p", "v"):
+        np.testing.assert_allclose(getattr(many, name), getattr(one, name), rtol=1e-10, atol=1e-8)
+
+
+def _sparse_reference(problem, band, x, huber_px, lam):
+    """改写前的做法：整块稀疏雅可比 Jc、Jp，W = JcᵀJp，S = U − W V⁻¹ Wᵀ 用稀疏乘。"""
+    from scipy.sparse import coo_matrix
+
+    from ms_mosaic.at import _block_diag_3x3, _huber_weights
+
+    n_free = problem.n_free
+    width = 6 + n_free
+    nc, n_pts, m = band.nc, band.n_pts, int(band.obs_idx.size)
+    cam_cols = np.concatenate(
+        [band.obs_img[:, None] * 6 + np.arange(6), np.broadcast_to(band.n_img * 6 + np.arange(n_free), (m, n_free))],
+        axis=1,
+    )
+    point_cols = band.obs_pt[:, None] * 3 + np.arange(3)
+    a, d, b, r, centers, rotmats, intr_full = problem.linearize(x, band.obs_idx)
+    weight, _ = _huber_weights(r, huber_px)
+    sw = np.sqrt(weight)
+    jcb = np.concatenate([a, d], axis=2) * sw[:, None, None]
+    b = b * sw[:, None, None]
+    rvec = (r * sw[:, None]).ravel()
+    rows = np.repeat(np.arange(m) * 2, width)
+    jc = coo_matrix(
+        (np.concatenate([jcb[:, 0].ravel(), jcb[:, 1].ravel()]),
+         (np.concatenate([rows, rows + 1]), np.concatenate([cam_cols.ravel()] * 2))),
+        shape=(m * 2, nc),
+    ).tocsr()
+    rows3 = np.repeat(np.arange(m) * 2, 3)
+    jp = coo_matrix(
+        (np.concatenate([b[:, 0].ravel(), b[:, 1].ravel()]),
+         (np.concatenate([rows3, rows3 + 1]), np.concatenate([point_cols.ravel()] * 2))),
+        shape=(m * 2, n_pts * 3),
+    ).tocsr()
+    u = (jc.T @ jc).toarray()
+    w = (jc.T @ jp).tocsr()
+    g_c = -(jc.T @ rvec)
+    g_p = -(jp.T @ rvec)
+    v = np.zeros((n_pts, 3, 3))
+    np.add.at(v, band.obs_pt, np.einsum("nki,nkj->nij", b, b))
+    gps_res, att_res, intr_res = problem.prior_residuals(centers, rotmats, intr_full)
+    local = np.arange(band.n_img)
+    for k in range(3):
+        dcols, ccols = local * 6 + k, local * 6 + 3 + k
+        u[ccols, ccols] += problem.weight_xyz[k] ** 2
+        g_c[ccols] -= gps_res[band.img_ids, k] * problem.weight_xyz[k]
+        u[dcols, dcols] += 1.0 / problem.sigma_attitude_rad**2
+        g_c[dcols] -= att_res[band.img_ids, k] / problem.sigma_attitude_rad
+    inv_sigma = 1.0 / problem.intr_sigma[band.cam, problem.free_idx]
+    cols = band.n_img * 6 + np.arange(n_free)
+    u[cols, cols] += inv_sigma**2
+    g_c[cols] -= intr_res[band.cam] * inv_sigma
+
+    u_d = u + np.diag(lam * np.maximum(np.diag(u), 1e-9))
+    v_d = v + lam * np.maximum(v.diagonal(axis1=1, axis2=2), 1e-9)[:, :, None] * np.eye(3)
+    v_inv = np.linalg.inv(v_d)
+    y = (w @ _block_diag_3x3(v_inv)).tocsr()
+    s = u_d - (y @ w.T).toarray()
+    dc = np.linalg.solve(s, g_c - y @ g_p)
+    dp = np.einsum("nij,nj->ni", v_inv, (g_p - w.T @ dc).reshape(n_pts, 3))
+    return u, w, g_c, g_p, v, dc, dp
+
+
+@pytest.mark.parametrize("free_names", [("f", "cx", "cy"), CALIBRATION_STAGES[-1]])
+def test_structured_schur_matches_sparse_products(free_names):
+    """按块组装与消元必须与稀疏阵相乘的写法逐项一致（只差求和次序带来的舍入）。"""
+    problem = _two_band_problem(free_names)
+    x = problem.x0.copy()
+    x[problem.off_point :] += np.random.default_rng(0).normal(0, 0.05, problem.n_pts * 3)
+    for band in _separable_bands(problem):
+        normal = _assemble_band(problem, band, x, 1.5, chunk=11)
+        u, w, g_c, g_p, v, dc_ref, dp_ref = _sparse_reference(problem, band, x, 1.5, 1e-3)
+        np.testing.assert_allclose(normal.u, u, rtol=1e-11, atol=1e-9)
+        np.testing.assert_allclose(normal.g_c, g_c, rtol=1e-11, atol=1e-9)
+        np.testing.assert_allclose(normal.g_p, g_p, rtol=1e-11, atol=1e-9)
+        np.testing.assert_allclose(normal.v, v, rtol=1e-11, atol=1e-9)
+        w_dense = w.toarray()
+        pose_part = w_dense[: band.n_img * 6]
+        for o in range(band.obs_idx.size):
+            i, j = band.obs_img[o], band.obs_pt[o]
+            np.testing.assert_allclose(
+                normal.w_pose[o], pose_part[i * 6 : i * 6 + 6, j * 3 : j * 3 + 3], rtol=1e-11, atol=1e-9
+            )
+        intr_part = w_dense[band.n_img * 6 :].reshape(problem.n_free, band.n_pts, 3).transpose(1, 0, 2)
+        np.testing.assert_allclose(normal.w_intr, intr_part, rtol=1e-11, atol=1e-9)
+        dc, dp = _damp_solve_band(normal, 1e-3, chunk=13)
+        np.testing.assert_allclose(dc, dc_ref, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(dp, dp_ref, rtol=1e-8, atol=1e-10)
 
 
 def test_band_worker_bytes_covers_measured_peak():
@@ -410,7 +519,7 @@ def test_band_worker_bytes_covers_measured_peak():
     band = _separable_bands(problem)[0]
     tracemalloc.start()
     tracemalloc.reset_peak()
-    solved = _damp_solve_band(_assemble_band(problem, band, problem.x0, 1.5, chunk=50), 1e-3)
+    solved = _damp_solve_band(_assemble_band(problem, band, problem.x0, 1.5, chunk=50), 1e-3, chunk=50)
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert solved is not None

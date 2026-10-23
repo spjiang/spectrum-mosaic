@@ -113,10 +113,23 @@ def _limit_blas_threads() -> None:
         os.environ.setdefault(var, "1")
 
 
+def _limit_cv2_threads() -> None:
+    """OpenCV 自带线程池默认开满可见核数，不受 OMP_NUM_THREADS 约束。
+
+    多进程提取/匹配时每进程再开满核会严重超订，吞吐反而下降。
+    """
+    try:
+        import cv2
+    except ImportError:
+        return
+    cv2.setNumThreads(1)
+
+
 def _extract_init() -> None:
     from ms_mosaic.parallel import prefer_oom_kill
 
     _limit_blas_threads()
+    _limit_cv2_threads()
     prefer_oom_kill()
 
 
@@ -178,6 +191,7 @@ def _match_init(cache_dir, cameras_by_band: dict):
     from ms_mosaic.parallel import prefer_oom_kill
 
     _limit_blas_threads()
+    _limit_cv2_threads()
     prefer_oom_kill()
     _SHARED["cameras"] = cameras_by_band
     _SHARED["cache_dir"] = str(cache_dir)

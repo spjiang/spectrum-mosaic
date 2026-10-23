@@ -17,7 +17,7 @@ from app.config import Settings
 from app.models import JobRun, JobRunLog, ParamDefinition, ParamProfile, ParamProfileValue
 from app.presets import RGB_PREVIEW_VALUES
 from app.services.mq import MQPublisher
-from app.services.resolution import apply_resolution_choice
+from app.services.resolution import apply_resolution_choice, needs_resolution_choice
 from app.services.params import assert_param_values
 from app.services.paths import detach_derived_dirs, stamp_run_output_dir, validate_paths
 from app.services.stage_steps import persist_stage_steps
@@ -283,8 +283,8 @@ def create_job(
     detach_derived_dirs(snap, original_out)
     snap["input_dir"] = input_dir
     snap["output_dir"] = output_dir
-    # 只有这次提交带了倍数才按航片重算 GSD。模版默认值不改已经写好的 dsm_gsd。
-    if params.get("ortho_scale") not in (None, ""):
+    # 模版默认值不改已经写好的 dsm_gsd；只有倍数、还没写成 GSD 时按航片补上。
+    if needs_resolution_choice(params, snap):
         apply_resolution_choice(snap, input_dir, settings)
     assert_param_values(list(db.scalars(select(ParamDefinition))), snap)
     paths = resolve_paths(snap, input_dir, output_dir)
