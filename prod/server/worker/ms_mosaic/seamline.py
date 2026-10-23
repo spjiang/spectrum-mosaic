@@ -140,6 +140,15 @@ class SeamCost:
         cost = self._raw(*key)
         return np.where(np.isfinite(cost), cost, self.fill).astype(np.float64)
 
+    @property
+    def upper(self) -> float:
+        """任意 seam[l1, l2, r, c] 的上界：有限值不超过 scale，非有限处取 fill ≥ scale。"""
+        return self.fill
+
+
+def _seam_upper(seam) -> float:
+    return float(seam.upper) if isinstance(seam, SeamCost) else float(np.max(seam))
+
 
 def _expansion_move(
     labels: np.ndarray,
@@ -154,72 +163,105 @@ def _expansion_move(
       - 相邻两格当前标号相同时，直接连一条容量为 V(·,·,l,α) 的边；
       - 标号不同时，插一个辅助结点，三条边分别对应
         「左改右不改」「右改左不改」「都不改」三种切法的代价。
+
+    固定结点消元（Kohli & Torr, PAMI 2007；Alahari 等, PAMI 2010）：
+      - 已是 α 的格网扩张后仍是 α；
+      - 取 α 的数据项比保持高出 4·V_max 以上的格网，在最优扩张里一定保持
+        （若取了 α，单独改回能量至少降 gap − 4·V_max > 0，与最优矛盾）。
+    这两类不进图，它们与自由格网之间的边折成自由格网的 t 边。能量与原图逐项相同，
+    最小割的解集合不变，只是图小得多（无效视角区与已是 α 的区域不再求流）。
     """
     import maxflow
 
     h, w = labels.shape
     n = h * w
-    g = maxflow.Graph[float]()
-    ids = np.arange(n, dtype=np.int64)
-    g.add_nodes(n)
-
     lab = labels.ravel()
-    # 约定：结点落在源侧 = 取 α，落在汇侧 = 保持原标号。
-    # 最小割里 SOURCE→p 边在 p 落汇侧时被割，故其容量应为「保持」的代价；
-    # p→SINK 边在 p 落源侧时被割，故其容量应为「取 α」的代价。
-    cost_alpha = data[alpha].ravel()
-    cost_keep = data[lab, ids // w, ids % w]
-    is_alpha = lab == alpha
-    # 已经是 α 的结点钉在源侧：给「保持」一侧一个大代价即可。
-    # 用有限大值而非 inf，inf 会让最大流的数值累加失去意义。
-    big = 10.0 * float(np.max(data)) + 1.0
-    g.add_grid_tedges(ids, np.where(is_alpha, big, cost_keep), cost_alpha)
-
-    flat = np.arange(n).reshape(h, w)
+    ids = np.arange(n, dtype=np.int64)
     rows_of = ids // w
     cols_of = ids % w
+    cost_alpha = data[alpha].ravel()
+    cost_keep = data[lab, rows_of, cols_of]
+    is_alpha = lab == alpha
+    v_max = weight * _seam_upper(seam)
+    free = ~is_alpha & ~(cost_alpha - cost_keep > 4.0 * v_max)
+    m = int(free.sum())
+    if m == 0:
+        return labels, False
+    node = np.full(n, -1, np.int64)
+    node[free] = np.arange(m)
+    # 固定结点的最终标号：α 区仍是 α，其余保持
+    final = np.where(is_alpha, alpha, lab)
 
     def pair_cost(l1: np.ndarray, l2: np.ndarray, pa: np.ndarray, pb: np.ndarray) -> np.ndarray:
-        """V(p,q,l1,l2)，取两端之和的一半，与另一方向合起来正好是完整代价。"""
-        return weight * 0.5 * (
+        """V(p,q,l1,l2)，取两端之和的一半，与另一方向合起来正好是完整代价。
+
+        同标号不是接缝，V(l,l)=0，与 energy 一致；否则无效像元处 seam[l,l] 取填充值，
+        V 不再是度量，BVZ 构造就不等价于所求能量。
+        """
+        cost = weight * 0.5 * (
             seam[l1, l2, rows_of[pa], cols_of[pa]] + seam[l1, l2, rows_of[pb], cols_of[pb]]
         )
+        return np.where(l1 == l2, 0.0, cost)
 
+    # 约定：结点落在源侧 = 取 α，落在汇侧 = 保持原标号。
+    # SOURCE→p 在 p 落汇侧时被割，容量是「保持」的代价；p→SINK 在 p 落源侧时被割，容量是「取 α」的代价。
+    src = cost_keep[free].astype(np.float64)
+    snk = cost_alpha[free].astype(np.float64)
+    g = maxflow.Graph[float]()
+    g.add_nodes(m)
+
+    flat = ids.reshape(h, w)
     n_aux = 0
     for axis in (0, 1):
         if axis == 0:
             pa, pb = flat[:-1].ravel(), flat[1:].ravel()
         else:
             pa, pb = flat[:, :-1].ravel(), flat[:, 1:].ravel()
-        la, lb = lab[pa], lab[pb]
+        fa, fb = free[pa], free[pb]
 
+        # 一端固定：固定端标号 lf 已定，自由端保持付 V(l, lf)，取 α 付 V(α, lf)
+        for p_free, p_fix in ((pa[fa & ~fb], pb[fa & ~fb]), (pb[fb & ~fa], pa[fb & ~fa])):
+            if not p_free.size:
+                continue
+            lf = final[p_fix]
+            alpha_i = np.full(p_free.size, alpha)
+            k = node[p_free]
+            np.add.at(src, k, pair_cost(lab[p_free], lf, p_free, p_fix))
+            np.add.at(snk, k, pair_cost(alpha_i, lf, p_free, p_fix))
+
+        both = fa & fb
+        pa, pb = pa[both], pb[both]
+        la, lb = lab[pa], lab[pb]
         same = np.nonzero(la == lb)[0]
         if same.size:
             sa, sb = pa[same], pb[same]
             cap = pair_cost(la[same], np.full(same.size, alpha), sa, sb)
-            g.add_edges(sa, sb, cap, cap)
+            g.add_edges(node[sa], node[sb], cap, cap)
 
         diff = np.nonzero(la != lb)[0]
         if diff.size:
             da, db = pa[diff], pb[diff]
             l_a, l_b = la[diff], lb[diff]
             alpha_i = np.full(diff.size, alpha)
-            aux = np.arange(n + n_aux, n + n_aux + diff.size, dtype=np.int64)
+            aux = np.arange(m + n_aux, m + n_aux + diff.size, dtype=np.int64)
             g.add_nodes(diff.size)
             n_aux += diff.size
             c_a = pair_cost(l_a, alpha_i, da, db)
             c_b = pair_cost(alpha_i, l_b, da, db)
-            g.add_edges(da, aux, c_a, c_a)
-            g.add_edges(aux, db, c_b, c_b)
+            g.add_edges(node[da], aux, c_a, c_a)
+            g.add_edges(aux, node[db], c_b, c_b)
             # 辅助结点接源端，容量为 V(l_p, l_q)：仅当两端都保持原标号（都落汇侧）
             # 时这条边才被割。若错接汇端，两端都取 α 时反而会被收取 V(l_p,l_q)，
             # 而正确代价是 V(α,α)=0，整个能量就完全错了。
             g.add_grid_tedges(aux, pair_cost(l_a, l_b, da, db), np.zeros(diff.size))
 
+    g.add_grid_tedges(np.arange(m), src, snk)
     g.maxflow()
-    seg = np.array([g.get_segment(int(i)) for i in ids])
-    # segment 0 = 源侧 = 取 α
-    new = np.where(seg == 0, alpha, lab).reshape(h, w)
+    # get_grid_segments：True = 汇侧 = 保持；False = 源侧 = 取 α
+    keep = g.get_grid_segments(np.arange(m))
+    new = final.copy()
+    new[np.flatnonzero(free)[~keep]] = alpha
+    new = new.reshape(h, w)
     return new, bool((new != labels).any())
 
 

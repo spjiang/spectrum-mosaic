@@ -178,6 +178,47 @@ def test_triangulate_tracks_keypoints_only_matches_features():
         assert np.allclose(pts_full, pts_kps, atol=1e-9)
 
 
+def _triangulate_tracks_loop(tracks, cameras, poses, keypoints, min_angle_deg=1.0):
+    """逐条交会的参照实现（向量化之前的主路径）。"""
+    points, observations = [], []
+    for obs in tracks.observations:
+        obs = [(i, f) for i, f in obs if i in poses and i in cameras and i in keypoints]
+        if len(obs) < 2:
+            continue
+        pss = [poses[i] for i, _ in obs]
+        uvs = np.array([keypoints[i][f, :2] for i, f in obs], dtype=float)
+        point, angle = triangulate_track([cameras[i] for i, _ in obs], pss, uvs)
+        if not np.all(np.isfinite(point)) or angle < min_angle_deg:
+            continue
+        if any(p.world_to_camera(point[None, :])[0, 2] <= 0 for p in pss):
+            continue
+        points.append(point)
+        for (image, _), uv in zip(obs, uvs):
+            observations.append(Observation(image, len(points) - 1, uv))
+    return np.array(points).reshape(-1, 3), observations
+
+
+def test_triangulate_tracks_vectorized_matches_loop():
+    """批量 DLT 与逐条交会：同一批点、同一顺序、同一观测。"""
+    cam_true, poses_true, points_true = _scene(seed=11, n_points=300, grid=(4, 3))
+    tracks, features = _observe(cam_true, poses_true, points_true, pixel_noise=0.3, seed=12)
+    poses_init, _, _ = _perturb(poses_true, seed=13)
+    cam_a = Camera.initial("Color", 2048, 1536, kind="rgb").with_vector(TRUE_INTRINSICS)
+    cam_b = Camera.initial("450", 2048, 1536, kind="rgb")
+    cams = {i: (cam_a if i % 2 else cam_b) for i in poses_init}
+    # 去掉一张的位姿：轨迹要跳过它的观测，可能因此不足两视
+    poses_init.pop(5)
+    # 近平行两视：交会角 < 1° 必须被丢弃
+    tracks.observations.append([(0, 0), (0, 1)])
+    keypoints = {i: f.keypoints for i, f in features.items()}
+    ref_pts, ref_obs = _triangulate_tracks_loop(tracks, cams, poses_init, keypoints)
+    pts, obs = triangulate_tracks(tracks, cams, poses_init, keypoints)
+    assert pts.shape == ref_pts.shape and len(pts) > 100
+    np.testing.assert_allclose(pts, ref_pts, rtol=0, atol=1e-9)
+    assert [(o.image, o.point) for o in obs] == [(o.image, o.point) for o in ref_obs]
+    assert all(np.array_equal(a.uv, b.uv) for a, b in zip(obs, ref_obs))
+
+
 def test_run_at_clears_features_after_triangulation():
     """交会后清空关键点字典，给平差腾峰值内存。"""
     cam_true, poses_true, points_true = _scene(seed=3, n_points=30, grid=(2, 2))

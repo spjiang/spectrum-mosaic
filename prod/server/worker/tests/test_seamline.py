@@ -236,6 +236,105 @@ def test_prefer_ids_win_data_term_without_changing_cycles():
     assert (labels == 0).all()
 
 
+def _expansion_full_graph(labels, alpha, data, seam, weight):
+    """参照实现：全幅建图（消元之前的主路径）。"""
+    import maxflow
+
+    h, w = labels.shape
+    n = h * w
+    g = maxflow.Graph[float]()
+    ids = np.arange(n, dtype=np.int64)
+    g.add_nodes(n)
+    lab = labels.ravel()
+    rows_of, cols_of = ids // w, ids % w
+    is_alpha = lab == alpha
+    big = 10.0 * float(np.max(data)) + 1.0
+    g.add_grid_tedges(ids, np.where(is_alpha, big, data[lab, rows_of, cols_of]), data[alpha].ravel())
+    flat = ids.reshape(h, w)
+
+    def pc(l1, l2, pa, pb):
+        return weight * 0.5 * (seam[l1, l2, rows_of[pa], cols_of[pa]] + seam[l1, l2, rows_of[pb], cols_of[pb]])
+
+    n_aux = 0
+    for pa, pb in ((flat[:-1].ravel(), flat[1:].ravel()), (flat[:, :-1].ravel(), flat[:, 1:].ravel())):
+        la, lb = lab[pa], lab[pb]
+        s = la == lb
+        al = np.full(pa.size, alpha)
+        if s.any():
+            cap = pc(la[s], al[s], pa[s], pb[s])
+            g.add_edges(pa[s], pb[s], cap, cap)
+        d = ~s
+        k = int(d.sum())
+        if k == 0:
+            continue
+        aux = np.arange(n + n_aux, n + n_aux + k)
+        g.add_nodes(k)
+        n_aux += k
+        ca, cb = pc(la[d], al[d], pa[d], pb[d]), pc(al[d], lb[d], pa[d], pb[d])
+        g.add_edges(pa[d], aux, ca, ca)
+        g.add_edges(aux, pb[d], cb, cb)
+        g.add_grid_tedges(aux, pc(la[d], lb[d], pa[d], pb[d]), np.zeros(k))
+    g.maxflow()
+    seg = g.get_grid_segments(ids)
+    new = np.where(~seg, alpha, lab).reshape(h, w)
+    return new, bool((new != labels).any())
+
+
+def test_pruned_expansion_matches_full_graph():
+    """固定结点消元后，每一步 α 扩张的能量不劣于全幅建图（全幅图在无效像元处多收 V(l,l)）。"""
+    from ms_mosaic.seamline import _expansion_move
+
+    rng = np.random.default_rng(21)
+    h, w, nv = 48, 56, 6
+    for trial in range(4):
+        base = rng.random((h, w)).astype(np.float32) * 100
+        px = (base[None] + rng.normal(0, 6, (nv, h, w))).astype(np.float32)[:, None]
+        scores = rng.random((nv, h, w)).astype(np.float32)
+        # 每个视角只覆盖一块矩形，模拟像幅足迹；视角 0 全覆盖保证处处有效
+        for k in range(1, nv):
+            r0, c0 = rng.integers(0, h // 2), rng.integers(0, w // 2)
+            mask = np.ones((h, w), bool)
+            mask[r0 : r0 + h // 2, c0 : c0 + w // 2] = False
+            scores[k][mask] = np.nan
+            px[k, :, mask] = np.nan
+        stack = make_stack(px, scores)
+        cfg = SeamConfig(smooth_weight=0.3 if trial % 2 else 0.08)
+        data = data_cost(stack, cfg)
+        seam = SeamCost(stack, cfg)
+        lab = np.argmin(data, axis=0).astype(np.int64)
+        for _ in range(2):
+            for alpha in range(nv):
+                # 每步从同一标号出发，单步扩张是精确最小割，能量只能相同或更低
+                lab_a, _ = _expansion_move(lab, alpha, data, seam, cfg.smooth_weight)
+                lab_b, _ = _expansion_full_graph(lab, alpha, data, seam, cfg.smooth_weight)
+                ea = energy(lab_a.astype(np.int16), stack, cfg)
+                eb = energy(lab_b.astype(np.int16), stack, cfg)
+                assert ea <= eb * (1 + 1e-12) + 1e-6
+                lab = lab_a
+
+
+def test_pruned_expansion_is_exact_when_all_views_valid():
+    """各视角全覆盖时 V(l,l) 处处为 0，消元图与全幅图的单步能量逐步相等。"""
+    from ms_mosaic.seamline import _expansion_move
+
+    rng = np.random.default_rng(22)
+    h, w, nv = 40, 44, 5
+    base = rng.random((h, w)).astype(np.float32) * 100
+    px = (base[None] + rng.normal(0, 6, (nv, h, w))).astype(np.float32)[:, None]
+    stack = make_stack(px, rng.random((nv, h, w)).astype(np.float32))
+    cfg = SeamConfig(smooth_weight=0.3)
+    data = data_cost(stack, cfg)
+    seam = SeamCost(stack, cfg)
+    lab = np.argmin(data, axis=0).astype(np.int64)
+    for alpha in list(range(nv)) * 2:
+        lab_a, _ = _expansion_move(lab, alpha, data, seam, cfg.smooth_weight)
+        lab_b, _ = _expansion_full_graph(lab, alpha, data, seam, cfg.smooth_weight)
+        assert energy(lab_a.astype(np.int16), stack, cfg) == pytest.approx(
+            energy(lab_b.astype(np.int16), stack, cfg), rel=1e-12, abs=1e-9
+        )
+        lab = lab_b
+
+
 def test_expansion_is_stable_when_already_optimal():
     """已经是最优解时再跑图割不应改变结果。"""
     h = w = 24

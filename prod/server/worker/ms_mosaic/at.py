@@ -194,32 +194,89 @@ def triangulate_tracks(
     *,
     min_angle_deg: float = MIN_TRIANGULATION_ANGLE_DEG,
 ) -> tuple[np.ndarray, list[Observation]]:
-    """逐轨迹交会。交会角过小的点几何上不可靠，直接丢弃。
+    """全部轨迹批量交会。交会角过小的点几何上不可靠，直接丢弃。
 
     ``features`` 可以是完整 Features，也可以只是关键点数组（交会不需要描述子）。
     方程与 ``triangulate_track`` 完全相同，仅减少描述子驻留。
     """
     keypoints = {i: _keypoints_of(feat) for i, feat in features.items()}
-    points: list[np.ndarray] = []
+    usable = sorted(i for i in keypoints if i in poses and i in cameras)
+    lengths = np.fromiter((len(o) for o in tracks.observations), np.int64, len(tracks.observations))
+    if not usable or lengths.size == 0:
+        return np.zeros((0, 3)), []
+    total = int(lengths.sum())
+    flat = np.fromiter((v for o in tracks.observations for pair in o for v in pair), np.int64, 2 * total)
+    img_all, feat_all = flat[0::2], flat[1::2]
+    track_all = np.repeat(np.arange(lengths.size), lengths)
+    slot = np.full(max(max(usable), int(img_all.max(initial=0))) + 1, -1, np.int64)
+    slot[usable] = np.arange(len(usable))
+    keep_obs = slot[img_all] >= 0
+    img, feat, track = img_all[keep_obs], feat_all[keep_obs], track_all[keep_obs]
+    n_obs = np.bincount(track, minlength=lengths.size)
+    starts = np.concatenate([[0], np.cumsum(n_obs)[:-1]])
+
+    # 关键点拼成一张大表按偏移取像点；float32→float64 与逐条 np.array(..., dtype=float) 相同
+    s = slot[img]
+    uv = np.empty((img.size, 2))
+    for k, i in enumerate(usable):
+        sel = s == k
+        uv[sel] = np.asarray(keypoints[i])[feat[sel], :2]
+
+    # 去畸变是逐元素定点迭代，按相机分批与逐点调用结果相同
+    xn = np.empty(img.size)
+    yn = np.empty(img.size)
+    cam_of = {}
+    for k, i in enumerate(usable):
+        cam_of.setdefault(id(cameras[i]), (cameras[i], []))[1].append(k)
+    for cam, ks in cam_of.values():
+        sel = np.isin(s, ks)
+        xn[sel], yn[sel] = cam.undistort_pixels(uv[sel, 0], uv[sel, 1])
+
+    proj = np.stack([_projection_matrix(poses[i]) for i in usable])
+    rot = np.stack([poses[i].rotation for i in usable])
+    ctr = np.stack([np.asarray(poses[i].center, float) for i in usable])
+
+    pts = np.full((lengths.size, 3), np.nan)
+    ok = np.zeros(lengths.size, bool)
+    # 按观测数分组批量 DLT（Hartley & Zisserman 2004, §12.2）；每组内与逐条 SVD 同一 LAPACK 例程
+    chunk = 200_000
+    for k in np.unique(n_obs[n_obs >= MIN_OBS_PER_TRACK]):
+        tids_all = np.flatnonzero(n_obs == k)
+        for c0 in range(0, tids_all.size, chunk):
+            tids = tids_all[c0 : c0 + chunk]
+            idx = starts[tids][:, None] + np.arange(k)[None, :]
+            sk = s[idx]
+            p = proj[sk]
+            x = xn[idx][..., None]
+            y = yn[idx][..., None]
+            a = np.empty((tids.size, 2 * k, 4))
+            a[:, 0::2] = x * p[:, :, 2] - p[:, :, 0]
+            a[:, 1::2] = y * p[:, :, 2] - p[:, :, 1]
+            h = np.linalg.svd(a)[2][:, -1]
+            good = np.abs(h[:, 3]) >= 1e-12
+            point = np.full((tids.size, 3), np.nan)
+            point[good] = h[good, :3] / h[good, 3:4]
+            # 最大交会角 = 最小夹角余弦的反余弦（arccos 单调递减）
+            v = np.stack([xn[idx], yn[idx], np.ones((tids.size, k))], axis=-1)
+            d = np.einsum("nkji,nkj->nki", rot[sk], v)
+            d /= np.linalg.norm(d, axis=-1, keepdims=True)
+            cos = np.clip(np.einsum("nai,nbi->nab", d, d), -1.0, 1.0)
+            iu = np.triu_indices(k, 1)
+            angle = np.degrees(np.arccos(cos[:, iu[0], iu[1]].min(axis=1)))
+            angle[~good] = 0.0
+            # 交会点必须在所有相机前方
+            depth = np.einsum("nkj,nkj->nk", point[:, None, :] - ctr[sk], rot[sk][:, :, 2, :])
+            accept = np.all(np.isfinite(point), axis=1) & (angle >= min_angle_deg) & np.all(depth > 0, axis=1)
+            pts[tids] = point
+            ok[tids] = accept
+
+    kept = np.flatnonzero(ok)
     observations: list[Observation] = []
-    for obs in tracks.observations:
-        obs = [(i, f) for i, f in obs if i in poses and i in cameras and i in keypoints]
-        if len(obs) < MIN_OBS_PER_TRACK:
-            continue
-        cams = [cameras[i] for i, _ in obs]
-        pss = [poses[i] for i, _ in obs]
-        uvs = np.array([keypoints[i][f, :2] for i, f in obs], dtype=float)
-        point, angle = triangulate_track(cams, pss, uvs)
-        if not np.all(np.isfinite(point)) or angle < min_angle_deg:
-            continue
-        # 交会点必须在所有相机前方
-        if any(pose.world_to_camera(point[None, :])[0, 2] <= 0 for pose in pss):
-            continue
-        point_id = len(points)
-        points.append(point)
-        for (image, _), uv in zip(obs, uvs):
-            observations.append(Observation(image, point_id, uv))
-    return (np.array(points).reshape(-1, 3), observations)
+    for point_id, t in enumerate(kept):
+        b = int(starts[t])
+        for j in range(b, b + int(n_obs[t])):
+            observations.append(Observation(int(img[j]), point_id, uv[j]))
+    return (pts[kept].reshape(-1, 3), observations)
 
 
 def _skew(v: np.ndarray) -> np.ndarray:
