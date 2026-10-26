@@ -1,7 +1,7 @@
 """特征匹配与几何校验。
 
 流程沿用业界通行做法（COLMAP / OpenSfM）：
-1. FLANN kd-tree 最近邻 k=2；
+1. CPU：FLANN kd-tree 近似最近邻 k=2；GPU：精确 kNN（见 matching_gpu.py）；
 2. Lowe ratio test（RootSIFT 下阈值可放到 0.8）；
 3. 双向互为最近邻的交叉校验，去掉一对多；
 4. 本质矩阵 RANSAC（Nistér 五点法）剔粗差 —— 内参有近似值，用本质矩阵比基础矩阵

@@ -72,6 +72,48 @@ def test_running_stage_appends_the_next_function():
     assert stages["S2_at"][-1]["status"] == "running"
 
 
+def test_shared_ms_ortho_is_not_billed_to_the_first_band():
+    """几何共用的七个波段一起算。这段时间不能整笔记到先写出的 450nm 上。"""
+    text = """
+2026-10-25 21:04:36,363 INFO job abc start S5_ortho 正射波段 ('Color', '450nm', '550nm', '650nm')
+2026-10-25 21:04:47 === 正射 Orthomosaic_pix_surf_group0.tif (Color)  249 张 ===
+2026-10-25 21:11:07 已写出 Orthomosaic_pix_surf_group0.tif（Color 完成）
+2026-10-25 21:11:08 多光谱正射几何共用 450nm/550nm/650nm，48 进程。视角上限、立面层数、图割轮数与分波段相同
+2026-10-25 21:12:00 正射多光谱（几何共用 450nm/550nm/650nm） 10/1221 块
+2026-10-25 22:05:00 正射多光谱（几何共用 450nm/550nm/650nm） 1221/1221 块
+2026-10-25 22:06:16 已写出 group1.tif（450nm 完成）
+2026-10-25 22:07:34 已写出 group2.tif（550nm 完成）
+2026-10-25 22:08:51 已写出 group3.tif（650nm 完成）
+"""
+    by = {s["name"]: s for s in parse_stage_steps(text)["S5_ortho"]}
+    assert by["正射 Color"]["elapsed_s"] == 380.0
+    assert by["多光谱正射"]["elapsed_s"] == 3232.0
+    assert by["多光谱正射"]["detail"] == "450nm/550nm/650nm · 48 个进程"
+    assert by["正射 450nm"]["elapsed_s"] == 76.0
+    assert by["正射 550nm"]["elapsed_s"] == 78.0
+    assert by["正射 650nm"]["elapsed_s"] == 77.0
+
+
+def test_shared_ms_ortho_uses_explicit_compute_seconds():
+    """新日志写明计算秒数时，用这个数，写出从这一行再往下计。"""
+    text = """
+2026-10-25 21:04:36,363 INFO job abc start S5_ortho 正射波段 ('Color', '450nm')
+2026-10-25 21:04:47 === 正射 Orthomosaic_pix_surf_group0.tif (Color)  249 张 ===
+2026-10-25 21:11:07 已写出 Orthomosaic_pix_surf_group0.tif（Color 完成）
+2026-10-25 21:11:08 多光谱正射几何共用 450nm/550nm，32 进程。视角上限与分波段相同
+2026-10-25 22:05:00 正射多光谱（几何共用 450nm/550nm） 1221/1221 块
+2026-10-25 22:05:01 多光谱正射计算完成，3233.4s
+2026-10-25 22:06:16 已写出 group1.tif（450nm 完成）
+2026-10-25 22:07:32 已写出 group2.tif（550nm 完成）
+"""
+    by = {s["name"]: s for s in parse_stage_steps(text)["S5_ortho"]}
+    assert by["多光谱正射"]["elapsed_s"] == 3233.4
+    assert "450nm/550nm" in by["多光谱正射"]["detail"]
+    assert by["正射 450nm"]["elapsed_s"] == 75.0
+    assert by["正射 550nm"]["elapsed_s"] == 76.0
+    assert sum(1 for s in parse_stage_steps(text)["S5_ortho"] if s["name"] == "多光谱正射") == 1
+
+
 def test_ortho_retry_gap_is_not_a_step():
     """第一次正射被杀掉到重新开始的空档，不能记进正射分项。"""
     text = """

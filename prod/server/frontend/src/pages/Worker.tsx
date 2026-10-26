@@ -524,7 +524,7 @@ export default function WorkerPage() {
         ) : null}
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0, fontSize: 12 }}>
           {w?.gpus?.available
-            ? `GPU 运行库已就绪。已通过验收、会用 GPU 的阶段：${(w.gpus.validated_stages || []).join("、") || "暂无，全部走 CPU"}。`
+            ? `GPU 运行库已就绪。匹配固定走 CPU。当前会用 GPU 的阶段：${(w.gpus.validated_stages || []).join("、") || "暂无，全部走 CPU"}。`
             : `${w?.gpus?.reason || "计算节点未上报显卡"}，任务全部使用 CPU，结果相同。`}
           显卡信息每 60 秒刷新一次。
         </Typography.Paragraph>

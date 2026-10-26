@@ -328,7 +328,7 @@ export default function ExecutePage() {
     gpuOptions.push({ value: gpu, label: `GPU ${gpu}（当前节点未检测到）` });
   }
   const gpuStatus = gpuReady
-    ? `计算节点有 ${gpuDevices.length} 张可用显卡。已通过验收的阶段：${
+    ? `计算节点有 ${gpuDevices.length} 张可用显卡。匹配固定走 CPU。当前会用 GPU 的阶段：${
         (gpuInfo?.validated_stages || []).map((s: string) => stageLabel(s)).join("、") || "暂无，全部走 CPU"
       }。`
     : `计算节点${gpuInfo?.reason ? `：${gpuInfo.reason}` : "未上报显卡"}，任务会使用 CPU，结果相同。`;

@@ -10,6 +10,7 @@ import gc
 import multiprocessing
 import os
 import time
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +21,7 @@ from ms_mosaic.at import ATResult, run_at
 from ms_mosaic.camera import Camera, Pose
 from ms_mosaic.catalog import scan_directory
 from ms_mosaic.features import extract_file, load_keypoints
-from ms_mosaic.matching import PairMatches, match_pair
+from ms_mosaic.matching import MIN_INLIERS, PairMatches, geometric_verify, match_pair
 from ms_mosaic.cpu import cpu_cap, job_cpus
 from ms_mosaic.memory import resolve_memory_budget, visible_limit_bytes
 from ms_mosaic.pairs import select_pairs
@@ -326,7 +327,7 @@ def run_sparse(
     pair_jobs = [
         (c.i, c.j, path_by[c.i], path_by[c.j], band_by[c.i]) for c in candidates
     ]
-    matches = _match_all(pair_jobs, workers, cache_dir, dict(block.cameras))
+    matches = _match_all(pair_jobs, workers, cache_dir, dict(block.cameras), log=log)
     timings["matching"] = time.time() - t
     log(f"匹配 {len(matches)}/{len(candidates)} 对成功，{timings['matching']:.1f}s")
 
@@ -407,7 +408,15 @@ def _extract_all(jobs: list, workers: int) -> None:
         list(pool.map(_extract_worker, jobs))
 
 
-def _match_all(pair_jobs: list, workers: int, cache_dir: Path, cameras: dict) -> list[PairMatches]:
+def _match_all(
+    pair_jobs: list, workers: int, cache_dir: Path, cameras: dict, *, log=lambda *_: None
+) -> list[PairMatches]:
+    # S810 实测 GPU 精确 kNN 比 32 进程 FLANN 慢约 4.6×，匹配只走 CPU。
+    log(f"匹配：CPU FLANN，{workers} 进程")
+    return _match_all_cpu(pair_jobs, workers, cache_dir, cameras)
+
+
+def _match_all_cpu(pair_jobs: list, workers: int, cache_dir: Path, cameras: dict) -> list[PairMatches]:
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(
         max_workers=workers,
@@ -416,4 +425,89 @@ def _match_all(pair_jobs: list, workers: int, cache_dir: Path, cameras: dict) ->
         initargs=(str(cache_dir), cameras),
     ) as pool:
         raw = list(pool.map(_match_worker, pair_jobs, chunksize=4))
+    return [PairMatches(*r) for r in raw if r is not None]
+
+
+class _FeatLRU:
+    """像对按影像复用描述子，避免每对都重新解 npz。"""
+
+    def __init__(self, cache_dir: Path, limit: int = 32):
+        self.cache_dir = Path(cache_dir)
+        self.limit = int(limit)
+        self._data: OrderedDict[str, object] = OrderedDict()
+
+    def get(self, path) -> object:
+        key = str(path)
+        if key in self._data:
+            self._data.move_to_end(key)
+            return self._data[key]
+        feats = extract_file(Path(path), cache_dir=self.cache_dir)
+        self._data[key] = feats
+        if len(self._data) > self.limit:
+            self._data.popitem(last=False)
+        return feats
+
+
+def _verify_init(cameras_by_band: dict) -> None:
+    _limit_blas_threads()
+    _limit_cv2_threads()
+    _SHARED["cameras"] = cameras_by_band
+
+
+def _verify_worker(job):
+    i, j, idx, pts_a, pts_b, band = job
+    cam = _SHARED["cameras"][band]
+    inliers, model = geometric_verify(pts_a, pts_b, cam, cam)
+    if int(inliers.sum()) < MIN_INLIERS:
+        return None
+    return (i, j, idx[inliers], model)
+
+
+def _match_all_gpu(
+    pair_jobs: list,
+    workers: int,
+    cache_dir: Path,
+    cameras: dict,
+    choice,
+    *,
+    log=lambda *_: None,
+) -> list[PairMatches]:
+    """单 CUDA 上下文精确 kNN；几何校验仍走 CPU MAGSAC。
+
+    32 个进程各建一个 CUDA 上下文会把 T4 排队拖死。匹配应让一张卡吃满 GEMM。
+    """
+    from ms_mosaic.matching_gpu import cross_check as gpu_cross_check
+    from ms_mosaic.ortho_gpu import limit_device_memory
+
+    _limit_cv2_threads()
+    limit_device_memory(choice.device, choice.budget_bytes)
+    log(
+        f"匹配走 GPU 精确 kNN（COLMAP exhaustive），1 个 CUDA 上下文；"
+        f"几何校验 {workers} 进程 CPU MAGSAC"
+    )
+    cache = _FeatLRU(cache_dir)
+    pending: list = []
+    n_pairs = len(pair_jobs)
+    t0 = time.time()
+    for n, (i, j, path_i, path_j, band) in enumerate(pair_jobs, start=1):
+        fi = cache.get(path_i)
+        fj = cache.get(path_j)
+        idx = gpu_cross_check(fi.descriptors, fj.descriptors, device=choice.device)
+        if idx.shape[0] < MIN_INLIERS:
+            continue
+        pending.append(
+            (i, j, idx, fi.keypoints[idx[:, 0], :2], fj.keypoints[idx[:, 1], :2], band)
+        )
+        if n % 500 == 0 or n == n_pairs:
+            log(f"GPU kNN {n}/{n_pairs}，候选 {len(pending)} 对，{time.time() - t0:.1f}s")
+    if not pending:
+        return []
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=max(1, workers),
+        mp_context=ctx,
+        initializer=_verify_init,
+        initargs=(cameras,),
+    ) as pool:
+        raw = list(pool.map(_verify_worker, pending, chunksize=8))
     return [PairMatches(*r) for r in raw if r is not None]

@@ -1,3 +1,8 @@
 -r requirements-worker.txt
 # CUDA 12.x 运行库（驱动 ≥ 525）。没有显卡的机器不要装，worker 会自动走 CPU。
+# 198 系统只有 CUDA 11 的 cublas，匹配 GEMM 还要 pip 里的 CUDA 12 运行库。
 cupy-cuda12x>=13.0,<14
+nvidia-cublas-cu12
+nvidia-cuda-runtime-cu12
+nvidia-nvjitlink-cu12
+nvidia-cuda-nvrtc-cu12

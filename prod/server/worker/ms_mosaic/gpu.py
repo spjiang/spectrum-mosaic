@@ -108,7 +108,7 @@ def choose(
     if not gpus:
         return _cpu(missing_reason or "未检测到显卡")
     if stage not in validated:
-        return _cpu("该阶段的 GPU 实现尚未通过验收")
+        return _cpu("")
     usable = [g for g in gpus if g.capability >= MIN_CAPABILITY]
     if not usable:
         need = ".".join(str(v) for v in MIN_CAPABILITY)
@@ -134,6 +134,8 @@ def choose(
 
 def describe(stage_label: str, choice: GpuChoice) -> str:
     if choice.device is None:
+        if not choice.reason:
+            return f"{stage_label}：使用 CPU"
         return f"{stage_label}：{choice.reason}，使用 CPU"
     gb = choice.budget_bytes / _GB
     return f"{stage_label}：GPU {choice.device} {choice.name}，显存上限 {gb:.1f} GB"
@@ -155,7 +157,10 @@ def set_job_gpu(setting: object, memory_gb: float | None) -> None:
 
 
 def trial_stages() -> frozenset[str]:
-    """验收对拍时临时放开的阶段（环境变量 MOSAIC_GPU_TRIAL_STAGES，逗号分隔）。生产不设。"""
+    """验收对拍时临时放开的阶段（环境变量 MOSAIC_GPU_TRIAL_STAGES，逗号分隔）。生产不设。
+
+    不要因为正射试验就打开匹配 GPU：S810 上 32 进程 FLANN 比单卡精确 kNN 快约 4.6×。
+    """
     import os
 
     raw = os.environ.get("MOSAIC_GPU_TRIAL_STAGES", "")

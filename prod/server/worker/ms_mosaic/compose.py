@@ -39,6 +39,34 @@ from ms_mosaic.products import (
 from ms_mosaic.seamline import SeamConfig, optimal_labels
 
 ORTHO_TILE = 384
+# 正射块进程同时建 CUDA 上下文的上限。拼接线是 CPU 图割，占块时间 70%+；
+# 32 个上下文把 T4 排队拖慢，利用率仍接近 0。超过此数重采样改走 CPU。
+GPU_ORTHO_MAX_PROCS = 8
+
+
+def _ortho_gpu_fields(choice, workers, per_worker_mb, log, label: str) -> dict:
+    """进程少时才把正射重采样绑到 GPU；进程多则 CPU 重采样更快。"""
+    if choice.device is None:
+        if log is not None:
+            log(describe_gpu(label, choice))
+        return {}
+    procs = resolve_workers(workers, per_worker_mb=per_worker_mb)
+    if procs > GPU_ORTHO_MAX_PROCS:
+        if log is not None:
+            log(
+                f"{label}：{procs} 进程超过 GPU 上下文上限 {GPU_ORTHO_MAX_PROCS}，"
+                "重采样用 CPU。拼接线是图割，占块时间大头；"
+                "32 个 CUDA 上下文会把 T4 排队拖慢而利用率仍接近 0"
+            )
+        return {}
+    if log is not None:
+        log(describe_gpu(label, choice))
+    return {
+        "gpu_device": choice.device,
+        "gpu_budget_per_proc": max(1, choice.budget_bytes // max(1, procs)),
+    }
+
+
 # 每个多光谱波段自己留一份影像缓存。一块最多 12 个视角，24 张够相邻块复用。
 # 七个波段若挤在同一个 48 张的缓存里，换波段就会把上一波段的影像挤掉，每块都重新读盘。
 MS_IMAGES_PER_BAND = 24
@@ -197,13 +225,7 @@ def render_band(
     }
     per_worker_mb = tile_worker_mb(image_bytes)
     choice = select_gpu("S5_ortho")
-    if log is not None:
-        log(describe_gpu(f"正射 {group_name(band)} ({band})", choice))
-    if choice.device is not None:
-        # 同一张卡由本波段的各块进程分用；超出各自份额时该块分批或改用 CPU
-        procs = resolve_workers(workers, per_worker_mb=per_worker_mb)
-        payload["gpu_device"] = choice.device
-        payload["gpu_budget_per_proc"] = max(1, choice.budget_bytes // max(1, procs))
+    payload.update(_ortho_gpu_fields(choice, workers, per_worker_mb, log, f"正射 {group_name(band)} ({band})"))
     try:
         return _render_band_with_payload(
             grid,

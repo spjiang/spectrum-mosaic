@@ -120,7 +120,7 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
   },
   gpu: {
     examples: ["auto", "off", "0"],
-    tips: ["auto=选空闲显存最多的卡；没有显卡、没装 GPU 运行库或该阶段未通过验收时自动走 CPU，结果相同"],
+    tips: ["auto=选空闲显存最多的卡；匹配固定走 CPU FLANN。没有显卡或该阶段不用 GPU 时走 CPU"],
     off: "off 表示整个任务只用 CPU",
   },
   gpu_memory_gb: {

@@ -60,6 +60,26 @@ def _strip_seconds(text: str) -> str:
     return _SECS.sub("", text).replace("，，", "，").strip(" ，,")
 
 
+def _ms_share_detail(text: str) -> str:
+    """「多光谱正射几何共用 450nm/550nm，48 进程。……」收成波段和进程数。"""
+    body = text.removeprefix("多光谱正射几何共用").strip()
+    names, _, rest = body.partition("，")
+    procs = re.search(r"(\d+)\s*进程", rest)
+    bits = [names.strip("。")] if names.strip("。") else []
+    if procs:
+        bits.append(f"{procs.group(1)} 个进程")
+    return " · ".join(bits)
+
+
+def _shared_ortho_step(share: dict) -> dict | None:
+    """块进度的最后一行是计算结束。没有进度就不能从写出时间里拆出计算。"""
+    start = share.get("start")
+    end = share.get("end")
+    if not isinstance(start, datetime) or not isinstance(end, datetime) or end <= start:
+        return None
+    return _step("多光谱正射", share.get("detail") or "", max(0.0, (end - start).total_seconds()), end)
+
+
 def _step(name: str, detail: str, elapsed: float | None, ts: datetime | None, *, status: str = "done") -> dict:
     return {
         "name": name,
@@ -113,6 +133,8 @@ def parse_stage_steps(
     at_workers: int | None = None
     pending_dense: int | None = None
     ortho_open: dict[str, datetime] = {}
+    # 几何共用：计算在各波段写出之前结束。用最后一条块进度把计算和写出拆开。
+    share: dict | None = None
     # 同一阶段再次 start 后，下一行从这次 start 起算，不能去减上一次的时间。
     restart_next: set[str] = set()
     anchors: dict[str, datetime] = {}
@@ -155,7 +177,18 @@ def parse_stage_steps(
             continue
         if current not in buckets:
             continue
+        if current == "S5_ortho" and msg.startswith("多光谱正射几何共用"):
+            share = {"start": ts, "end": ts, "detail": _ms_share_detail(msg), "closed": False}
+            continue
+        if current == "S5_ortho" and msg.startswith("多光谱正射计算完成"):
+            if share is not None:
+                share["closed"] = True
+            detail = share.get("detail") if share else ""
+            buckets[current].append(_step("多光谱正射", detail or "", _explicit_seconds(msg), ts))
+            continue
         if _PROGRESS.search(msg):
+            if current == "S5_ortho" and share is not None and not share["closed"] and ts is not None:
+                share["end"] = ts
             continue
         step = _classify(current, msg, ts, ortho_open)
         if step is None:
@@ -184,7 +217,27 @@ def parse_stage_steps(
         if step["name"] in {"粗格网", "细格网"} and pending_dense and "进程" not in step["detail"]:
             step["detail"] = f"{step['detail']} · {pending_dense} 个进程" if step["detail"] else f"{pending_dense} 个进程"
             pending_dense = None
+        if (
+            current == "S5_ortho"
+            and share is not None
+            and not share["closed"]
+            and step["name"].startswith("正射 ")
+        ):
+            shared = _shared_ortho_step(share)
+            if shared is not None:
+                buckets[current].append(shared)
+                share["closed"] = True
         buckets[current].append(step)
+    if share is not None and not share["closed"]:
+        if running and alive and current_stage == "S5_ortho" and share.get("start") is not None:
+            elapsed = None if now is None else max(0.0, (now - share["start"]).total_seconds())
+            buckets["S5_ortho"].append(
+                _step("多光谱正射", share.get("detail") or "", elapsed, now, status="running")
+            )
+        else:
+            shared = _shared_ortho_step(share)
+            if shared is not None:
+                buckets["S5_ortho"].append(shared)
     for stage, steps in buckets.items():
         last_ts = steps[-1].get("_ts") if steps else None
         last_name = steps[-1]["name"] if steps else ""

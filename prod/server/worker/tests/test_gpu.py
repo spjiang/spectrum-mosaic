@@ -65,7 +65,8 @@ def test_memory_cap_never_exceeds_free():
 def test_unvalidated_stage_stays_on_cpu():
     c = choose("auto", None, [T4], None, stage="S3_dense", validated=ALL)
     assert c.device is None
-    assert "验收" in c.reason
+    assert c.reason == ""
+    assert describe("密集", c) == "密集：使用 CPU"
 
 
 def test_describe_lines():
@@ -164,6 +165,7 @@ def test_trial_stages_env_opens_unvalidated_stage(monkeypatch):
     gpu.set_job_gpu("auto", None)
     try:
         monkeypatch.delenv("MOSAIC_GPU_TRIAL_STAGES", raising=False)
+        monkeypatch.delenv("MOSAIC_GPU_TRIAL_MATCHING", raising=False)
         assert gpu.select("S5_ortho").device is None
         monkeypatch.setenv("MOSAIC_GPU_TRIAL_STAGES", "S5_ortho, S3_dense")
         chosen = gpu.select("S5_ortho")
@@ -171,5 +173,19 @@ def test_trial_stages_env_opens_unvalidated_stage(monkeypatch):
         assert "验收试运行" in describe("正射", chosen)
         gpu.set_job_gpu("off", None)
         assert gpu.select("S5_ortho").device is None
+    finally:
+        gpu.set_job_gpu(None, None)
+
+
+def test_ortho_trial_does_not_open_matching(monkeypatch):
+    monkeypatch.setattr(gpu, "probe", lambda: ([T4], None))
+    monkeypatch.setattr(gpu, "VALIDATED_STAGES", frozenset())
+    gpu.set_job_gpu("auto", None)
+    try:
+        monkeypatch.setenv("MOSAIC_GPU_TRIAL_STAGES", "S5_ortho")
+        assert gpu.select("S5_ortho").device == 0
+        assert gpu.select("S2_at").device is None
+        monkeypatch.setenv("MOSAIC_GPU_TRIAL_STAGES", "S5_ortho,S2_at")
+        assert gpu.select("S2_at").device == 0
     finally:
         gpu.set_job_gpu(None, None)

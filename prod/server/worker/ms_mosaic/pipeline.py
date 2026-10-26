@@ -9,7 +9,6 @@ from typing import Any, Sequence
 import numpy as np
 
 from ms_mosaic.compose import render_band, render_ms_bands, write_band_product
-from ms_mosaic.gpu import select as select_gpu
 from ms_mosaic.ortho import share_rectification
 from ms_mosaic.parallel import (
     growth_since_now,
@@ -111,6 +110,18 @@ def commercial_product_dir(input_dir: Path) -> Path | None:
     """查找输入目录上一级的「拼图结果」。主路径不自动调用，仅供显式对标。"""
     cand = Path(input_dir).expanduser().resolve().parent / COMMERCIAL_PRODUCTS
     return resolve_benchmark_dir(cand, required=False)
+
+
+def pos_grid_views(block, dense_poses: dict) -> tuple[dict, dict]:
+    """格网范围用 POS 外方位和块内初始内参，不用空三后的位姿/焦距。"""
+    poses = {i: block.poses[i] for i in dense_poses if i in block.poses}
+    band_of = {im.index: im.band for im in block.images}
+    cameras = {}
+    for i in poses:
+        band = band_of.get(i)
+        if band in block.cameras:
+            cameras[i] = block.cameras[band]
+    return cameras, poses
 
 
 def resolve_grid_reference(path: Path | str | None) -> tuple[Path, Path | None] | None:
@@ -336,7 +347,14 @@ def run_mosaic(
         if dsm_gsd is None:
             dsm_gsd = estimate_dsm_gsd(sparse.camera, dense_poses, ground_z)
             log(f"DSM GSD 由航高/焦距估计为 {dsm_gsd:.6f} m（正射为其一半）")
-        grid = grid_from_footprints(cams, dense_poses, ground_z, dsm_gsd, block.crs)
+        # 范围用 POS 足迹和提交时参考面，与冻结 GSD 同一原则。空三后外方位
+        # 微漂会让足迹并集差 1～6 个像元，比对报告就变成「范围/宽高未达标」。
+        pos_cams, pos_poses = pos_grid_views(block, dense_poses)
+        if pos_poses:
+            grid = grid_from_footprints(pos_cams, pos_poses, block.ground_z, dsm_gsd, block.crs)
+            log("格网范围按 POS 足迹锁定，不随空三外方位漂移")
+        else:
+            grid = grid_from_footprints(cams, dense_poses, ground_z, dsm_gsd, block.crs)
     native = estimate_native_gsd(sparse.camera, dense_poses, ground_z)
     log(
         f"处理记录：原始分辨率 {native:.6f} m/px，拼图分辨率 {float(dsm_gsd) * ORTHO_OVER_DSM:.6f} m/px，"
@@ -567,13 +585,16 @@ def run_mosaic(
         shot_of = {im.index: im.shot_index for im in block.by_band(band) if im.index in poses}
         ms_specs.append((band, cameras, poses, paths, shot_of))
     groups = [(c, p, s) for _, c, p, _, s in ms_specs]
-    share = len(ms_specs) > 1 and select_gpu("S5_ortho").device is None and share_rectification(groups)
+    # 几何共用与是否开 GPU 无关：GPU 正射没有 geom_cache，关掉共用会让七个波段
+    # 各算一遍投影/遮挡，MS 正射从约 80 分钟回到数小时。
+    share = len(ms_specs) > 1 and share_rectification(groups)
     if share:
         names = [name for name, *_ in ms_specs]
         log(
             f"多光谱正射几何共用 {'/'.join(names)}，{tile_n} 进程。"
             f"视角上限、立面层数、图割轮数与分波段相同"
         )
+        t_share = time.perf_counter()
         rasters = render_ms_bands(
             ortho_grid,
             ortho_z,
@@ -584,6 +605,9 @@ def run_mosaic(
             seam_cfg=seam_cfg,
             seam_edits_by_band={name: _edits_for(name) for name in names},
         )
+        # 七个波段在同一轮块循环里算完。先记下计算耗时，再逐波段写出，
+        # 避免界面把整段计算记到第一个写出的波段上。
+        log(f"多光谱正射计算完成，{time.perf_counter() - t_share:.1f}s")
         pending = list(rasters.items())
         try:
             for band, raster in pending:
@@ -593,7 +617,7 @@ def run_mosaic(
                 raster.close()
             raise
     else:
-        if len(ms_specs) > 1 and select_gpu("S5_ortho").device is None:
+        if len(ms_specs) > 1:
             log("多光谱内参或外方位不一致，分波段正射")
         n_par, per = split_ortho_pools(len(ms_specs), tile_n)
         if len(ms_specs) > 1 and n_par > 1:
