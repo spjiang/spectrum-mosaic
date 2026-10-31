@@ -133,6 +133,55 @@ export type StageStep = {
   status: "done" | "running";
 };
 
+export type IncrementalProject = {
+  id: string;
+  name: string;
+  input_dir: string;
+  inbox_dir: string;
+  output_root: string;
+  auto_run: boolean;
+  scan_interval_minutes: number;
+  latest_shot_index?: number | null;
+  latest_filename?: string | null;
+  current_output_dir?: string | null;
+  created_at?: string | null;
+};
+
+export type IncrementalDetail = IncrementalProject & {
+  busy: boolean;
+  blocked_by_other: boolean;
+  has_new_files: boolean;
+  waiting_for_job: boolean;
+  current_job_id?: string | null;
+  latest_ingested_at?: string | null;
+  last_scan_at?: string | null;
+  incoming: number;
+  ready: number;
+  ingested: number;
+  started_job_id?: string | null;
+  conflicts?: string[];
+  job?: {
+    id: string;
+    seq: number | null;
+    status: string;
+    output_dir: string;
+    message: string;
+  } | null;
+  shots: {
+    shot_index: number;
+    bands: { filename: string; band: string; role: string; status: string; size_bytes: number }[];
+  }[];
+  rounds: {
+    id: number;
+    job_id: string | null;
+    job_seq: number | null;
+    job_status: string | null;
+    output_dir: string;
+    created_at: string | null;
+    is_current: boolean;
+  }[];
+};
+
 export const api = {
   login: async (username: string, password: string) => {
     const body = new URLSearchParams({ username, password });
@@ -343,6 +392,24 @@ export const api = {
     request("/api/users", { method: "POST", body: JSON.stringify(body) }),
   updateUser: (id: number, body: { password?: string; roles?: string[]; is_active?: boolean }) =>
     request(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  incrementalProjects: (page = 1, pageSize = 10) =>
+    request<{ items: IncrementalProject[]; total: number; page: number; page_size: number }>(
+      `/api/incremental/projects?page=${page}&page_size=${pageSize}`,
+    ),
+  incrementalCreate: (body: {
+    name: string;
+    input_dir: string;
+    output_root: string;
+    auto_run: boolean;
+    scan_interval_minutes: number;
+  }) =>
+    request<IncrementalDetail>("/api/incremental/projects", { method: "POST", body: JSON.stringify(body) }),
+  incrementalDetail: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}`),
+  incrementalPatch: (id: string, body: { name?: string; auto_run?: boolean; scan_interval_minutes?: number }) =>
+    request<IncrementalDetail>(`/api/incremental/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  incrementalDelete: (id: string) => request<void>(`/api/incremental/projects/${id}`, { method: "DELETE" }),
+  incrementalScan: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}/scan`, { method: "POST" }),
+  incrementalRun: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}/run`, { method: "POST" }),
   rbac: () => request<{ menus: Record<string, string[]> }>("/api/rbac"),
   updateRoleMenus: (role: string, menus: string[]) =>
     request<{ menus: Record<string, string[]> }>(`/api/rbac/roles/${role}`, {

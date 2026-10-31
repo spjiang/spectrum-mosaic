@@ -3,6 +3,7 @@ import { Layout, Menu, Progress, Button, Tooltip, Dropdown, Tag, Modal, Typograp
 import type { MenuProps } from "antd";
 import {
   PlayCircleOutlined,
+  CloudUploadOutlined,
   ProfileOutlined,
   UnorderedListOutlined,
   BookOutlined,
@@ -40,6 +41,8 @@ import UsersPage from "../pages/Users";
 import RolesPage from "../pages/Roles";
 import PermissionsPage from "../pages/Permissions";
 import AuditPage from "../pages/Audit";
+import IncrementalPage from "../pages/Incremental";
+import AreasPage from "../pages/Areas";
 import { PRODUCT, PRODUCT_TITLE } from "../product";
 import {
   canConfigure,
@@ -58,6 +61,7 @@ const { Sider, Header, Content } = Layout;
 
 const TITLE: Record<string, string> = {
   execute: "新建处理",
+  incremental: "测区管理",
   profiles: "处理方案",
   jobs: "处理记录",
   seam: "拼接线处理",
@@ -74,6 +78,7 @@ const TITLE: Record<string, string> = {
 
 const MENU_ICON: Record<MenuKey, ReactNode> = {
   execute: <PlayCircleOutlined />,
+  incremental: <CloudUploadOutlined />,
   profiles: <ProfileOutlined />,
   jobs: <UnorderedListOutlined />,
   seam: <EditOutlined />,
@@ -90,6 +95,7 @@ const MENU_ICON: Record<MenuKey, ReactNode> = {
 
 const GROUP_ICON: Record<MenuGroup, ReactNode> = {
   作业管理: <AppstoreOutlined />,
+  增量拼图: <CloudUploadOutlined />,
   辅助工具: <ToolOutlined />,
   系统管理: <SettingOutlined />,
   组织管理: <TeamOutlined />,
@@ -124,7 +130,7 @@ function AppShellBody({
   const nav = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const [about, setAbout] = useState(false);
-  const [openKeys, setOpenKeys] = useState<string[]>(MENU_GROUPS.map((g) => g.siderKey));
+  const [openKeys, setOpenKeys] = useState<string[]>(MENU_GROUPS.filter((g) => !g.direct).map((g) => g.siderKey));
   const { activeJob } = useJobs();
   const { mapping } = useRbac();
   const conf = canConfigure(roles);
@@ -137,7 +143,9 @@ function AppShellBody({
       ? "编辑处理方案"
       : key === "profiles" && loc.pathname.includes("/new")
         ? "新建处理方案"
-        : TITLE[key] || PRODUCT.name;
+        : key === "incremental" && loc.pathname !== "/incremental"
+          ? "测区收片"
+          : TITLE[key] || PRODUCT.name;
 
   const menuItems = useMemo(() => {
     const visible = visibleMenus;
@@ -146,18 +154,22 @@ function AppShellBody({
       icon: MENU_ICON[m.key],
       label: <Link to={m.path}>{m.label}</Link>,
     });
-    return MENU_GROUPS.flatMap((group) => {
+    const items: MenuProps["items"] = [];
+    for (const group of MENU_GROUPS) {
       const children = visible.filter((m) => m.group === group.id).map(toItem);
-      if (!children.length) return [];
-      return [
-        {
-          key: group.siderKey,
-          icon: GROUP_ICON[group.id],
-          label: group.id,
-          children,
-        },
-      ];
-    });
+      if (!children.length) continue;
+      if (group.direct) {
+        items.push(...children);
+        continue;
+      }
+      items.push({
+        key: group.siderKey,
+        icon: GROUP_ICON[group.id],
+        label: group.id,
+        children,
+      });
+    }
+    return items;
   }, [visibleMenus]);
 
   const userMenuItems: MenuProps["items"] = useMemo(
@@ -258,6 +270,22 @@ function AppShellBody({
         <Content className="mosaic-content">
           <Routes>
             <Route path="/execute" element={<ExecutePage />} />
+            <Route
+              path="/incremental"
+              element={
+                <Guard allow={canMenu("incremental")}>
+                  <AreasPage />
+                </Guard>
+              }
+            />
+            <Route
+              path="/incremental/:id"
+              element={
+                <Guard allow={canMenu("incremental")}>
+                  <IncrementalPage />
+                </Guard>
+              }
+            />
             <Route path="/profiles" element={<ProfilesListPage />} />
             <Route
               path="/profiles/new"

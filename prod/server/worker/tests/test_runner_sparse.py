@@ -61,7 +61,7 @@ def _run(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(runner, "scan_directory", lambda *_a, **_k: [object()] * 2)
     monkeypatch.setattr(runner, "usable_shots", lambda shots, **_k: ({0: None, 1: None}, {}))
     monkeypatch.setattr(runner, "build_block", lambda _keep: block)
-    monkeypatch.setattr(runner, "_extract_all", lambda jobs, workers: None)
+    monkeypatch.setattr(runner, "_extract_all", lambda jobs, workers, log=None: None)
     matches = [
         PairMatches(0, 2, np.array([[0, 0], [1, 1]]), "essential"),
         PairMatches(1, 3, np.array([[0, 0]]), "essential"),
@@ -102,3 +102,23 @@ def test_checkpoint_keeps_report_stats(monkeypatch, tmp_path: Path):
     rms = band_rms_px(loaded.block, loaded.at)
     np.testing.assert_allclose(rms["Color"], np.sqrt(np.mean(np.square([0.3, 0.4, 0.5, 0.6]))))
     np.testing.assert_allclose(rms["550nm"], np.sqrt(np.mean(np.square([1.0, 2.0]))))
+
+
+def test_map_progress_keeps_submit_order():
+    """后完成的任务不能插到结果前面，进度行要写出已完成数量。"""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    logs = []
+
+    def work(n):
+        time.sleep(0.02 if n % 2 else 0.0)
+        return n * 3
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        got = runner._map_progress(
+            pool, work, list(range(12)), log=logs.append, label="提取", unit="张", chunksize=3, every_s=0
+        )
+    assert got == [n * 3 for n in range(12)]
+    assert logs[-1].startswith("已提取 12/12 张")
+    assert all(line.startswith("已提取 ") for line in logs)

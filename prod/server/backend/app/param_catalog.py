@@ -21,6 +21,7 @@ PARAM_LABELS: dict[str, str] = {
     "require_pos": "必须有 POS",
     "primary_band": "主波段",
     "workers_at": "空三并行度",
+    "ba_stage3": "平差阶段3",
     "memory_gb": "任务内存（GB）",
     "cpus": "任务 CPU（核）",
     "gpu": "任务 GPU",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -127,3 +127,62 @@ class SystemSetting(Base):
     __tablename__ = "system_settings"
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[object] = mapped_column(JSONB)
+
+
+class IncrementalProject(Base):
+    """增量测区。正式目录确定后不再改。一个测区只绑定一条拼图任务。"""
+
+    __tablename__ = "incremental_projects"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    input_dir: Mapped[str] = mapped_column(Text, unique=True)
+    inbox_dir: Mapped[str] = mapped_column(Text)
+    output_root: Mapped[str] = mapped_column(Text)
+    auto_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    quiet_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    scan_interval_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    latest_shot_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    latest_ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    current_output_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class IncrementalFile(Base):
+    """收件区里的一张航片。传完并入库后才进入正式目录。"""
+
+    __tablename__ = "incremental_files"
+    __table_args__ = (UniqueConstraint("project_id", "filename", name="uq_incremental_file"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("incremental_projects.id", ondelete="CASCADE")
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    shot_index: Mapped[int] = mapped_column(Integer)
+    band: Mapped[str] = mapped_column(String(32))
+    role: Mapped[str] = mapped_column(String(8))
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(16))
+    dataset_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class IncrementalRound(Base):
+    """一轮增量拼图，对应一条现有处理任务。"""
+
+    __tablename__ = "incremental_rounds"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("incremental_projects.id", ondelete="CASCADE")
+    )
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    output_dir: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

@@ -121,7 +121,7 @@ export default function ExecutePage() {
   const { roles } = useAuth();
   const allowRun = canExecute(roles);
   const showOpsHelp = canViewOps(roles);
-  const { activeJob, refresh } = useJobs();
+  const { jobs, refresh } = useJobs();
   const [searchParams, setSearchParams] = useSearchParams();
   const watchId = searchParams.get("job");
   const [profiles, setProfiles] = useState<any[]>([]);
@@ -301,7 +301,10 @@ export default function ExecutePage() {
   const summary = selected?.values || {};
   const busy = Boolean(job && ACTIVE.includes(job.status));
   const jobState = job ? jobComputeState(job, inspect) : "none";
-  const runningElsewhere = Boolean(activeJob && activeJob.id !== job?.id);
+  // 暂停和等待继续不再占机器。只有排队或正在计算才挡住新任务。
+  const runningElsewhere = jobs.some(
+    (j) => j.id !== job?.id && (j.status === "queued" || j.status === "running"),
+  );
   const memMax = memorySliderMax(engineRamGb);
   const memMarks: Record<number, string> = { 0: "0" };
   if (memMax > 16) memMarks[16] = "16";

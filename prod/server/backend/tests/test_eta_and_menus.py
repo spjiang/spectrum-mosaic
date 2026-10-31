@@ -13,6 +13,11 @@ def test_cli_stays_on_every_saved_menu():
     assert _ensure_public(["cli", "inspect"]).count("cli") == 1
 
 
+def test_execute_role_also_sees_incremental_menu():
+    assert "incremental" in _ensure_public(["execute", "jobs"])
+    assert "incremental" not in _ensure_public(["profiles", "jobs"])
+
+
 def test_eta_uses_median_of_finished_jobs():
     now = datetime.now(timezone.utc)
     past = SimpleNamespace(

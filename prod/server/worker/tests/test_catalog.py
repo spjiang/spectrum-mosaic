@@ -41,6 +41,16 @@ def test_parse_radiometric_r():
     assert rec.kind == "ms"
 
 
+def test_parse_wavelength_is_not_limited_to_s810():
+    """文件名里的整数波长都入册，不限于 450–850 nm。"""
+    rec = parse_filename(Path("MAX_0008_510nm_D.tif"))
+    assert rec is not None
+    assert rec.band == "510nm"
+    assert rec.wavelength_nm == 510
+    rec = parse_filename(Path("MAX_0008_1200nm_R.tif"))
+    assert rec is not None and rec.band == "1200nm" and rec.role == "R"
+
+
 def test_parse_white_panel():
     rec = parse_filename(Path("MAX_0002_450nm_W.tif"))
     assert rec.role == "W"

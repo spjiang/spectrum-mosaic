@@ -11,7 +11,7 @@ import multiprocessing
 import os
 import time
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,9 +25,8 @@ from ms_mosaic.matching import MIN_INLIERS, PairMatches, geometric_verify, match
 from ms_mosaic.cpu import cpu_cap, job_cpus
 from ms_mosaic.memory import resolve_memory_budget, visible_limit_bytes
 from ms_mosaic.pairs import select_pairs
-from ms_mosaic.at import CALIBRATION_STAGES
+from ms_mosaic.at import calibration_stages
 from ms_mosaic.scene import (
-    BAND_ORDER,
     MIN_AGL_M,
     MAX_TILT_DEG,
     PRIMARY_BAND,
@@ -216,7 +215,7 @@ def _band_pair_candidates(block: Block, ground_z: float) -> list:
 
     seen: set[tuple[int, int]] = set()
     out: list[PairCandidate] = []
-    for band in BAND_ORDER:
+    for band in block.band_order():
         band_ims = block.by_band(band)
         if len(band_ims) < 2 or band not in block.cameras:
             continue
@@ -251,9 +250,10 @@ def run_sparse(
     sigma_attitude_deg: float = SIGMA_ATTITUDE_DEG,
     outlier_threshold_px: float | None = None,
     calibrate_intrinsics: bool = True,
+    ba_stage3: bool = True,
     log=lambda *_: None,
 ) -> SparseResult:
-    """全波段稀疏重建（特征/匹配/空三），对齐商业八组都参与。输入目录只读。"""
+    """全波段稀疏重建（特征/匹配/空三）。有几个波长就做几组，不限于 S810 的 8 组。输入目录只读。"""
     timings: dict[str, float] = {}
     t0 = time.time()
 
@@ -277,7 +277,7 @@ def run_sparse(
     candidates = _band_pair_candidates(block, block.ground_z)
     n_full = len(images) * (len(images) - 1) // 2
     log(
-        f"候选像对 {len(candidates)} 对（按 {len(BAND_ORDER)} 个波段组内选对；"
+        f"候选像对 {len(candidates)} 对（按 {len(block.band_order())} 个波段组内选对；"
         f"若全影像两两组合为 {n_full}）"
     )
 
@@ -318,7 +318,7 @@ def run_sparse(
         log(f"空三并行 {workers} 进程")
     t = time.time()
     jobs = [(i, p, str(cache_dir), max_features) for i, p in zip(indices, paths)]
-    _extract_all(jobs, workers)
+    _extract_all(jobs, workers, log=log)
     timings["features"] = time.time() - t
     log(f"特征提取 {len(jobs)} 张，{timings['features']:.1f}s")
 
@@ -352,7 +352,9 @@ def run_sparse(
     att = {im.index: block.poses[im.index].rotation for im in images}
 
     t = time.time()
-    at_stages = CALIBRATION_STAGES if calibrate_intrinsics else ((),)
+    if calibrate_intrinsics and not ba_stage3:
+        log("平差阶段3已关闭，停在阶段2（焦距、主点、k1、k2）")
+    at_stages = calibration_stages(ba_stage3) if calibrate_intrinsics else ((),)
     at = run_at(
         dict(block.cameras),
         poses,
@@ -402,10 +404,45 @@ def run_sparse(
     )
 
 
-def _extract_all(jobs: list, workers: int) -> None:
+def _run_chunk(fn, chunk):
+    """一段任务在同一个进程里顺次算完。必须是模块级函数，子进程才能反序列化。"""
+    return [fn(job) for job in chunk]
+
+
+def _map_progress(pool, fn, jobs, *, log, label: str, unit: str, chunksize: int = 1, every_s: float = 15.0):
+    """并行跑完 jobs，返回值按提交顺序排列。
+
+    大约每 15 秒写一行已完成数量。完成顺序和 pool.map 一样按原下标排好，
+    不改变后面构轨、平差读到的像对顺序。
+    """
+    total = len(jobs)
+    if total == 0:
+        return []
+    size = max(1, int(chunksize))
+    chunks = [jobs[i : i + size] for i in range(0, total, size)]
+    futures = {pool.submit(_run_chunk, fn, chunk): i for i, chunk in enumerate(chunks)}
+    parts: list = [None] * len(chunks)
+    done = 0
+    t0 = time.time()
+    last = t0
+    for fut in as_completed(futures):
+        idx = futures[fut]
+        parts[idx] = fut.result()
+        done += len(parts[idx])
+        now = time.time()
+        if done == total or now - last >= every_s:
+            log(f"已{label} {done}/{total} {unit}，用时 {now - t0:.0f} 秒")
+            last = now
+    flat = []
+    for part in parts:
+        flat.extend(part)
+    return flat
+
+
+def _extract_all(jobs: list, workers: int, log=lambda *_: None) -> None:
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_extract_init) as pool:
-        list(pool.map(_extract_worker, jobs))
+        _map_progress(pool, _extract_worker, jobs, log=log, label="提取", unit="张")
 
 
 def _match_all(
@@ -413,10 +450,12 @@ def _match_all(
 ) -> list[PairMatches]:
     # S810 实测 GPU 精确 kNN 比 32 进程 FLANN 慢约 4.6×，匹配只走 CPU。
     log(f"匹配：CPU FLANN，{workers} 进程")
-    return _match_all_cpu(pair_jobs, workers, cache_dir, cameras)
+    return _match_all_cpu(pair_jobs, workers, cache_dir, cameras, log=log)
 
 
-def _match_all_cpu(pair_jobs: list, workers: int, cache_dir: Path, cameras: dict) -> list[PairMatches]:
+def _match_all_cpu(
+    pair_jobs: list, workers: int, cache_dir: Path, cameras: dict, log=lambda *_: None
+) -> list[PairMatches]:
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(
         max_workers=workers,
@@ -424,7 +463,9 @@ def _match_all_cpu(pair_jobs: list, workers: int, cache_dir: Path, cameras: dict
         initializer=_match_init,
         initargs=(str(cache_dir), cameras),
     ) as pool:
-        raw = list(pool.map(_match_worker, pair_jobs, chunksize=4))
+        raw = _map_progress(
+            pool, _match_worker, pair_jobs, log=log, label="匹配", unit="对", chunksize=4
+        )
     return [PairMatches(*r) for r in raw if r is not None]
 
 

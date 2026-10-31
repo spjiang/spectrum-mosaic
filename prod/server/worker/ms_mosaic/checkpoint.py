@@ -275,6 +275,7 @@ def resolve_sparse(
     sigma_attitude_deg: float | None = None,
     outlier_threshold_px: float | None = None,
     calibrate_intrinsics: bool = True,
+    ba_stage3: bool = True,
     log: Callable[[str], None] | None = print,
     run_sparse_fn=None,
     rebuild_fn: Callable[..., Block] | None = None,
@@ -308,6 +309,7 @@ def resolve_sparse(
         "drop_white_panel": drop_white_panel,
         "require_pos": require_pos,
         "calibrate_intrinsics": calibrate_intrinsics,
+        "ba_stage3": ba_stage3,
         "log": log,
     }
     if min_agl_m is not None:

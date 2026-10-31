@@ -33,7 +33,7 @@ INSERT INTO param_definitions (key, stage_id, value_type, default_value, descrip
 ('workers_dense', 'S3_dense', 'int', 'null'::jsonb, $d$密集匹配进程数，默认 CPU-1。$d$, false, 50),
 ('spike_tolerance_m', 'S4_dsm', 'float', '2.5'::jsonb, $d$相对中值超过此高差视为尖刺剔除。$d$, true, 10),
 ('max_fill_gap_m', 'S4_dsm', 'float', '40.0'::jsonb, $d$空洞填充最大跨度（米）。$d$, true, 20),
-('bands', 'S5_ortho', 'string[]', '["Color","450nm","550nm","650nm","720nm","750nm","800nm","850nm"]'::jsonb, $d$参与正射的波段。仅 RGB 快速预览时设为 ["Color"]。$d$, false, 10),
+('bands', 'S5_ortho', 'string[]', '["Color","450nm","550nm","650nm","720nm","750nm","800nm","850nm"]'::jsonb, $d$参与正射的波段。文件名里的整数波长都会入册，不限于 450–850 nm。留空，或仍是这 8 个默认名时，按数据里实际有的波段全部出图。只出彩色时填 ["Color"]。$d$, false, 10),
 ('color_correction', 'S5_ortho', 'enum', '"off_for_ms"'::jsonb, $d$RGB 可开增益均衡；多光谱强制禁用保辐射。$d$, true, 20),
 ('seamline_enabled', 'S5_ortho', 'bool', 'true'::jsonb, $d$是否计算拼接线。$d$, false, 30),
 ('workers_ortho', 'S5_ortho', 'int', 'null'::jsonb, $d$正射并行度。$d$, false, 40),

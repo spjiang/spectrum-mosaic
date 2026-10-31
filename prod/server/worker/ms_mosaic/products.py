@@ -5,9 +5,9 @@
     DSM.tif                          1 波段 float32，GSD 由航高/焦距估计（或 --dsm-gsd），
                                      nodata −3.4028235e+38，LZW
     Orthomosaic_pix_surf_group0.tif  4 波段 uint8（R/G/B/Alpha），GSD = DSM/2，LZW
-    Orthomosaic_pix_surf_group1..7   1 波段 uint16，同 GSD，LZW
+    Orthomosaic_pix_surf_group1…    1 波段 uint16，同 GSD，LZW。有几个波长就有几个文件。
 
-group0 是 RGB，group1~7 依次对应 450/550/650/720/750/800/850 nm。
+group0 是 RGB。其余按该架次波长从小到大：S810 的 450…850 nm 仍是 group1…group7。
 RGB 用 alpha 波段而非 nodata 标无效区，这是商业成品的做法，也便于直接叠图。
 
 大区域必须按块写盘：10 km × 100 m 的条带在 0.0539 m 下有 3.4 亿个格网，
@@ -16,6 +16,7 @@ RGB 用 alpha 波段而非 nodata 标无效区，这是商业成品的做法，�
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +24,7 @@ import numpy as np
 
 from ms_mosaic.grid import Grid, erode_coverage, inpaint_nearest, refine_coverage_mask
 
-# 波段顺序即商业成品的 group 编号顺序
+# S810 成品的波长顺序。没传入本次波段表时，group_name 仍按这张表编号。
 MS_BANDS = ("450nm", "550nm", "650nm", "720nm", "750nm", "800nm", "850nm")
 RGB_BAND = "Color"
 GROUP_PREFIX = "Orthomosaic_pix_surf_group"
@@ -33,13 +34,12 @@ EXTRAS_DIRNAME = "附件"
 BLOCK = 512
 
 
-def group_name(band: str) -> str:
-    """波段名 → 商业成品的文件名。"""
-    if band == RGB_BAND:
-        return f"{GROUP_PREFIX}0.tif"
-    if band not in MS_BANDS:
+def group_name(band: str, order: Sequence[str] | None = None) -> str:
+    """波段名 → 成品文件名。order 是这次测区的波段顺序；缺省时用 S810 的 8 组。"""
+    names = tuple(order) if order is not None else (RGB_BAND, *MS_BANDS)
+    if band not in names:
         raise ValueError(f"未知波段 {band}")
-    return f"{GROUP_PREFIX}{MS_BANDS.index(band) + 1}.tif"
+    return f"{GROUP_PREFIX}{names.index(band)}.tif"
 
 
 def band_dtype(band: str) -> str:

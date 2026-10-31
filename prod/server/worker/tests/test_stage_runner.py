@@ -33,6 +33,7 @@ def test_run_stages_forwards_template_params(tmp_path: Path, monkeypatch):
             "color_correction": "off",
             "write_pdf_report": False,
             "seamline_enabled": True,
+            "ba_stage3": False,
             "edge_trim_m": 20,
             "flatten_edge_win_m": 40,
             "flatten_edge_band_m": 80,
@@ -49,6 +50,7 @@ def test_run_stages_forwards_template_params(tmp_path: Path, monkeypatch):
     assert captured["color_correction"] == "off"
     assert captured["write_pdf_report"] is False
     assert captured["seamline_enabled"] is True
+    assert captured["ba_stage3"] is False
     assert captured["edge_trim_m"] == 20.0
     assert captured["flatten_edge_win_m"] == 40.0
     assert captured["flatten_edge_band_m"] == 80.0
@@ -74,6 +76,7 @@ def test_run_stages_parses_seam_prefer_ids(tmp_path: Path, monkeypatch):
     )
     assert captured["seam_prefer_ids"] == (3, 8, 12)
     assert captured["color_correction"] == "off"
+    assert captured["ba_stage3"] is True
 
 
 def test_run_stages_sets_and_resets_job_gpu(tmp_path: Path, monkeypatch):

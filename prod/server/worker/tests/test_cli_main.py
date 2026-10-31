@@ -17,6 +17,7 @@ def test_cli_flags_match_web_keys():
         "cache_dir",
         "dsm_gsd",
         "workers_at",
+        "ba_stage3",
         "workers_dense",
         "workers_ortho",
         "drop_white_panel",
@@ -59,7 +60,17 @@ def test_args_to_params_maps_names(tmp_path):
     assert params["dsm_gsd"] == 0.1
     assert params["workers_at"] == 4
     assert params["drop_white_panel"] is False
+    assert "ba_stage3" not in params
     assert params["bands"] == ["Color", "550nm"]
+
+
+def test_no_ba_stage3_flag(tmp_path):
+    p = build_parser()
+    args = p.parse_args(
+        ["--input-dir", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--no-ba-stage3"]
+    )
+    params = args_to_params(args)
+    assert params["ba_stage3"] is False
 
 
 def test_preset_rgb_preview_forces_color(tmp_path):

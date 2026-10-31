@@ -54,6 +54,7 @@ _BOOL_KEYS = (
     "drop_white_panel",
     "require_pos",
     "calibrate_intrinsics",
+    "ba_stage3",
     "seamline_enabled",
     "write_pdf_report",
     "write_json_report",

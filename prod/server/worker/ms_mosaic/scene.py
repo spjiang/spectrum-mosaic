@@ -1,12 +1,13 @@
 """测区（block）组装：把扫描到的曝光变成相机 + 外方位初值 + GPS 观测。
 
-一次曝光有 8 台相机（Color 与 7 个波段），同一波段共用一套内参，这与 LiMapper
-报告里「组 0 … 组 7」的分组完全一致，自标定也按组进行。
+一组一个波长，同一波长共用一套内参，与 LiMapper「按组标定」一致。组数不写死：
+文件名里有几个波长就建几组。S810 仍是 Color 加 7 个波长，顺序与原来的组 0…组 7 相同。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,9 +19,41 @@ from ms_mosaic.geo import epsg_utm, lonlat_to_utm
 from ms_mosaic.rawio import image_size
 
 PRIMARY_BAND = "Color"  # 与 LiMapper「主波段 = 组 0」一致：RGB 纹理最丰富
+# S810 的成品组号。别的相机按 ordered_bands，不拿这张表去滤数据。
 BAND_ORDER = ("Color", "450nm", "550nm", "650nm", "720nm", "750nm", "800nm", "850nm")
+_WAVELENGTH = re.compile(r"^(\d+)nm$")
 MAX_TILT_DEG = 60.0  # REQ-03-03 / 报告「最大倾斜角 60 度」
 MIN_AGL_M = 5.0
+
+
+def ordered_bands(names: Iterable[str]) -> tuple[str, ...]:
+    """Color 在最前，其余按波长从小到大。S810 的 7 个波长因此仍是 group1…group7。"""
+    unique = list(dict.fromkeys(names))
+    color = [PRIMARY_BAND] if PRIMARY_BAND in unique else []
+    waves = [name for name in unique if _WAVELENGTH.match(name)]
+    waves.sort(key=lambda name: int(name[:-2]))
+    wave_set = set(waves)
+    rest = sorted(name for name in unique if name not in color and name not in wave_set)
+    return tuple(color + waves + rest)
+
+
+def resolve_wanted(
+    requested: Sequence[str] | None,
+    discovered: Sequence[str],
+) -> tuple[str, ...]:
+    """正射用哪些波段。
+
+    没指定，或界面仍交来写死的 8 个默认名时，用数据里扫到的全部波长。
+    用户改成别的列表（例如只留 Color）才按列表筛，并且保持波长顺序。
+    """
+    found = tuple(discovered)
+    if not requested:
+        return found
+    req = tuple(str(name) for name in requested)
+    if set(req) == set(BAND_ORDER):
+        return found
+    keep = set(req)
+    return tuple(name for name in found if name in keep)
 
 # GPS/IMU 先验的标准差。XMP 给出 GPSXYAccuracy=3 m、GPSZAccuracy=5 m；
 # 姿态无精度字段，按消费级云台给经验值，并在平差里用弱权。
@@ -51,6 +84,10 @@ class Block:
     gps: dict[int, np.ndarray] = field(default_factory=dict)
     attitude: dict[int, tuple[float, float, float]] = field(default_factory=dict)
     ground_z: float = 0.0
+
+    def band_order(self) -> tuple[str, ...]:
+        """这次测区实际有的波段，Color 在前，其余按波长。"""
+        return ordered_bands([im.band for im in self.images] + list(self.cameras))
 
     def by_band(self, band: str) -> list[ImageRef]:
         return [im for im in self.images if im.band == band]
@@ -120,6 +157,13 @@ def build_block(shots: Mapping[int, Shot], *, crs: str | None = None) -> Block:
     sizes: dict[str, tuple[int, int]] = {}
     agls: list[float] = []
     next_index = 0
+    present: list[str] = []
+    if any(shot.rgb is not None for shot in shots.values()):
+        present.append(PRIMARY_BAND)
+    for shot in shots.values():
+        present.extend(shot.ms)
+    order = ordered_bands(present)
+    group_of = {band: index for index, band in enumerate(order)}
 
     for shot_index in sorted(shots):
         shot = shots[shot_index]
@@ -132,8 +176,10 @@ def build_block(shots: Mapping[int, Shot], *, crs: str | None = None) -> Block:
 
         records = []
         if shot.rgb is not None:
-            records.append(("Color", shot.rgb.path))
-        for band in BAND_ORDER[1:]:
+            records.append((PRIMARY_BAND, shot.rgb.path))
+        for band in order:
+            if band == PRIMARY_BAND:
+                continue
             rec = shot.ms.get(band)
             if rec is not None:
                 records.append((band, rec.path))
@@ -150,7 +196,7 @@ def build_block(shots: Mapping[int, Shot], *, crs: str | None = None) -> Block:
                 shot_index=shot_index,
                 band=band,
                 path=path,
-                group=BAND_ORDER.index(band),
+                group=group_of[band],
             )
             block.images.append(image)
             block.poses[next_index] = Pose.from_ypr(center, yaw, pos.pitch_deg, pos.roll_deg)
@@ -171,10 +217,10 @@ def transfer_band(
 ) -> tuple[dict[int, Camera], dict[int, Pose], dict[int, Path]]:
     """把主波段空三得到的外方位搬到同一曝光的其他波段。
 
-    MAX-S810 八个镜头刚体固连，相对方位未知时最稳的一阶近似是：同一曝光共用
+    同一架次的镜头刚体固连，相对方位未知时最稳的一阶近似是：同一曝光共用
     平台位姿，内参按主波段自标定相对初值的比例缩放焦距，并把主点偏移与畸变
-    一并迁移。完整的 RigRelatives 联合平差是下一步，但这一步已经能先把 8 张
-    正射出出来。
+    一并迁移。完整的 RigRelatives 联合平差是下一步。S810 是 8 个镜头，
+    别的波长数也按同一规则迁移。
     """
     primary_cam = cameras[PRIMARY_BAND]
     primary_init = Camera.initial(

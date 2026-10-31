@@ -9,6 +9,8 @@ import pytest
 
 from ms_mosaic.blend import (
     OverlapStats,
+    _gaussian_pyramid,
+    _pyr_down,
     accumulate_overlap,
     apply_gains,
     collapse_pyramid,
@@ -241,6 +243,59 @@ def test_multiband_blend_no_views():
 def test_seam_step_zero_without_seam():
     labels = np.zeros((10, 10), np.int16)
     assert seam_step(np.ones((1, 10, 10)), labels) == 0.0
+
+
+def _legacy_mask_levels(masks: np.ndarray, levels: int) -> list[np.ndarray]:
+    """改金字塔之前的掩膜路径：先建拉普拉斯（结果丢掉），再按层数重做下采样。"""
+    per_view = []
+    for k in range(masks.shape[0]):
+        unused = laplacian_pyramid(masks[k][None], levels)
+        gauss = [masks[k][None]]
+        for _ in range(len(unused) - 1):
+            gauss.append(_pyr_down(gauss[-1]))
+        per_view.append(gauss)
+    n_levels = len(per_view[0])
+    return [np.stack([per_view[k][lv] for k in range(masks.shape[0])]) for lv in range(n_levels)]
+
+
+def test_mask_gaussian_matches_legacy_per_view_down():
+    """批量高斯栈必须与逐视角下采样逐位相同，奇数边长也要对齐。"""
+    rng = np.random.default_rng(7)
+    for shape in ((6, 1, 48, 47), (12, 1, 96, 80), (3, 1, 17, 19)):
+        masks = rng.random(shape).astype(np.float32)
+        fast = _gaussian_pyramid(masks, 7)
+        slow = _legacy_mask_levels(masks[:, 0], 7)
+        assert len(fast) == len(slow)
+        for a, b in zip(fast, slow):
+            np.testing.assert_array_equal(a, b)
+
+
+def test_multiband_blend_matches_legacy_mask_weights():
+    """掩膜少算的那遍拉普拉斯不能改变融合像元。"""
+    import ms_mosaic.blend as blend_mod
+
+    rng = np.random.default_rng(11)
+    n, h, w = 5, 48, 46
+    px = rng.standard_normal((n, 3, h, w)).astype(np.float32) * 20 + 80
+    px[0, :, :8, :] = np.nan
+    scores = rng.random((n, h, w)).astype(np.float32)
+    scores[-1, :, w // 2 :] = np.nan
+    labels = rng.integers(0, n, size=(h, w)).astype(np.int16)
+    labels[:4, :] = -1
+    stack = make_stack(px, scores)
+    got = multiband_blend(stack, labels, levels=5)
+
+    real = blend_mod._gaussian_pyramid
+
+    def legacy(img, levels):
+        return _legacy_mask_levels(img[:, 0], levels)
+
+    blend_mod._gaussian_pyramid = legacy
+    try:
+        expect = multiband_blend(stack, labels, levels=5)
+    finally:
+        blend_mod._gaussian_pyramid = real
+    np.testing.assert_array_equal(got, expect)
 
 
 def test_gain_and_blend_together_beat_blend_alone():

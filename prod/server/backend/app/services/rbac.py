@@ -8,6 +8,7 @@ RBAC_KEY = "rbac_menus"
 ROLES = ("admin", "configurator", "executor", "viewer")
 MENU_KEYS = (
     "execute",
+    "incremental",
     "profiles",
     "jobs",
     "seam",
@@ -28,7 +29,7 @@ PUBLIC_MENUS = ("cli", "seam")
 DEFAULT_MENUS: dict[str, list[str]] = {
     "admin": list(MENU_KEYS),
     "configurator": ["profiles", "jobs", "seam", "settings", "inspect", "cli"],
-    "executor": ["execute", "profiles", "jobs", "seam", "inspect", "cli"],
+    "executor": ["execute", "incremental", "profiles", "jobs", "seam", "inspect", "cli"],
     "viewer": ["profiles", "jobs", "seam", "inspect", "cli"],
 }
 
@@ -47,6 +48,9 @@ def _ensure_public(keys: list[str]) -> list[str]:
     for key in PUBLIC_MENUS:
         if key not in out:
             out.append(key)
+    # 能新建处理的角色同时看到增量拼图。已保存的菜单里没有这项时补上。
+    if "execute" in out and "incremental" not in out:
+        out.append("incremental")
     return out
 
 

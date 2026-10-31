@@ -12,7 +12,7 @@ import numpy as np
 from ms_mosaic.camera import Camera, Pose, wrap_yaw_deg, ypr_from_rotation
 from ms_mosaic.grid import Grid
 from ms_mosaic.matching import PairMatches
-from ms_mosaic.scene import BAND_ORDER, PRIMARY_BAND, Block, transfer_band
+from ms_mosaic.scene import PRIMARY_BAND, Block, transfer_band
 
 GPS_BIN_EDGES = tuple(range(-6, 20, 2))
 YAW_TURN_DEG = 40.0
@@ -72,7 +72,7 @@ def band_rms_px(block: Block, at) -> dict[str, float | None]:
         global_rms = at.stats.get("rms_reprojection_px")
     counts, sq = observation_summary(at)
     if not counts or not sq:
-        return {band: global_rms for band in BAND_ORDER if band in block.cameras}
+        return {band: global_rms for band in block.band_order() if band in block.cameras}
     by_index = {im.index: im for im in block.images}
     band_n: dict[str, int] = defaultdict(int)
     band_sq: dict[str, float] = defaultdict(float)
@@ -83,7 +83,7 @@ def band_rms_px(block: Block, at) -> dict[str, float | None]:
         band_n[im.band] += int(n)
         band_sq[im.band] += float(sq.get(idx, 0.0))
     out: dict[str, float | None] = {}
-    for band in BAND_ORDER:
+    for band in block.band_order():
         if band not in block.cameras:
             continue
         n = band_n.get(band, 0)
@@ -523,7 +523,7 @@ def build_quality_payload(
 
     # GPS 仅已注册影像（商业参考点 1888 = 已注册数）
     poses_gps: dict[int, Pose] = {i: at.poses[i] for i in registered if i in at.poses}
-    for band in BAND_ORDER:
+    for band in block.band_order():
         if band == PRIMARY_BAND:
             continue
         missing = [im.index for im in block.by_band(band) if im.index in registered and im.index not in poses_gps]
@@ -898,11 +898,12 @@ def cameras_table(
     registered: set[int] | None = None,
     rms_by_band: dict[str, float | None] | None = None,
 ) -> dict:
-    """8 个组都进表：空三已解的波段用 at.cameras，否则按 transfer_band 迁移。"""
+    """每个波段都进表：空三已解的用 at.cameras，否则按 transfer_band 迁移。"""
     reg = registered if registered is not None else registered_image_ids(at)
     band_rms = rms_by_band or {}
     info = {}
-    for band in BAND_ORDER:
+    order = block.band_order()
+    for band in order:
         if band not in block.cameras:
             continue
         n_all = len(block.by_band(band))
@@ -914,7 +915,7 @@ def cameras_table(
             cam = next(iter(cams.values())) if cams else block.cameras[band]
             n_reg = sum(1 for i in poses if i in reg)
         info[band] = {
-            "group": BAND_ORDER.index(band),
+            "group": order.index(band),
             "model": cam.model,
             "width": cam.width,
             "height": cam.height,

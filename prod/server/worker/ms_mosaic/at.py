@@ -88,6 +88,13 @@ CALIBRATION_STAGES = (
     ("f", "cx", "cy", "k1", "k2", "k3", "p1", "p2", "b1", "b2"),
 )
 
+
+def calibration_stages(include_stage3: bool = True) -> tuple[tuple[str, ...], ...]:
+    """阶段 3 估计 k3、切向畸变和仿射项。关闭时停在阶段 2，阶段 1、2 的参数不变。"""
+    if include_stage3:
+        return CALIBRATION_STAGES
+    return CALIBRATION_STAGES[:2]
+
 # least_squares 的参数尺度，量级差异大必须给，否则步长被 f 主导
 INTRINSIC_SCALES = {
     "f": 50.0,

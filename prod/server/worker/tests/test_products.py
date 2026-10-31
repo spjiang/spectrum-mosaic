@@ -52,6 +52,22 @@ def test_group_name_rejects_unknown_band():
         group_name("999nm")
 
 
+def test_group_name_follows_the_job_band_list():
+    """传入这次测区的波段表后，510nm、以及几十个波长都能编号。"""
+    from ms_mosaic.scene import ordered_bands
+
+    order = ordered_bands(["850nm", "Color", "510nm", "450nm"])
+    assert order == ("Color", "450nm", "510nm", "850nm")
+    assert group_name("510nm", order) == "Orthomosaic_pix_surf_group2.tif"
+    assert group_name("850nm", order) == "Orthomosaic_pix_surf_group3.tif"
+    dozens = [f"{400 + 10 * i}nm" for i in range(30)]
+    order30 = ordered_bands(["Color", *dozens])
+    assert len(order30) == 31
+    assert group_name("400nm", order30) == "Orthomosaic_pix_surf_group1.tif"
+    assert group_name("690nm", order30) == "Orthomosaic_pix_surf_group30.tif"
+    assert band_dtype("510nm") == "uint16" and band_count("510nm") == 1
+
+
 def test_band_dtype_and_count_match_commercial():
     assert band_dtype(RGB_BAND) == "uint8" and band_count(RGB_BAND) == 4
     for b in MS_BANDS:
@@ -364,6 +380,46 @@ def test_write_band_product_does_not_paint_empty_cells_opaque(tmp_path):
     assert rgb[3, 16, 16] == 255
     assert rgb[0, 16, 16] == 40
     assert rgb[3, 30, 30] == 255
+
+
+def test_parallel_band_writes_match_serial_pixels(tmp_path):
+    """几个波段同时写，像元、压缩、格网与逐个写逐项相同。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ms_mosaic.compose import write_band_product
+
+    grid = _grid(48)
+    rng = np.random.default_rng(4)
+    bands = ("450nm", "550nm", "650nm", "720nm")
+    arrays = []
+    for _ in bands:
+        mosaic = rng.integers(20, 800, size=(1, 48, 48)).astype(np.float32)
+        mosaic[:, :5, :] = np.nan
+        mosaic[:, 12:16, 8:20] = np.nan
+        arrays.append(mosaic)
+    serial = tmp_path / "serial"
+    parallel = tmp_path / "parallel"
+    serial.mkdir()
+    parallel.mkdir()
+    for band, mosaic in zip(bands, arrays):
+        write_band_product(mosaic, grid, band, serial / group_name(band))
+
+    def one(i: int) -> None:
+        with rasterio.Env():
+            write_band_product(arrays[i], grid, bands[i], parallel / group_name(bands[i]))
+
+    with ThreadPoolExecutor(max_workers=len(bands)) as pool:
+        list(pool.map(one, range(len(bands))))
+
+    for band in bands:
+        with rasterio.open(serial / group_name(band)) as a, rasterio.open(parallel / group_name(band)) as b:
+            np.testing.assert_array_equal(a.read(), b.read())
+            assert a.profile["compress"] == "lzw" and b.profile["compress"] == "lzw"
+            assert a.profile["tiled"] is False and b.profile["tiled"] is False
+            assert a.count == 1 and a.dtypes[0] == "uint16"
+            assert a.crs == b.crs
+            assert a.transform == b.transform
+            assert a.profile["interleave"] == b.profile["interleave"] == "band"
 
 
 def test_clip_products_does_not_copy_reference_alpha(tmp_path):

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.bootstrap import bootstrap, health_payload
 from app.config import get_settings
 from app.db import SessionLocal
-from app.routers import audit, auth, docs, jobs, profiles, rbac, system, tools, users
+from app.routers import audit, auth, docs, incremental, jobs, profiles, rbac, system, tools, users
 from app.schemas import HealthOut
 from app.services.progress_ws import start_consumers, websocket_job
 from app.services.stage_steps import start_stage_step_sync
@@ -38,6 +38,12 @@ async def lifespan(app: FastAPI):
         start_stage_step_sync()
     except Exception:  # noqa: BLE001
         log.exception("stage step sync failed to start")
+    try:
+        from app.services.incremental import start_inbox_scan
+
+        start_inbox_scan()
+    except Exception:  # noqa: BLE001
+        log.exception("incremental scan failed to start")
     yield
 
 
@@ -53,6 +59,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(profiles.router)
 app.include_router(jobs.router)
+app.include_router(incremental.router)
 app.include_router(docs.router)
 app.include_router(tools.router)
 app.include_router(system.router)

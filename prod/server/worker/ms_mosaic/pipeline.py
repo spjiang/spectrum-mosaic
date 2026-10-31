@@ -63,7 +63,7 @@ from ms_mosaic.report import write_report
 from ms_mosaic.report_pdf import write_quality_pdf
 from ms_mosaic.control import ControlState
 from ms_mosaic.progress import NullReporter, ProgressReporter, global_percent_for, stage_index
-from ms_mosaic.scene import BAND_ORDER, PRIMARY_BAND, transfer_band
+from ms_mosaic.scene import PRIMARY_BAND, resolve_wanted, transfer_band
 from ms_mosaic.seamline import SeamConfig
 
 COMMERCIAL_PRODUCTS = "拼图结果"
@@ -208,6 +208,7 @@ def run_mosaic(
     sigma_attitude_deg: float | None = None,
     outlier_threshold_px: float | None = None,
     calibrate_intrinsics: bool = True,
+    ba_stage3: bool = True,
     n_layers: int | None = None,
     z_margin_m: float | None = None,
     spike_tolerance_m: float | None = None,
@@ -252,7 +253,6 @@ def run_mosaic(
     extras_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(cache_dir) if cache_dir is not None else out_dir / "cache" / "features"
 
-    wanted = tuple(bands) if bands is not None else BAND_ORDER
     timings: dict[str, float] = {}
 
     # 当前阶段。日志行随事件写入数据库，刷屏的块进度不发。
@@ -298,6 +298,7 @@ def run_mosaic(
         sigma_attitude_deg=sigma_attitude_deg,
         outlier_threshold_px=outlier_threshold_px,
         calibrate_intrinsics=calibrate_intrinsics,
+        ba_stage3=ba_stage3,
         log=log,
     )
     timings["at"] = 0.0 if reuse_at else time.time() - t
@@ -312,6 +313,13 @@ def run_mosaic(
             return early
     block = sparse.block
     at = sparse.at
+    discovered = block.band_order()
+    wanted = resolve_wanted(bands, discovered)
+    if not wanted:
+        raise ValueError("数据里没有可正射的波段")
+    log(f"波段 {len(discovered)} 个：{'/'.join(discovered)}")
+    if wanted != discovered:
+        log(f"本次正射 {len(wanted)} 个：{'/'.join(wanted)}")
     # 空三可含全部波段影像；密集/足迹仍只用主波段 Color，避免同曝光多镜头重复撑大范围
     primary_ids = {im.index for im in block.primary()}
     dense_poses = {i: p for i, p in sparse.poses.items() if i in primary_ids}
@@ -488,7 +496,7 @@ def run_mosaic(
     files: dict[str, Any] = {"bands": {}, "dsm": str(dsm_path), "mosaic_dir": str(products_dir)}
     rgb_raster = None
     t_ortho = time.time()
-    # 贴边采样面只跟 DSM 有关，各波段相同。算一次，避免八个波段各滤一遍同一张高程。
+    # 贴边采样面只跟 DSM 有关，各波段相同。算一次，避免每个波段各滤一遍同一张高程。
     ortho_z = flatten_edge_z(
         dsm.z,
         dsm.grid.gsd,
@@ -514,7 +522,7 @@ def run_mosaic(
         if not poses:
             log(f"跳过 {band}：没有对应的空三外方位")
             return None
-        log(f"=== 正射 {group_name(band)} ({band})  {len(poses)} 张 ===")
+        log(f"=== 正射 {group_name(band, discovered)} ({band})  {len(poses)} 张 ===")
         raster = render_band(
             ortho_grid,
             ortho_z,
@@ -528,6 +536,7 @@ def run_mosaic(
             log=log,
             seam_cfg=seam_cfg,
             seam_edits=_edits_for(band),
+            bands_order=discovered,
         )
         if band == RGB_BAND and ref_dir is not None and (radiometric_normalize or match_reference_color):
             # 全局仿射辐射归一化：只改档位，不动纹理与局部对比。自研输出忠实于
@@ -542,28 +551,42 @@ def run_mosaic(
             return band, raster, mosaic
         return band, raster, None
 
-    def _commit_band(band: str, raster, mosaic) -> None:
-        out_path = products_dir / group_name(band)
-        try:
-            # 写出要整幅掩膜、连通域标号与补洞临时量，约每格 8 B；预约让并发波段别在这时扩池
-            write_mb = ortho_grid.width * ortho_grid.height * WRITE_BYTES_PER_CELL >> 20
-            with reserve_memory(write_mb, growth_since_now()):
+    def _write_band(band: str, raster, mosaic):
+        """量化、补洞并写成 GeoTIFF。不改 files，可在别的线程里跑。"""
+        import rasterio
+
+        out_path = products_dir / group_name(band, discovered)
+        # 写出要整幅掩膜、连通域标号与补洞临时量，约每格 8 B；预约让并发波段别在这时扩池
+        write_mb = ortho_grid.width * ortho_grid.height * WRITE_BYTES_PER_CELL >> 20
+        with reserve_memory(write_mb, growth_since_now()):
+            # 每个文件一个 GDAL 数据集。Env 把错误栈留在本线程，不和别的波段串。
+            with rasterio.Env():
                 # 足迹已按 edge_trim_m 收过，这里只清 RGB 全 0，不再二次腐蚀
-                write_band_product(mosaic if mosaic is not None else raster, ortho_grid, band, out_path, trim_m=0)
-            files["bands"][band] = str(out_path)
-            log(f"已写出 {out_path.name}（{band} 完成）")
-            keep = band == RGB_BAND or band == PRIMARY_BAND
-            if keep:
-                files["rgb"] = str(out_path)
-                nonlocal rgb_raster
-                if rgb_raster is not None and rgb_raster is not raster:
-                    rgb_raster.close()
-                rgb_raster = raster
+                write_band_product(
+                    mosaic if mosaic is not None else raster, ortho_grid, band, out_path, trim_m=0
+                )
+        return out_path
+
+    def _publish_band(band: str, raster, out_path) -> None:
+        files["bands"][band] = str(out_path)
+        log(f"已写出 {out_path.name}（{band} 完成）")
+        keep = band == RGB_BAND or band == PRIMARY_BAND
+        if keep:
+            files["rgb"] = str(out_path)
+            nonlocal rgb_raster
+            if rgb_raster is not None and rgb_raster is not raster:
+                rgb_raster.close()
+            rgb_raster = raster
+        else:
+            raster.close()
+
+    def _commit_band(band: str, raster, mosaic) -> None:
+        try:
+            out_path = _write_band(band, raster, mosaic)
+            _publish_band(band, raster, out_path)
         except BaseException:
             raster.close()
             raise
-        if not keep:
-            raster.close()
 
     rgb_bands = [b for b in wanted if b == RGB_BAND]
     ms_bands = [b for b in wanted if b != RGB_BAND]
@@ -585,8 +608,8 @@ def run_mosaic(
         shot_of = {im.index: im.shot_index for im in block.by_band(band) if im.index in poses}
         ms_specs.append((band, cameras, poses, paths, shot_of))
     groups = [(c, p, s) for _, c, p, _, s in ms_specs]
-    # 几何共用与是否开 GPU 无关：GPU 正射没有 geom_cache，关掉共用会让七个波段
-    # 各算一遍投影/遮挡，MS 正射从约 80 分钟回到数小时。
+    # 几何共用与是否开 GPU 无关：GPU 正射没有 geom_cache，关掉共用会让每个波段
+    # 各算一遍投影/遮挡。S810 的 7 个波段因此会从约 80 分钟回到数小时。
     share = len(ms_specs) > 1 and share_rectification(groups)
     if share:
         names = [name for name, *_ in ms_specs]
@@ -605,13 +628,26 @@ def run_mosaic(
             seam_cfg=seam_cfg,
             seam_edits_by_band={name: _edits_for(name) for name in names},
         )
-        # 七个波段在同一轮块循环里算完。先记下计算耗时，再逐波段写出，
+        # 这些波段在同一轮块循环里算完。先记下计算耗时，再逐波段写出，
         # 避免界面把整段计算记到第一个写出的波段上。
         log(f"多光谱正射计算完成，{time.perf_counter() - t_share:.1f}s")
         pending = list(rasters.items())
         try:
-            for band, raster in pending:
-                _commit_band(band, raster, None)
+            if len(pending) <= 1:
+                for band, raster in pending:
+                    _commit_band(band, raster, None)
+            else:
+                # 七个波段各写各的文件。LZW 在 GDAL 里，线程可以重叠；
+                # 像元与逐个写出相同。登记文件名仍在主线程，避免字典和主波段指针竞态。
+                log(f"多光谱 {len(pending)} 个波段同时写出")
+                with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+                    futs = {
+                        pool.submit(_write_band, band, raster, None): (band, raster)
+                        for band, raster in pending
+                    }
+                    for fut in as_completed(futs):
+                        band, raster = futs[fut]
+                        _publish_band(band, raster, fut.result())
         except BaseException:
             for _, raster in pending:
                 raster.close()

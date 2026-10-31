@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
 
@@ -70,6 +71,14 @@ def _ortho_gpu_fields(choice, workers, per_worker_mb, log, label: str) -> dict:
 # 每个多光谱波段自己留一份影像缓存。一块最多 12 个视角，24 张够相邻块复用。
 # 七个波段若挤在同一个 48 张的缓存里，换波段就会把上一波段的影像挤掉，每块都重新读盘。
 MS_IMAGES_PER_BAND = 24
+
+
+def ms_cache_per_band(n_bands: int) -> int:
+    """单进程每波段缓存张数。8 个及以内仍是 24；再多就按总张数分摊，至少留 4 张。"""
+    n = max(1, int(n_bands))
+    if n <= 8:
+        return MS_IMAGES_PER_BAND
+    return max(4, (MS_IMAGES_PER_BAND * 8) // n)
 # 块与块之间必须有足够重叠，并且按权重融合。旧写法 overlap=16 再硬裁内芯，
 # 每块独立解增益、独立选拼接线，相邻 384 格亮度可差 70，图上就是左侧那些方块。
 ORTHO_OVERLAP = 48
@@ -199,6 +208,7 @@ def render_band(
     scratch_root: Path | str | None = None,
     seam_cfg: SeamConfig | None = None,
     seam_edits: list | None = None,
+    bands_order: Sequence[str] | None = None,
 ) -> BandRaster:
     """整幅正射（浮点，落盘累加）+ 拼接线标号。标号是块内视角下标，views 是全局影像 id。
 
@@ -222,10 +232,11 @@ def render_band(
         "seam_cfg": seam_cfg or SeamConfig(),
         "seam_edits": seam_edits or [],
         "gains": {},
+        "bands_order": tuple(bands_order) if bands_order is not None else None,
     }
     per_worker_mb = tile_worker_mb(image_bytes)
     choice = select_gpu("S5_ortho")
-    payload.update(_ortho_gpu_fields(choice, workers, per_worker_mb, log, f"正射 {group_name(band)} ({band})"))
+    payload.update(_ortho_gpu_fields(choice, workers, per_worker_mb, log, f"正射 {group_name(band, bands_order)} ({band})"))
     try:
         return _render_band_with_payload(
             grid,
@@ -259,7 +270,7 @@ def _render_band_with_payload(
     per_worker_mb: int | None = None,
     scratch_root: Path | str | None = None,
 ) -> BandRaster:
-    out_name = group_name(band)
+    out_name = group_name(band, payload.get("bands_order"))
     if use_gain:
         acc = OverlapStats()
         for _, _window, tile_acc in map_tiles(
@@ -384,8 +395,10 @@ def render_ms_bands(
     windows = list(grid.tiles(tile, overlap=overlap))
     any_cam = next(iter(bands[0][1].values()))
     image_bytes = any_cam.width * any_cam.height * 2
-    # 每个波段一份缓存，同时驻留；工作内存仍按一块（一个波段的图割）估计
-    cache_slots = MS_IMAGES_PER_BAND * len(bands)
+    # 影像缓存总张数按 8 个波段×24 张封顶。波长几十个时每波段少留几张、多读几次盘，
+    # 图割仍按波段各做一次，拼接线不改。
+    cache_per_band = ms_cache_per_band(len(bands))
+    cache_slots = cache_per_band * len(bands)
     shared = _share_array(np.asarray(dsm_z))
     payload = {
         "grid": grid,
@@ -399,7 +412,7 @@ def render_ms_bands(
         "ortho_cfg": OrthoConfig(),
         "seam_cfg": seam_cfg or SeamConfig(),
         "seam_edits_by_band": seam_edits_by_band or {},
-        "cache_per_band": MS_IMAGES_PER_BAND,
+        "cache_per_band": cache_per_band,
     }
     rasters = {name: BandRaster(grid, 1, scratch_root=scratch_root) for name in names}
     try:

@@ -24,7 +24,8 @@ STAGES = (
 _TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _START = re.compile(r"start (S\d_[A-Za-z0-9_]+)\s*(.*)$")
 _SECS = re.compile(r"(\d+(?:\.\d+)?)s")
-_PROGRESS = re.compile(r"\d+\s*/\s*\d+\s*块")
+# 块进度，以及空三里「已提取 / 已匹配」的心跳。这些行只给日志看，不单列成一步。
+_PROGRESS = re.compile(r"\d+\s*/\s*\d+\s*块|^已(?:提取|匹配)\s+\d+\s*/\s*\d+")
 _AT_PARALLEL = re.compile(r"空三并行\s+(\d+)\s*进程")
 _POOL = re.compile(r"(\d+)\s*块\s*/\s*\d+\s*段\s*/\s*(\d+)\s*进程")
 
@@ -294,6 +295,8 @@ def _classify(stage: str, msg: str, ts: datetime | None, ortho_open: dict[str, d
         stage_no = re.match(r"阶段(\d+)\s*(.*)", body)
         if stage_no:
             return _step(f"平差阶段{stage_no.group(1)}", _tidy_ba(stage_no.group(2)), elapsed, ts)
+        if body.startswith("平差阶段3已关闭"):
+            return _step("平差阶段3", "已关闭，停在阶段2（焦距、主点、k1、k2）", elapsed, ts)
         if body.startswith("空三并行"):
             return None
         if body.startswith("空三"):

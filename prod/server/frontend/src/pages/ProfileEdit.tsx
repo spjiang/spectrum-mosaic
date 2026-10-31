@@ -108,6 +108,7 @@ function FieldEditor({
           mode="tags"
           style={{ width: "100%" }}
           value={values[d.key] || []}
+          placeholder="可手填波长，如 510nm；留空或默认 8 项则按数据里的波段"
           onChange={(v) => setValues({ ...values, [d.key]: v })}
         />
       ) : (

@@ -106,6 +106,11 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
     up: "提特征/匹配更快，内存约 450MB/进程",
     down: "更慢但更稳；OOM 时降到 4～8",
   },
+  ba_stage3: {
+    examples: ["true（默认）", "false"],
+    tips: ["打开时和现在一样做完阶段 3。关闭后停在阶段 2，大约少 12 分钟"],
+    off: "像幅四角最多大约 4 像素（约 15 厘米），正射接缝可能挪动大约 1 个像素；中心几乎不动",
+  },
   memory_gb: {
     examples: ["0", "36"],
     tips: ["0=按容器空闲内存自动封顶；滑块上限=Docker Memory Limit；配高了不会多分内存"],
@@ -196,8 +201,8 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
     down: "边缘黑洞更多",
   },
   bands: {
-    examples: ['["Color"]', '["Color","450nm","550nm","650nm","720nm","750nm","800nm","850nm"]'],
-    tips: ["仅 RGB 预览填 Color；全波段可留默认 8 项"],
+    examples: ['["Color"]', '["Color","450nm","510nm","850nm"]'],
+    tips: ["留空或保持默认 8 项：按数据里实际有的波长全部出图，可以是几十个", "只出彩色就只留 Color"],
     up: "多加波段时间近似线性增加",
     down: "只留 Color 则没有多光谱产品",
   },

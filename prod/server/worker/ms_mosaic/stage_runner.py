@@ -173,6 +173,7 @@ def _run_stages_body(
             sigma_attitude_deg=_as_float(params.get("sigma_attitude_deg")),
             outlier_threshold_px=_as_float(params.get("outlier_threshold_px")),
             calibrate_intrinsics=_as_bool(params.get("calibrate_intrinsics"), True),
+            ba_stage3=_as_bool(params.get("ba_stage3"), True),
             n_layers=_as_int(params.get("n_layers")),
             z_margin_m=_as_float(params.get("z_margin_m")),
             spike_tolerance_m=_as_float(params.get("spike_tolerance_m")),

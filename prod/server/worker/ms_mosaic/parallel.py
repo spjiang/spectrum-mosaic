@@ -241,6 +241,26 @@ def spatial_chunks(windows: Sequence[Window], n_chunks: int) -> list[list[int]]:
     return chunks
 
 
+def prioritize_edge_chunks(chunks: list[list[int]], n_workers: int) -> list[list[int]]:
+    """把空间序列末尾的几段提到队首，让北缘和南缘一起先算。
+
+    段按行优先排列时，北缘在队尾。池子按提交顺序领任务，北缘要等中部领完才开工。
+    #6 多光谱块循环末尾约 11 块占了 619 秒，其余进程已经空等。
+    提到队首后，这段耗时叠在中部计算上，而不是加在墙钟末尾。
+    只提 min(进程数, 段数一半) 段：每个进程先领一段北缘，再回到南缘，
+    影像缓存只在这一次南北切换时重载。段内顺序不动。
+    每段仍只出现一次，结果按块下标回写，与领任务的顺序无关。
+    """
+    n = len(chunks)
+    workers = int(n_workers)
+    if workers <= 1 or n <= workers:
+        return chunks
+    take = min(workers, n // 2)
+    if take <= 0:
+        return chunks
+    return list(chunks[-take:]) + list(chunks[:-take])
+
+
 @dataclass
 class TileJob:
     """一段连续格网块的任务。worker 收到它后按序算完再返回。"""
@@ -324,8 +344,9 @@ def map_tiles(
     from concurrent.futures import ProcessPoolExecutor, as_completed
     from concurrent.futures.process import BrokenProcessPool
 
-    # 每进程分若干段：缓解块间耗时不均，被杀时丢掉的进度也少
-    chunks = spatial_chunks(windows, n * JOB_SEGMENTS_PER_WORKER)
+    # 每进程分若干段：缓解块间耗时不均，被杀时丢掉的进度也少。
+    # 北缘提到队首，不改变每段里的块，也不改变被系统回收后的减半续跑。
+    chunks = prioritize_edge_chunks(spatial_chunks(windows, n * JOB_SEGMENTS_PER_WORKER), n)
     jobs = [TileJob(c, [windows[k] for k in c]) for c in chunks]
     done = 0
     ctx = multiprocessing.get_context("spawn")

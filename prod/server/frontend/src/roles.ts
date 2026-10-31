@@ -16,6 +16,7 @@ export const ROLE_HINT: Record<string, string> = {
 
 export type MenuKey =
   | "execute"
+  | "incremental"
   | "profiles"
   | "jobs"
   | "seam"
@@ -29,7 +30,7 @@ export type MenuKey =
   | "audit"
   | "cli";
 
-export type MenuGroup = "作业管理" | "辅助工具" | "系统管理" | "组织管理";
+export type MenuGroup = "作业管理" | "增量拼图" | "辅助工具" | "系统管理" | "组织管理";
 
 export type MenuDef = {
   key: MenuKey;
@@ -40,8 +41,9 @@ export type MenuDef = {
   hint: string;
 };
 
-export const MENU_GROUPS: { id: MenuGroup; siderKey: string }[] = [
+export const MENU_GROUPS: { id: MenuGroup; siderKey: string; direct?: boolean }[] = [
   { id: "作业管理", siderKey: "proc" },
+  { id: "增量拼图", siderKey: "incr" },
   { id: "辅助工具", siderKey: "tools" },
   { id: "系统管理", siderKey: "sys" },
   { id: "组织管理", siderKey: "rbac" },
@@ -49,6 +51,7 @@ export const MENU_GROUPS: { id: MenuGroup; siderKey: string }[] = [
 
 export const MENU_CATALOG: MenuDef[] = [
   { key: "execute", label: "新建处理", path: "/execute", group: "作业管理", roles: ["admin", "executor"], hint: "创建正射与 DSM 处理任务" },
+  { key: "incremental", label: "测区管理", path: "/incremental", group: "增量拼图", roles: ["admin", "executor"], hint: "分页管理测区，进入后收片并在同一条任务上拼图" },
   { key: "profiles", label: "处理方案", path: "/profiles", group: "作业管理", roles: ["admin", "configurator", "executor", "viewer"], hint: "查看与维护处理参数方案" },
   { key: "jobs", label: "处理记录", path: "/jobs", group: "作业管理", roles: ["admin", "configurator", "executor", "viewer"], hint: "查看任务进度、结果与历史" },
   { key: "seam", label: "拼接线处理", path: "/seam", group: "作业管理", roles: ["admin", "configurator", "executor", "viewer"], hint: "新建拼接线处理，选择任务后进入处理" },

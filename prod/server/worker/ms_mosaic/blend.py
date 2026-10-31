@@ -174,6 +174,33 @@ def _pyr_down(a: np.ndarray) -> np.ndarray:
     return gaussian_filter(a, 1.0, mode="nearest")[..., ::2, ::2]
 
 
+def _pyr_down_views(a: np.ndarray) -> np.ndarray:
+    """只在空间维下采样。前导的视角轴、通道轴不混合。
+
+    通道长度为 1 时，与逐张 `_pyr_down`（各轴 sigma=1）逐位相同：
+    长度为 1 的轴怎么平滑都还是那一个数。
+    """
+    from scipy.ndimage import gaussian_filter
+
+    sigma = (0.0,) * (a.ndim - 2) + (1.0, 1.0)
+    return gaussian_filter(a, sigma, mode="nearest")[..., ::2, ::2]
+
+
+def _gaussian_pyramid(img: np.ndarray, levels: int) -> list[np.ndarray]:
+    """高斯栈。停止条件与 `laplacian_pyramid` 相同，层数不会少。
+
+    掩膜融合只用逐级平滑后的权重。早先先做一遍拉普拉斯（含上采样）再按层数
+    重做下采样，上采样的结果被丢掉。这里只留下真正用到的下采样。
+    """
+    gauss = [img]
+    for _ in range(max(0, levels - 1)):
+        prev = gauss[-1]
+        if min(prev.shape[-2:]) < 4:
+            break
+        gauss.append(_pyr_down_views(prev))
+    return gauss
+
+
 def _pyr_up(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     from scipy.ndimage import zoom
 
@@ -245,14 +272,8 @@ def multiband_blend(
             fill = float(layer[ok].mean()) if ok.any() else 0.0
             filled[k, b] = np.where(ok, layer, fill)
 
-    mask_pyr = [laplacian_pyramid(masks[k][None], levels) for k in range(n_views)]
-    # 掩膜要的是高斯金字塔（逐级平滑），不是拉普拉斯；这里从高斯序列重建
-    gauss_masks = []
-    for k in range(n_views):
-        g = [masks[k][None]]
-        for _ in range(len(mask_pyr[k]) - 1):
-            g.append(_pyr_down(g[-1]))
-        gauss_masks.append(g)
+    # 各视角一起下采样。sigma 在视角轴上为 0，与逐张下采样逐位相同。
+    gauss_levels = _gaussian_pyramid(masks[:, None], levels)
 
     img_pyr = [laplacian_pyramid(filled[k], levels) for k in range(n_views)]
     n_levels = min(len(p) for p in img_pyr)
@@ -261,8 +282,9 @@ def multiband_blend(
     for lv in range(n_levels):
         num = np.zeros_like(img_pyr[0][lv])
         den = np.zeros(img_pyr[0][lv].shape[-2:], np.float32)
+        weight = gauss_levels[lv][:, 0]
         for k in range(n_views):
-            m = gauss_masks[k][lv][0]
+            m = weight[k]
             num += img_pyr[k][lv] * m
             den += m
         blended.append(num / np.maximum(den, 1e-6))

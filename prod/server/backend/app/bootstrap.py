@@ -315,6 +315,11 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "016_job_stage_steps.sql")
     _ensure_sql_named(db, "017_gpu.sql")
     _ensure_sql_named(db, "018_product_options.sql")
+    _ensure_sql_named(db, "019_poor_keypoints.sql")
+    _ensure_sql_named(db, "020_bands_not_fixed.sql")
+    _ensure_sql_named(db, "021_incremental.sql")
+    _ensure_sql_named(db, "022_incremental_index.sql")
+    _ensure_sql_named(db, "023_ba_stage3.sql")
     _migrate_legacy_source_paths(db)
     user = db.scalar(select(User).where(User.username == settings.bootstrap_admin_user))
     if user is None:

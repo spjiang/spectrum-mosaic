@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from ms_mosaic.grid import Grid
-from ms_mosaic.parallel import map_tiles, spatial_chunks, split_ortho_pools
+from ms_mosaic.parallel import map_tiles, prioritize_edge_chunks, spatial_chunks, split_ortho_pools
 
 
 CRS = "EPSG:32647"
@@ -37,6 +37,26 @@ def test_spatial_chunks_keep_neighbors_together():
         ordered = [windows[i] for i in chunk]
         keys = [(w[0], w[1]) for w in ordered]
         assert keys == sorted(keys)
+
+
+def test_prioritize_edge_chunks_moves_tail_ahead_of_middle():
+    """北缘段提到队首，段内顺序和块集合都不变。"""
+    windows = [(r, c, 4, 4) for r in range(0, 40, 4) for c in range(0, 8, 4)]
+    chunks = spatial_chunks(windows, 10)
+    ordered = prioritize_edge_chunks(chunks, 3)
+    assert ordered[:3] == chunks[-3:]
+    assert ordered[3:] == chunks[:-3]
+    assert [i for chunk in ordered for i in chunk] != [i for chunk in chunks for i in chunk]
+    assert sorted(i for chunk in ordered for i in chunk) == list(range(len(windows)))
+    for before, after in zip(chunks[-3:], ordered[:3]):
+        assert before == after
+
+
+def test_prioritize_edge_chunks_leaves_short_queues_alone():
+    chunks = [[0, 1], [2, 3], [4]]
+    assert prioritize_edge_chunks(chunks, 1) == chunks
+    assert prioritize_edge_chunks(chunks, 3) == chunks
+    assert prioritize_edge_chunks(chunks, 8) == chunks
 
 
 def test_map_tiles_serial_visits_all_windows():

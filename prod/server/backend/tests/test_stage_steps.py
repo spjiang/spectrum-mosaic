@@ -10,6 +10,8 @@ LOG = """
 2026-10-13 02:05:28 候选像对 9075 对（按 8 个波段组内选对）
 2026-10-13 02:05:28 空三并行 12 进程
 2026-10-13 02:07:06 特征提取 1896 张，98.1s
+2026-10-13 02:08:00 已提取 400/1896 张，用时 30 秒
+2026-10-13 02:10:00 已匹配 2000/9075 对，用时 120 秒
 2026-10-13 02:14:16 匹配 8307/9075 对成功，430.5s
 2026-10-13 02:14:30 连接点 1467980 条，观测 4264861，平均轨迹长 2.91
 2026-10-13 02:21:48 交会  物方点 1467099，观测 4262843
@@ -39,10 +41,12 @@ def test_at_steps_keep_counts_and_durations():
     assert "{" not in names[0][1]
     assert feature["elapsed_s"] == 98.1
     assert feature["status"] == "done"
+    assert sum(1 for s in stages["S2_at"] if s["name"] == "特征提取") == 1
     matched = next(s for s in stages["S2_at"] if s["name"] == "像对匹配")
     assert "8307/9075" in matched["detail"]
     assert "12 个进程" in matched["detail"]
     assert matched["elapsed_s"] == 430.5
+    assert sum(1 for s in stages["S2_at"] if s["name"] == "像对匹配") == 1
     ba = next(s for s in stages["S2_at"] if s["name"] == "平差阶段1")
     assert "5.909" in ba["detail"]
     assert "1465972" in ba["detail"]
@@ -149,6 +153,19 @@ def test_at_restart_does_not_bill_the_gap_to_screening():
     assert len(screens) == 2
     assert screens[1]["elapsed_s"] is None or screens[1]["elapsed_s"] < 120
     assert all((s["elapsed_s"] or 0) < 3600 for s in steps)
+
+
+def test_closed_stage3_is_one_step_not_a_third_adjustment():
+    text = """
+2026-10-14 23:02:00,000 INFO job abc start S2_at 空三 / 稀疏重建
+2026-10-14 23:02:08 阶段2 自由内参=f,cx,cy,k1,k2  RMS=0.585px  剔除观测 812  剩余点 1829855
+2026-10-14 23:02:09 平差阶段3已关闭，停在阶段2（焦距、主点、k1、k2）
+"""
+    steps = parse_stage_steps(text)["S2_at"]
+    names = [s["name"] for s in steps]
+    assert names == ["平差阶段2", "平差阶段3"]
+    assert steps[1]["detail"].startswith("已关闭")
+
 
 
 def test_persist_stage_steps_writes_job(tmp_path):
