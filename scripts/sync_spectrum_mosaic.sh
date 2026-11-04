@@ -46,6 +46,7 @@ EXTRA_DATASET_EXCLUDES=(
   --exclude 'prod/docs/需求/拼图数据集/'
   --exclude 'prod/docs/需求/测试结果验证数据/'
   --exclude 'prod/docs/需求/测试正式数据/'
+  --exclude 'prod/docs/需求/无人机数据/'
   --exclude 'test/work/'
   --exclude 'test/out/'
   --exclude 'test/input_bench/'
@@ -112,6 +113,7 @@ cat > "$DST/prod/docs/需求/README.md" <<'EOF'
 - `拼图数据集/`
 - `测试结果验证数据/`
 - `测试正式数据/`
+- `无人机数据/`
 
 运行时测区请放到 `prod/server/data/input/<测区>/<架次>/`（该目录本身也不入库）。
 EOF
@@ -198,7 +200,7 @@ SPECTRUM_ROOT="$(cd "$SRC/../../.." && pwd)"
 if git -C "$SPECTRUM_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   PARENT_MSG="$(git -C "$SPECTRUM_ROOT" log -1 --pretty=%s 2>/dev/null || true)"
 fi
-MSG="sync: ${PARENT_MSG:-update mosaic (exclude server/data)}"
+MSG="${SPECTRUM_MOSAIC_MSG:-sync: ${PARENT_MSG:-update mosaic (exclude server/data)}}"
 
 git -c user.email="${GIT_AUTHOR_EMAIL:-$(git config user.email)}" \
     -c user.name="${GIT_AUTHOR_NAME:-$(git config user.name)}" \

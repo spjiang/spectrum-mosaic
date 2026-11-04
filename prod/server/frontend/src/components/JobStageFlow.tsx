@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { QuestionCircleOutlined } from "@ant-design/icons";
+import { CaretRightOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import { Popover, Tooltip } from "antd";
 import { api, type StageStep } from "../api";
 import { formatStageSeconds, stageElapsedSeconds } from "../jobTime";
+import { nestStageSteps, type StepNode } from "../stageStepTree";
 import { stepHelp } from "../stepHelp";
 import {
   STAGE_META,
@@ -75,6 +76,7 @@ function stepFacts(detail: string): string[] {
 function StageDetail({ job, stage }: { job: JobStageLike; stage: StageId }) {
   const [steps, setSteps] = useState<StageStep[] | null>(null);
   const [error, setError] = useState("");
+  const [closed, setClosed] = useState<Record<string, boolean>>({});
   const live = job.status === "running";
   useEffect(() => {
     if (!job.id) return;
@@ -103,7 +105,8 @@ function StageDetail({ job, stage }: { job: JobStageLike; stage: StageId }) {
   if (!job.id) return <div className="job-stage-detail-empty">没有任务编号，读不到明细。</div>;
   if (error) return <div className="job-stage-detail-empty">{error}</div>;
   if (steps === null) return <div className="job-stage-detail-empty">正在读取…</div>;
-  if (!steps.length) {
+  const tree = nestStageSteps(steps);
+  if (!tree.length) {
     return (
       <div className="job-stage-panel">
         <p className="job-stage-panel-hint">{meta.hint}</p>
@@ -114,32 +117,80 @@ function StageDetail({ job, stage }: { job: JobStageLike; stage: StageId }) {
   return (
     <div className="job-stage-panel">
       <p className="job-stage-panel-hint">{meta.hint}</p>
-      <ol className="job-stage-detail">
-        {steps.map((step, i) => {
-          const time = formatStageSeconds(step.elapsed_s);
-          const facts = stepFacts(step.detail);
-          const running = step.status === "running";
-          return (
-            <li key={`${step.name}-${i}`} className={running ? "is-running" : "is-done"}>
-              <div className="job-stage-step-main">
-                <span className="job-stage-step-title">
-                  <span className="job-stage-step-name">{step.name}</span>
-                  <StepHelpButton name={step.name} />
-                </span>
-                {running ? <span className="job-stage-step-badge">进行中</span> : null}
-                <span className="job-stage-step-time">{time === "—" ? "" : running ? `已进行 ${time}` : time}</span>
+      <StepList
+        steps={tree}
+        nested={false}
+        path={stage}
+        closed={closed}
+        onToggle={(key) => setClosed((prev) => ({ ...prev, [key]: !prev[key] }))}
+      />
+    </div>
+  );
+}
+
+function StepList({
+  steps,
+  nested,
+  path,
+  closed,
+  onToggle,
+}: {
+  steps: StepNode[];
+  nested: boolean;
+  path: string;
+  closed: Record<string, boolean>;
+  onToggle: (key: string) => void;
+}) {
+  return (
+    <ol className={nested ? "job-stage-children" : "job-stage-detail"}>
+      {steps.map((step) => {
+        const key = `${path}/${step.name}`;
+        const kids = step.children || [];
+        const open = kids.length > 0 && !closed[key];
+        const facts = stepFacts(step.detail);
+        return (
+          <li key={key} className={`${step.status === "running" ? "is-running" : "is-done"}${kids.length ? " has-children" : ""}`}>
+            <StepRow step={step} open={open} onToggle={kids.length ? () => onToggle(key) : undefined} />
+            {facts.length > 0 ? (
+              <div className="job-stage-step-facts">
+                {facts.map((fact) => (
+                  <span key={fact} className="job-stage-step-fact">{fact}</span>
+                ))}
               </div>
-              {facts.length > 0 && (
-                <div className="job-stage-step-facts">
-                  {facts.map((fact) => (
-                    <span key={fact} className="job-stage-step-fact">{fact}</span>
-                  ))}
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ol>
+            ) : null}
+            {open ? <StepList steps={kids} nested path={key} closed={closed} onToggle={onToggle} /> : null}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function StepRow({ step, open, onToggle }: { step: StepNode; open: boolean; onToggle?: () => void }) {
+  const time = formatStageSeconds(step.elapsed_s);
+  const running = step.status === "running";
+  return (
+    <div className="job-stage-step-main">
+      <span className="job-stage-step-title">
+        {onToggle ? (
+          <button
+            type="button"
+            className={`job-stage-step-toggle${open ? " is-open" : ""}`}
+            aria-expanded={open}
+            aria-label={open ? `收起${step.name}` : `展开${step.name}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
+          >
+            <CaretRightOutlined />
+          </button>
+        ) : null}
+        <span className="job-stage-step-name">{step.name}</span>
+        <StepHelpButton name={step.name} />
+      </span>
+      {running ? <span className="job-stage-step-badge">进行中</span> : null}
+      <span className="job-stage-step-time">{time === "—" ? "" : running ? `已进行 ${time}` : time}</span>
     </div>
   );
 }

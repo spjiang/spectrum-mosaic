@@ -12,8 +12,12 @@ from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import JobRun, User
 from app.schemas import (
+    AccuracyConfigIn,
+    AccuracyGpsIn,
+    AccuracyPickIn,
+    AccuracyState,
     EvaluateIn,
-    EvaluateOut,
+    FileTicketIn,
     JobContinue,
     JobCreate,
     JobListOut,
@@ -276,16 +280,185 @@ def seam_image(
     return RawResponse(content=source_image_jpeg(job, image_id, max_side=max_side), media_type="image/jpeg")
 
 
-@router.post("/{job_id}/evaluate", response_model=EvaluateOut)
+_ACCURACY_ROLES = ("executor", "viewer", "admin", "configurator")
+
+
+def _accuracy_job(job_id: uuid.UUID, db: Session) -> JobRun:
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    return job
+
+
+@router.get("/{job_id}/accuracy", response_model=AccuracyState)
+def accuracy_state(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> dict:
+    from app.services.check_accuracy import build_state
+
+    return build_state(_accuracy_job(job_id, db))
+
+
+@router.get("/{job_id}/accuracy/template.csv")
+def accuracy_template(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> PlainTextResponse:
+    from app.services.check_accuracy import template_csv
+
+    _accuracy_job(job_id, db)
+    return PlainTextResponse(
+        template_csv(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=check_points.csv"},
+    )
+
+
+@router.post("/{job_id}/accuracy/points", response_model=AccuracyState)
+def accuracy_add_point(
+    job_id: uuid.UUID,
+    body: AccuracyPickIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> dict:
+    from app.services.check_accuracy import add_point, move_point
+
+    job = _accuracy_job(job_id, db)
+    if body.name:
+        return move_point(job, body.name, body.col, body.row)
+    return add_point(job, body.col, body.row)
+
+
+@router.delete("/{job_id}/accuracy/points/{name}", response_model=AccuracyState)
+def accuracy_delete_point(
+    job_id: uuid.UUID,
+    name: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> dict:
+    from app.services.check_accuracy import delete_point
+
+    return delete_point(_accuracy_job(job_id, db), name)
+
+
+@router.put("/{job_id}/accuracy/points/{name}/gps", response_model=AccuracyState)
+def accuracy_gps(
+    job_id: uuid.UUID,
+    name: str,
+    body: AccuracyGpsIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> dict:
+    from app.services.check_accuracy import set_gps
+
+    return set_gps(_accuracy_job(job_id, db), name, body.x, body.y, body.z, body.crs)
+
+
+@router.post("/{job_id}/accuracy/evaluate", response_model=AccuracyState)
+def accuracy_evaluate(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> dict:
+    from app.services.check_accuracy import run_evaluation
+
+    return run_evaluation(_accuracy_job(job_id, db))
+
+
+@router.put("/{job_id}/accuracy/config", response_model=AccuracyState)
+def accuracy_config(
+    job_id: uuid.UUID,
+    body: AccuracyConfigIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> dict:
+    from app.services.check_accuracy import update_config
+
+    return update_config(
+        _accuracy_job(job_id, db),
+        body.min_count,
+        body.max_count,
+        body.max_mean_px,
+        body.reference_band,
+    )
+
+
+@router.get("/{job_id}/accuracy/window")
+def accuracy_window(
+    job_id: uuid.UUID,
+    band: str = "",
+    cx: float | None = None,
+    cy: float | None = None,
+    size: int | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> RawResponse:
+    from app.services.check_accuracy import window_png
+
+    png, meta = window_png(_accuracy_job(job_id, db), band, cx, cy, size)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Origin-Col": str(meta["origin_col"]),
+        "X-Origin-Row": str(meta["origin_row"]),
+        "X-Win-Width": str(meta["width"]),
+        "X-Win-Height": str(meta["height"]),
+        "X-Full-Width": str(meta["full_width"]),
+        "X-Full-Height": str(meta["full_height"]),
+    }
+    return RawResponse(content=png, media_type="image/png", headers=headers)
+
+
+@router.get("/{job_id}/accuracy/overview")
+def accuracy_overview(
+    job_id: uuid.UUID,
+    band: str = "",
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> RawResponse:
+    from app.services.check_accuracy import overview_png
+
+    png, meta = overview_png(_accuracy_job(job_id, db), band)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Win-Width": str(meta["width"]),
+        "X-Win-Height": str(meta["height"]),
+        "X-Full-Width": str(meta["full_width"]),
+        "X-Full-Height": str(meta["full_height"]),
+    }
+    return RawResponse(content=png, media_type="image/png", headers=headers)
+
+
+@router.get("/{job_id}/accuracy/browse")
+def accuracy_browse(
+    job_id: uuid.UUID,
+    band: str = "",
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+) -> RawResponse:
+    from app.services.check_accuracy import browse_jpeg
+
+    data, meta = browse_jpeg(_accuracy_job(job_id, db), band)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Win-Width": str(meta["width"]),
+        "X-Win-Height": str(meta["height"]),
+        "X-Full-Width": str(meta["full_width"]),
+        "X-Full-Height": str(meta["full_height"]),
+    }
+    return RawResponse(content=data, media_type="image/jpeg", headers=headers)
+
+
+@router.post("/{job_id}/evaluate", response_model=AccuracyState)
 def evaluate_job(
     job_id: uuid.UUID,
     body: EvaluateIn | None = None,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _accuracy_job(job_id, db)
     n = 20 if body is None else int(body.n)
     return jobsvc.evaluate_job(job, n)
 
@@ -390,3 +563,86 @@ def job_report(
     if path is None:
         raise HTTPException(404, "质量报告尚未生成")
     return FileResponse(path, filename="质量报告.pdf", media_type="application/pdf")
+
+
+_FILE_ROLES = ("executor", "viewer", "admin", "configurator")
+
+
+def _file_job(job_id: uuid.UUID, db: Session) -> JobRun:
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    return job
+
+
+@router.get("/{job_id}/files")
+def job_files(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_FILE_ROLES)),
+) -> dict:
+    from app.services.job_files import catalog
+
+    return catalog(_file_job(job_id, db))
+
+
+@router.post("/{job_id}/files/ticket")
+def job_file_ticket(
+    job_id: uuid.UUID,
+    body: FileTicketIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_FILE_ROLES)),
+) -> dict:
+    from app.services.job_files import issue_ticket
+
+    _file_job(job_id, db)
+    return {"ticket": issue_ticket(str(job_id), body.kind, body.name)}
+
+
+@router.get("/{job_id}/files/download")
+def job_file_download(
+    job_id: uuid.UUID,
+    ticket: str,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    from starlette.background import BackgroundTask
+
+    from app.services.job_files import build_archive, drop_file, original_file, read_ticket
+
+    row = read_ticket(ticket, str(job_id))
+    job = _file_job(job_id, db)
+    kind = row["kind"]
+    if kind == "file":
+        path = original_file(job, row["name"])
+        return FileResponse(path, filename=path.name, media_type="image/tiff")
+    path, filename = build_archive(job, kind)
+    return FileResponse(
+        path,
+        filename=filename,
+        media_type="application/zip",
+        background=BackgroundTask(drop_file, path),
+    )
+
+
+@router.get("/{job_id}/quality")
+def job_quality(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_FILE_ROLES)),
+) -> dict:
+    from app.services.job_files import quality_view
+
+    return quality_view(_file_job(job_id, db))
+
+
+@router.get("/{job_id}/quality/figures/{name}")
+def job_quality_figure(
+    job_id: uuid.UUID,
+    name: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(*_FILE_ROLES)),
+) -> FileResponse:
+    from app.services.job_files import figure_file
+
+    path = figure_file(_file_job(job_id, db), name)
+    return FileResponse(path, media_type="image/png")

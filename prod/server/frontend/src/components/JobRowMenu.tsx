@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Modal, Popover, Spin, Tooltip, message } from "antd";
+import { Button, Modal, Popover, Tooltip, message } from "antd";
 import {
   CaretRightOutlined,
   DeleteOutlined,
@@ -50,7 +50,10 @@ export default function JobRowMenu({
   onDetail,
   onEvaluate,
   onReport,
+  onQuality,
   onParams,
+  onMosaic,
+  onOriginal,
   onOpen,
   onSeam,
   onChanged,
@@ -63,16 +66,16 @@ export default function JobRowMenu({
   onDetail: () => void;
   onEvaluate: () => void;
   onReport: () => void;
+  onQuality: () => void;
   onParams: () => void;
+  onMosaic: () => void;
+  onOriginal: () => void;
   onOpen: () => void;
   onSeam?: () => void;
   onChanged: () => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [rgbOpen, setRgbOpen] = useState(false);
-  const [rgbUrl, setRgbUrl] = useState("");
-  const [rgbLoading, setRgbLoading] = useState(false);
   const state = computeState || jobComputeState(job, inspect);
   const stuck = state === "orphan" || state === "stale";
   const running = job.status === "running";
@@ -114,46 +117,14 @@ export default function JobRowMenu({
     fn();
   }
 
-  async function openRgb() {
-    setOpen(false);
-    setRgbOpen(true);
-    setRgbLoading(true);
-    try {
-      const blob = await api.rgbPreview(job.id);
-      const url = URL.createObjectURL(blob);
-      setRgbUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return url;
-      });
-    } catch (e: any) {
-      message.error(e.message || "RGB 拼图读取失败");
-      setRgbOpen(false);
-    } finally {
-      setRgbLoading(false);
-    }
-  }
-
-  function closeRgb() {
-    setRgbOpen(false);
-    setRgbUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return "";
-    });
-  }
-
-  function downloadRgb() {
-    if (!rgbUrl) return;
-    const a = document.createElement("a");
-    a.href = rgbUrl;
-    a.download = job.seq != null ? `任务${job.seq}_RGB拼图.png` : "RGB拼图影像.png";
-    a.click();
-  }
-
-  const items: ActionItem[] = [];
+  const view: ActionItem[] = [];
+  const quality: ActionItem[] = [];
+  const downloads: ActionItem[] = [];
+  const runningActions: ActionItem[] = [];
   if (onSeam && String(job.message || "").startsWith("拼接线处理")) {
-    items.push({
+    view.push({
       key: "seam",
-      label: "拼接线处理",
+      label: "拼接线",
       icon: <EditOutlined />,
       tone: "primary",
       help: "进入拼接线处理界面，调整这块成果的拼接线。",
@@ -161,7 +132,7 @@ export default function JobRowMenu({
       onClick: () => run(onSeam),
     });
   }
-  items.push(
+  view.push(
     {
       key: "detail",
       label: "任务详情",
@@ -171,45 +142,69 @@ export default function JobRowMenu({
       onClick: () => run(onDetail),
     },
     {
+      key: "mosaic",
+      label: "拼图影像",
+      icon: <EyeOutlined />,
+      tone: "primary",
+      help: hasRgb ? "按波段查看整幅拼图，可拖动和缩放。" : "还没有拼图成果，正射完成后才能查看。",
+      disabled: !hasRgb,
+      onClick: () => {
+        if (!hasRgb) return;
+        run(onMosaic);
+      },
+    },
+    {
       key: "eval",
-      label: "评估",
+      label: "精度验收",
       icon: <FundViewOutlined />,
       tone: "primary",
-      help: "和外方位对应的 GPS 比平面偏差，按拼图像素计，标准 2 px。排队中的任务还不能评估。",
+      help: "在拼图上选择检测点，填写野外 GPS 坐标后评估。像素误差为拼图坐标与野外坐标的平面差。排队中的任务不能验收。",
       disabled: job.status === "queued",
       onClick: () => run(onEvaluate),
     },
+  );
+  quality.push(
+    {
+      key: "quality",
+      label: "查看",
+      icon: <FundViewOutlined />,
+      tone: "primary",
+      help: "打开质量报告。页内可看汇总，也可直接翻阅 PDF。照片定位差不是野外检测点。",
+      onClick: () => run(onQuality),
+    },
     {
       key: "report",
-      label: "下载报告",
+      label: "下载",
       icon: <DownloadOutlined />,
       tone: "green",
       help: "下载质量报告 PDF。",
       onClick: () => run(onReport),
     },
+  );
+  downloads.push(
     {
       key: "params",
-      label: "下载参数",
+      label: "处理参数",
       icon: <DownloadOutlined />,
       tone: "green",
       help: "下载这次任务实际使用的参数，可在处理方案里导入。",
       onClick: () => run(onParams),
     },
     {
-      key: "rgb",
-      label: "查看RGB影像",
-      icon: <EyeOutlined />,
-      tone: "primary",
-      help: hasRgb ? "打开这块成果的 RGB 彩色拼图。" : "还没有 RGB 拼图影像，正射完成后才能查看。",
+      key: "original",
+      label: "拼图原文件",
+      icon: <DownloadOutlined />,
+      tone: "green",
+      help: hasRgb ? "下载各波段正射和 DSM 的 GeoTIFF。" : "还没有拼图原文件。",
       disabled: !hasRgb,
       onClick: () => {
         if (!hasRgb) return;
-        void openRgb();
+        run(onOriginal);
       },
     },
   );
   if (live) {
-    items.push({
+    runningActions.push({
       key: "open",
       label: "监控",
       icon: <EyeOutlined />,
@@ -220,7 +215,7 @@ export default function JobRowMenu({
   }
 
   if (allowRun && running) {
-    items.push({
+    runningActions.push({
       key: "pause",
       label: "暂停",
       icon: <PauseCircleOutlined />,
@@ -238,7 +233,7 @@ export default function JobRowMenu({
           "pause",
         ),
     });
-    items.push({
+    runningActions.push({
       key: "stop",
       label: "立即停止",
       icon: <StopOutlined />,
@@ -255,7 +250,7 @@ export default function JobRowMenu({
     });
   }
   if (allowRun && paused) {
-    items.push({
+    runningActions.push({
       key: "resume",
       label: "继续运行",
       icon: <CaretRightOutlined />,
@@ -266,7 +261,7 @@ export default function JobRowMenu({
     });
   }
   if (allowRun && waiting) {
-    items.push({
+    runningActions.push({
       key: "continue",
       label: "继续",
       icon: <CaretRightOutlined />,
@@ -277,7 +272,7 @@ export default function JobRowMenu({
     });
   }
   if (allowRun && failed && !stuck) {
-    items.push({
+    runningActions.push({
       key: "retry",
       label: "失败重试",
       icon: <RedoOutlined />,
@@ -288,7 +283,7 @@ export default function JobRowMenu({
     });
   }
   if (allowRun && canRecover) {
-    items.push({
+    runningActions.push({
       key: "recover",
       label: "清理并续跑",
       icon: <RedoOutlined />,
@@ -303,8 +298,9 @@ export default function JobRowMenu({
         ),
     });
   }
+  const manage: ActionItem[] = [];
   if (allowRun) {
-    items.push({
+    manage.push({
       key: "delete",
       label: "删除",
       icon: <DeleteOutlined />,
@@ -336,8 +332,15 @@ export default function JobRowMenu({
     });
   }
 
+  const groups = [
+    { key: "view", title: "查看", items: view },
+    { key: "quality", title: "质量报告", items: quality },
+    { key: "download", title: "下载", items: downloads },
+    { key: "run", title: "运行", items: runningActions },
+    { key: "manage", title: "管理", items: manage },
+  ].filter((group) => group.items.length > 0);
+
   return (
-    <>
     <Popover
       open={open}
       onOpenChange={setOpen}
@@ -346,22 +349,24 @@ export default function JobRowMenu({
       overlayClassName="job-action-popover"
       content={
         <div className="job-action-card">
-          {items.map((item) => (
-            <div className={`job-action-tile is-${item.tone}`} key={item.key}>
-              <Button
-                size="small"
-                icon={item.icon}
-                disabled={item.disabled}
-                onClick={item.onClick}
-              >
-                {item.label}
-              </Button>
-              <Tooltip title={item.help} placement="topLeft">
-                <button type="button" className="param-help-btn" aria-label={`${item.label}说明`} onClick={(e) => e.stopPropagation()}>
-                  <QuestionCircleOutlined />
-                </button>
-              </Tooltip>
-            </div>
+          {groups.map((group) => (
+            <section className="job-action-group" key={group.key}>
+              <div className="job-action-group-title">{group.title}</div>
+              <div className="job-action-group-grid">
+                {group.items.map((item) => (
+                  <div className={`job-action-tile is-${item.tone}`} key={item.key}>
+                    <Button size="small" icon={item.icon} disabled={item.disabled} onClick={item.onClick}>
+                      {item.label}
+                    </Button>
+                    <Tooltip title={item.help} placement="topLeft">
+                      <button type="button" className="param-help-btn" aria-label={`${group.title}${item.label}说明`} onClick={(event) => event.stopPropagation()}>
+                        <QuestionCircleOutlined />
+                      </button>
+                    </Tooltip>
+                  </div>
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       }
@@ -370,23 +375,5 @@ export default function JobRowMenu({
         操作 <DownOutlined />
       </Button>
     </Popover>
-    <Modal
-      title="RGB 拼图影像"
-      open={rgbOpen}
-      width={880}
-      destroyOnClose
-      onCancel={closeRgb}
-      footer={
-        <Button type="primary" icon={<DownloadOutlined />} disabled={!rgbUrl || rgbLoading} onClick={downloadRgb}>
-          下载
-        </Button>
-      }
-    >
-      <div className="seam-photo-modal">
-        {rgbLoading ? <Spin /> : null}
-        {rgbUrl ? <img src={rgbUrl} alt="RGB 拼图影像" /> : null}
-      </div>
-    </Modal>
-    </>
   );
 }

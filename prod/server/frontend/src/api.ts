@@ -182,6 +182,102 @@ export type IncrementalDetail = IncrementalProject & {
   }[];
 };
 
+export type AccuracyClause = {
+  no: string;
+  text: string;
+  result: string;
+  detail: string;
+};
+
+export type AccuracyPoint = {
+  name: string;
+  col: number;
+  row: number;
+  east: number | null;
+  north: number | null;
+  lon: number | null;
+  lat: number | null;
+  gps_x: number | null;
+  gps_y: number | null;
+  gps_z: number | null;
+  gps_col: number | null;
+  gps_row: number | null;
+  dist_m: number | null;
+  err_px: number | null;
+};
+
+export type AccuracyState = {
+  min_count: number;
+  max_count: number;
+  max_mean_px: number;
+  crs: string;
+  reference_band: string;
+  ortho_epsg: string;
+  gsd_m: number | null;
+  evaluated: boolean;
+  mean_px: number | null;
+  max_px: number | null;
+  points: AccuracyPoint[];
+  bands: { id: string; label: string; reference: boolean; gsd_m: number | null }[];
+  accepted: boolean;
+  message: string;
+  clauses: AccuracyClause[];
+};
+
+export type AccuracyView = {
+  url: string;
+  originCol: number;
+  originRow: number;
+  width: number;
+  height: number;
+  fullWidth: number;
+  fullHeight: number;
+};
+
+export type JobBandFile = { id: string; label: string; name: string; bytes: number };
+
+export type QualityView = {
+  ready: boolean;
+  has_pdf: boolean;
+  message: string;
+  project_name?: string;
+  created_at?: string;
+  crs_label?: string;
+  n_scanned?: number | null;
+  n_shots?: number | null;
+  n_images?: number | null;
+  n_registered?: number | null;
+  n_filtered?: number | null;
+  area_km2?: number | null;
+  mean_agl_m?: number | null;
+  elapsed_s?: number | null;
+  at?: {
+    rms_reprojection_px: number | null;
+    n_points: number | null;
+    n_observations: number | null;
+    gps_rmse_m: number | null;
+    gps_rmse_x_m: number | null;
+    gps_rmse_y_m: number | null;
+    gps_rmse_z_m: number | null;
+    n_gps: number | null;
+  };
+  dsm?: {
+    gsd: number | null;
+    width: number | null;
+    height: number | null;
+    fill_ratio: number | null;
+    z_min: number | null;
+    z_median: number | null;
+    z_max: number | null;
+  };
+  ortho?: { gsd: number | null; mode: string; blend: string };
+  features?: { mean_keypoints: number | null; min_keypoints: number | null; max_keypoints: number | null; n_poor: number | null };
+  matching?: { n_tracks: number | null; mean_tracks: number | null; n_matched_pairs: number | null };
+  cameras?: { band: string; group?: number | null; n_images: number | null; n_registered: number | null; rms_px: number | null; width: number | null; height: number | null; f: number | null }[];
+  histogram?: { label: string; error: number | null; dx: number | null; dy: number | null; dz: number | null }[];
+  figures?: string[];
+};
+
 export const api = {
   login: async (username: string, password: string) => {
     const body = new URLSearchParams({ username, password });
@@ -248,19 +344,105 @@ export const api = {
       n_samples: number;
       choices: { scale: number; ortho_gsd_m: number; dsm_gsd_m: number }[];
     }>(`/api/tools/native-gsd?input_dir=${encodeURIComponent(inputDir)}`),
-  evaluateJob: (id: string, n: number) =>
-    request<{
-      n_requested: number;
-      n_used: number;
-      threshold_px: number;
-      rms_px: number;
-      max_px: number;
-      mean_px: number;
-      n_over: number;
-      within_tolerance: boolean;
-      gsd_m: number;
-      message: string;
-    }>(`/api/jobs/${id}/evaluate`, { method: "POST", body: JSON.stringify({ n }) }),
+  accuracyState: (id: string) => request<AccuracyState>(`/api/jobs/${id}/accuracy`),
+  accuracyConfig: (
+    id: string,
+    body: { min_count: number; max_count: number; max_mean_px: number; reference_band?: string },
+  ) => request<AccuracyState>(`/api/jobs/${id}/accuracy/config`, { method: "PUT", body: JSON.stringify(body) }),
+  accuracyPick: (id: string, body: { col: number; row: number; name?: string }) =>
+    request<AccuracyState>(`/api/jobs/${id}/accuracy/points`, { method: "POST", body: JSON.stringify(body) }),
+  accuracyDeletePoint: (id: string, name: string) =>
+    request<AccuracyState>(`/api/jobs/${id}/accuracy/points/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  accuracyGps: (id: string, name: string, body: { x: number | null; y: number | null; z: number | null; crs?: string }) =>
+    request<AccuracyState>(`/api/jobs/${id}/accuracy/points/${encodeURIComponent(name)}/gps`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  accuracyEvaluate: (id: string) => request<AccuracyState>(`/api/jobs/${id}/accuracy/evaluate`, { method: "POST" }),
+  accuracyWindow: async (id: string, band: string, cx?: number, cy?: number) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const query = new URLSearchParams();
+    if (band) query.set("band", band);
+    if (cx != null) query.set("cx", String(cx));
+    if (cy != null) query.set("cy", String(cy));
+    const res = await fetch(`/api/jobs/${id}/accuracy/window?${query}`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<AccuracyView>(() => {});
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      let msg = text || res.statusText;
+      try {
+        const parsed = JSON.parse(text);
+        if (typeof parsed.detail === "string") msg = parsed.detail;
+      } catch {
+        /* 保留原文 */
+      }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const num = (key: string) => Number(res.headers.get(key));
+    return {
+      url: URL.createObjectURL(blob),
+      originCol: num("X-Origin-Col"),
+      originRow: num("X-Origin-Row"),
+      width: num("X-Win-Width"),
+      height: num("X-Win-Height"),
+      fullWidth: num("X-Full-Width"),
+      fullHeight: num("X-Full-Height"),
+    } satisfies AccuracyView;
+  },
+  accuracyBrowse: async (id: string, band: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const query = new URLSearchParams();
+    if (band) query.set("band", band);
+    const res = await fetch(`/api/jobs/${id}/accuracy/browse?${query}`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<AccuracyView>(() => {});
+    }
+    if (!res.ok) throw new Error("整幅正射打开失败");
+    const blob = await res.blob();
+    const num = (key: string) => Number(res.headers.get(key));
+    return {
+      url: URL.createObjectURL(blob),
+      originCol: 0,
+      originRow: 0,
+      width: num("X-Win-Width"),
+      height: num("X-Win-Height"),
+      fullWidth: num("X-Full-Width"),
+      fullHeight: num("X-Full-Height"),
+    } satisfies AccuracyView;
+  },
+  accuracyOverview: async (id: string, band: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const query = new URLSearchParams();
+    if (band) query.set("band", band);
+    const res = await fetch(`/api/jobs/${id}/accuracy/overview?${query}`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<AccuracyView>(() => {});
+    }
+    if (!res.ok) throw new Error("整幅缩略图打开失败");
+    const blob = await res.blob();
+    const num = (key: string) => Number(res.headers.get(key));
+    return {
+      url: URL.createObjectURL(blob),
+      originCol: 0,
+      originRow: 0,
+      width: num("X-Win-Width"),
+      height: num("X-Win-Height"),
+      fullWidth: num("X-Full-Width"),
+      fullHeight: num("X-Full-Height"),
+    } satisfies AccuracyView;
+  },
   seamVersions: (id: string) =>
     request<{
       current: { id: string; label: string; created_at: string; note: string } | null;
@@ -338,6 +520,49 @@ export const api = {
   logs: (id: string) => request<string>(`/api/jobs/${id}/logs?tail=800`),
   stageSteps: (id: string) => request<{ stages: Record<string, StageStep[]> }>(`/api/jobs/${id}/stage-steps`),
   openJobReport: (id: string) => openAuthedFile(`/api/jobs/${id}/report.pdf`, "质量报告.pdf"),
+  jobReportUrl: async (id: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(`/api/jobs/${id}/report.pdf`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return "";
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "质量报告尚未生成"));
+    const blob = await res.blob();
+    const pdf = blob.type === "application/pdf" ? blob : new Blob([await blob.arrayBuffer()], { type: "application/pdf" });
+    return URL.createObjectURL(pdf);
+  },
+  jobFiles: (id: string) =>
+    request<{ bands: JobBandFile[]; originals: { name: string; label: string; bytes: number }[]; has_report: boolean }>(
+      `/api/jobs/${id}/files`,
+    ),
+  downloadDeliverable: async (id: string, kind: "original" | "all" | "file", name?: string) => {
+    const ticket = await request<{ ticket: string }>(`/api/jobs/${id}/files/ticket`, {
+      method: "POST",
+      body: JSON.stringify({ kind, name }),
+    });
+    const query = new URLSearchParams({ ticket: ticket.ticket });
+    const a = document.createElement("a");
+    a.href = `/api/jobs/${id}/files/download?${query}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  },
+  quality: (id: string) => request<QualityView>(`/api/jobs/${id}/quality`),
+  qualityFigure: async (id: string, name: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(`/api/jobs/${id}/quality/figures/${encodeURIComponent(name)}`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return "";
+    }
+    if (!res.ok) throw new Error("附图打开失败");
+    return URL.createObjectURL(await res.blob());
+  },
   workerInspect: () => request<any>("/api/system/worker"),
   inspectUpload: (file: File, onProgress?: (pct: number, phase: "upload" | "parse") => void) =>
     new Promise<InspectMeta>((resolve, reject) => {

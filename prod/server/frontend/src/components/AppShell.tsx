@@ -31,6 +31,9 @@ import ExecutePage from "../pages/Execute";
 import ProfilesListPage from "../pages/ProfilesList";
 import ProfileEditPage from "../pages/ProfileEdit";
 import JobsPage from "../pages/Jobs";
+import AccuracyPage from "../pages/Accuracy";
+import MosaicPage from "../pages/Mosaic";
+import QualityPage from "../pages/Quality";
 import SeamPage from "../pages/Seam";
 import CliGuidePage from "../pages/CliGuide";
 import HealthPage from "../pages/Health";
@@ -145,7 +148,13 @@ function AppShellBody({
         ? "新建处理方案"
         : key === "incremental" && loc.pathname !== "/incremental"
           ? "测区收片"
-          : TITLE[key] || PRODUCT.name;
+          : key === "jobs" && loc.pathname.includes("/accuracy")
+            ? "精度验收"
+            : key === "jobs" && loc.pathname.includes("/mosaic")
+              ? "拼图影像"
+              : key === "jobs" && loc.pathname.includes("/quality")
+                ? "质量报告"
+            : TITLE[key] || PRODUCT.name;
 
   const menuItems = useMemo(() => {
     const visible = visibleMenus;
@@ -297,6 +306,9 @@ function AppShellBody({
             />
             <Route path="/profiles/:id/edit" element={<ProfileEditPage />} />
             <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/jobs/:id/accuracy" element={<AccuracyPage />} />
+            <Route path="/jobs/:id/mosaic" element={<MosaicPage />} />
+            <Route path="/jobs/:id/quality" element={<QualityPage />} />
             <Route
               path="/seam"
               element={

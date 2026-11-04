@@ -330,15 +330,86 @@ def _ms_setup(payload: dict):
     return ctx
 
 
-def _ms_fn(ctx: dict, window: tuple[int, int, int, int]):
-    """一块上先算几何，再逐波段取样、图割、融合。图割轮数与单波段相同。
+def _shot_vector(views: list[int], shot_of: dict) -> np.ndarray | None:
+    """影像号 → 曝光号。缺映射时不能搬拼接线，调用方改回本波段图割。"""
+    if not shot_of:
+        return None
+    shots = []
+    for view in views:
+        shot = shot_of.get(int(view))
+        if shot is None:
+            return None
+        shots.append(int(shot))
+    return np.asarray(shots, dtype=np.int64)
 
-    每个波段仍用自己的影像号做视角筛选。命中数和倾角相同时，排序会落到影像号上，
-    各波段选中的曝光可以不完全一样。几何只在真正用到的那一次曝光上计算并复用。
+
+def transfer_seam_labels(
+    ref_labels: np.ndarray,
+    ref_views: list[int],
+    ref_shot_of: dict,
+    dst_stack,
+    dst_shot_of: dict,
+) -> np.ndarray | None:
+    """把参考波段的拼接线按曝光号搬到本波段。
+
+    返回 None 表示曝光号对不上，调用方应对本波段单独图割。
+    本波段没有该曝光、但有别的有效视角时，用得分最高的视角补上，避免出洞。
+    """
+    ref_shots = _shot_vector(ref_views, ref_shot_of)
+    dst_shots = _shot_vector(list(dst_stack.views), dst_shot_of)
+    if ref_shots is None or dst_shots is None or dst_shots.size == 0:
+        return None
+    order = np.argsort(dst_shots, kind="mergesort")
+    sorted_shots = dst_shots[order]
+    # 同一曝光出现多次时保留视角号较小的那个，避免排序不稳定换源。
+    uniq_shots, first = np.unique(sorted_shots, return_index=True)
+    uniq_index = order[first].astype(np.int16)
+    out = np.full(ref_labels.shape, -1, np.int16)
+    valid = ref_labels >= 0
+    if valid.any():
+        chosen = ref_shots[ref_labels[valid].astype(np.int64)]
+        pos = np.searchsorted(uniq_shots, chosen)
+        pos = np.clip(pos, 0, max(len(uniq_shots) - 1, 0))
+        hit = uniq_shots[pos] == chosen
+        mapped = np.full(chosen.shape, -1, np.int16)
+        mapped[hit] = uniq_index[pos[hit]]
+        out[valid] = mapped
+    missing = out < 0
+    if missing.any():
+        scores = dst_stack.scores
+        finite = np.isfinite(scores)
+        any_valid = finite.any(axis=0)
+        fill = missing & any_valid
+        if fill.any():
+            safe = np.where(finite, scores, -np.inf)
+            out[fill] = np.argmax(safe, axis=0).astype(np.int16)[fill]
+    return out
+
+
+def _seam_reference_index(prepared: list[tuple]) -> int | None:
+    """优先用 550nm 做拼接线。圈定过来源的波段不作为参考，避免把人工范围套到别的波段。"""
+    usable = []
+    for i, (band, _spec, edits, stack) in enumerate(prepared):
+        if edits or stack.pixels.shape[0] == 0:
+            continue
+        usable.append(i)
+    if not usable:
+        return None
+    for i in usable:
+        if "550" in str(prepared[i][0]):
+            return i
+    return usable[len(usable) // 2]
+
+
+def _ms_fn(ctx: dict, window: tuple[int, int, int, int]):
+    """一块上先算几何，再逐波段取样。拼接线只在参考波段上图割一次，其余波段按同一曝光沿用。
+
+    圈定过来源的波段仍单独图割。曝光号对不上时也退回本波段图割，不改那一块的接缝。
+    几何只在真正用到的那一次曝光上计算并复用。
     """
     z = resample_height(ctx["dsm_z"], ctx["dsm_grid"], ctx["grid"], window)
     geom: dict = {}
-    out = []
+    prepared = []
     for band in ctx["band_order"]:
         spec = ctx["bands"][band]
         edits = (ctx.get("seam_edits_by_band") or {}).get(band) or []
@@ -359,10 +430,30 @@ def _ms_fn(ctx: dict, window: tuple[int, int, int, int]):
             shot_of=spec["shot_of"],
             ensure_ids=ensure,
         )
+        prepared.append((band, spec, edits, stack))
+
+    ref_i = _seam_reference_index(prepared)
+    ref_labels = None
+    ref_views: list[int] = []
+    ref_shot: dict = {}
+    if ref_i is not None:
+        _band, spec, edits, stack = prepared[ref_i]
+        ref_labels = _seam_labels(ctx, window, stack, edits)
+        ref_views = list(stack.views)
+        ref_shot = spec["shot_of"]
+
+    out = []
+    for i, (band, spec, edits, stack) in enumerate(prepared):
         if stack.pixels.shape[0] == 0:
             out.append((band, np.zeros((0,), np.float32), np.zeros((0,), np.int16), []))
             continue
-        labels = _seam_labels(ctx, window, stack, edits)
+        labels = None
+        if i == ref_i:
+            labels = ref_labels
+        elif not edits and ref_labels is not None:
+            labels = transfer_seam_labels(ref_labels, ref_views, ref_shot, stack, spec["shot_of"])
+        if labels is None:
+            labels = _seam_labels(ctx, window, stack, edits)
         mosaic = multiband_blend(stack, labels)
         out.append((band, mosaic, labels, list(stack.views)))
     return out
@@ -382,10 +473,11 @@ def render_ms_bands(
     seam_cfg: SeamConfig | None = None,
     seam_edits_by_band: dict | None = None,
 ) -> dict[str, BandRaster]:
-    """多光谱一次正射。同一曝光的投影和遮挡只算一次，各波段仍各自取样、选拼接线、融合。
+    """多光谱一次正射。同一曝光的投影和遮挡只算一次。
 
+    拼接线在参考波段（优先 550nm）上图割一次，其余波段按同一曝光号沿用，像元仍取本波段。
+    圈定过来源的波段单独图割。视角上限和立面层数与分波段正射相同。
     bands 的每项是 (波段名, cameras, poses, paths, shot_of)。
-    视角上限、立面采样层数、图割轮数用 OrthoConfig / SeamConfig 的默认值，与分波段正射相同。
     """
     names = [name for name, *_ in bands]
     if any(name == RGB_BAND for name in names):
@@ -395,8 +487,8 @@ def render_ms_bands(
     windows = list(grid.tiles(tile, overlap=overlap))
     any_cam = next(iter(bands[0][1].values()))
     image_bytes = any_cam.width * any_cam.height * 2
-    # 影像缓存总张数按 8 个波段×24 张封顶。波长几十个时每波段少留几张、多读几次盘，
-    # 图割仍按波段各做一次，拼接线不改。
+    # 影像缓存总张数按 8 个波段×24 张封顶。波长几十个时每波段少留几张、多读几次盘。
+    # 拼接线在参考波段上求一次，其余波段按曝光号沿用。
     cache_per_band = ms_cache_per_band(len(bands))
     cache_slots = cache_per_band * len(bands)
     shared = _share_array(np.asarray(dsm_z))

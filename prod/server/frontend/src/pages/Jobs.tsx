@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Button, Card, Input, InputNumber, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
 import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
@@ -64,10 +64,6 @@ export default function JobsPage() {
   const [inspect, setInspect] = useState<any>(null);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [detailId, setDetailId] = useState<string | undefined>();
-  const [evalJob, setEvalJob] = useState<any>(null);
-  const [evalN, setEvalN] = useState(20);
-  const [evalBusy, setEvalBusy] = useState(false);
-  const [evalResult, setEvalResult] = useState<any>(null);
   const nav = useNavigate();
   const { widths, setWidth, total } = useColumnWidths("jobs-table-v7", COL_W);
 
@@ -327,11 +323,7 @@ export default function JobsPage() {
                   computeState={r.compute_state}
                   allowRun={allowRun}
                   onDetail={() => setDetailId(r.id)}
-                  onEvaluate={() => {
-                    setEvalJob(r);
-                    setEvalN(20);
-                    setEvalResult(null);
-                  }}
+                  onEvaluate={() => nav(`/jobs/${r.id}/accuracy`)}
                   onReport={async () => {
                     try {
                       await api.openJobReport(r.id);
@@ -339,7 +331,17 @@ export default function JobsPage() {
                       message.error(e.message);
                     }
                   }}
+                  onQuality={() => nav(`/jobs/${r.id}/quality`)}
                   onParams={() => downloadParams(r)}
+                  onMosaic={() => nav(`/jobs/${r.id}/mosaic`)}
+                  onOriginal={async () => {
+                    try {
+                      await api.downloadDeliverable(r.id, "original");
+                      message.success("开始下载拼图原文件");
+                    } catch (e: any) {
+                      message.error(e.message);
+                    }
+                  }}
                   onOpen={() => nav(`/execute?job=${r.id}`)}
                   onSeam={() => nav(`/seam?job=${r.id}`)}
                   onChanged={() => reload()}
@@ -349,38 +351,6 @@ export default function JobsPage() {
           ]}
         />
       </Card>
-
-      <Modal
-        title={evalJob ? `评估任务 ${formatNo(evalJob.seq)}` : "评估"}
-        open={Boolean(evalJob)}
-        onCancel={() => setEvalJob(null)}
-        okText="开始评估"
-        confirmLoading={evalBusy}
-        onOk={async () => {
-          if (!evalJob) return;
-          setEvalBusy(true);
-          try {
-            setEvalResult(await api.evaluateJob(evalJob.id, evalN));
-          } catch (e: any) {
-            message.error(e.message || String(e));
-          } finally {
-            setEvalBusy(false);
-          }
-        }}
-      >
-        <Space direction="vertical" style={{ width: "100%" }}>
-          <Typography.Text type="secondary">和外方位对应的 GPS 比平面偏差，按拼图像素计。标准 2 px。</Typography.Text>
-          <InputNumber min={1} max={500} value={evalN} onChange={(v) => setEvalN(typeof v === "number" ? v : 20)} addonBefore="点数" />
-          {evalResult ? (
-            <Typography.Paragraph style={{ marginBottom: 0 }}>
-              {evalResult.message}
-              <br />
-              均方根 {Number(evalResult.rms_px).toFixed(2)} px，平均 {Number(evalResult.mean_px).toFixed(2)} px，
-              拼图分辨率 {Number(evalResult.gsd_m).toFixed(4)} m
-            </Typography.Paragraph>
-          ) : null}
-        </Space>
-      </Modal>
 
       <JobDetailModal
         open={Boolean(detailId)}

@@ -615,7 +615,7 @@ def run_mosaic(
         names = [name for name, *_ in ms_specs]
         log(
             f"多光谱正射几何共用 {'/'.join(names)}，{tile_n} 进程。"
-            f"视角上限、立面层数、图割轮数与分波段相同"
+            f"拼接线在参考波段上图割一次，其余波段按同一曝光沿用"
         )
         t_share = time.perf_counter()
         rasters = render_ms_bands(

@@ -96,17 +96,78 @@ class EvaluateIn(BaseModel):
     n: int = 20
 
 
-class EvaluateOut(BaseModel):
-    n_requested: int
-    n_used: int
-    threshold_px: float
-    rms_px: float
-    max_px: float
-    mean_px: float
-    n_over: int
-    within_tolerance: bool
-    gsd_m: float
+class FileTicketIn(BaseModel):
+    kind: str
+    name: str | None = None
+
+
+class EvaluateClause(BaseModel):
+    no: str
+    text: str
+    result: str
+    detail: str
+
+
+class AccuracyPoint(BaseModel):
+    name: str
+    col: float
+    row: float
+    east: float | None = None
+    north: float | None = None
+    lon: float | None = None
+    lat: float | None = None
+    gps_x: float | None = None
+    gps_y: float | None = None
+    gps_z: float | None = None
+    gps_col: float | None = None
+    gps_row: float | None = None
+    dist_m: float | None = None
+    err_px: float | None = None
+
+
+class AccuracyBand(BaseModel):
+    id: str
+    label: str
+    reference: bool = False
+    gsd_m: float | None = None
+
+
+class AccuracyState(BaseModel):
+    min_count: int
+    max_count: int
+    max_mean_px: float
+    crs: str = "EPSG:4326"
+    reference_band: str = ""
+    ortho_epsg: str = ""
+    gsd_m: float | None = None
+    evaluated: bool = False
+    mean_px: float | None = None
+    max_px: float | None = None
+    points: list[AccuracyPoint] = Field(default_factory=list)
+    bands: list[AccuracyBand] = Field(default_factory=list)
+    accepted: bool
     message: str
+    clauses: list[EvaluateClause] = Field(default_factory=list)
+
+
+class AccuracyConfigIn(BaseModel):
+    min_count: int = 20
+    max_count: int = 30
+    max_mean_px: float = 2.0
+    reference_band: str | None = None
+
+
+class AccuracyPickIn(BaseModel):
+    col: float
+    row: float
+    name: str | None = None
+
+
+class AccuracyGpsIn(BaseModel):
+    x: float | None = None
+    y: float | None = None
+    z: float | None = None
+    crs: str | None = None
 
 
 class SeamRegionIn(BaseModel):

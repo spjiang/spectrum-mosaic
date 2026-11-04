@@ -537,7 +537,7 @@ def _cached_segment(sess: InspectSession, page: Any, fh: Any, index: int) -> np.
     return arr
 
 
-def _load_tiff_overview(path: Path) -> tuple[np.ndarray, int, int, int, str]:
+def _load_tiff_overview(path: Path, max_side: int = PREVIEW_MAX) -> tuple[np.ndarray, int, int, int, str]:
     import tifffile
 
     with tifffile.TiffFile(path) as tf:
@@ -547,16 +547,22 @@ def _load_tiff_overview(path: Path) -> tuple[np.ndarray, int, int, int, str]:
         width = int(layout["width"])
         samples = int(layout["samples"])
         dtype = str(page.dtype)
-        scale = 1.0 if max(height, width) <= PREVIEW_MAX else PREVIEW_MAX / float(max(height, width))
+        limit = max(1, int(max_side))
+        scale = 1.0 if max(height, width) <= limit else limit / float(max(height, width))
         nh = max(1, int(round(height * scale)))
         nw = max(1, int(round(width * scale)))
         ys = np.linspace(0, height - 1, nh).astype(np.int64)
         xs = np.linspace(0, width - 1, nw).astype(np.int64)
         fh = tf.filehandle
         rows: list[np.ndarray] = []
+        cached_idx = -1
+        cached_seg = None
         for r in ys:
             idx = _segment_index(layout, int(r), 0)
-            seg = _decode_segment(page, fh, idx)
+            if idx != cached_idx:
+                cached_seg = _decode_segment(page, fh, idx)
+                cached_idx = idx
+            seg = cached_seg
             if seg is None:
                 if samples == 1:
                     rows.append(np.zeros(nw, dtype=np.dtype(page.dtype)))

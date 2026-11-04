@@ -799,16 +799,11 @@ def control_job(
 
 
 def evaluate_job(job: JobRun, n: int) -> dict[str, Any]:
-    from app.services.gps_check import load_pose_and_gps, ortho_gsd_of, pixel_errors, summarize
+    """精度验收。点击评估后，用拼图坐标和野外 GPS 计算像素误差。"""
+    from app.services.check_accuracy import run_evaluation
 
-    if n < 1 or n > 500:
-        raise HTTPException(400, "评估点数须在 1 到 500 之间")
-    at = _existing_at(dict(job.params_snapshot or {}))
-    if not at:
-        raise HTTPException(400, "还没有空三检查点，跑完空三后才能评估")
-    pose, gps, _crs = load_pose_and_gps(Path(at))
-    gsd = ortho_gsd_of(job.ortho_gsd_m, dict(job.params_snapshot or {}))
-    return summarize(pixel_errors(pose, gps, gsd), n=n, gsd_m=gsd)
+    _ = n
+    return run_evaluation(job)
 
 
 def reseam_job(

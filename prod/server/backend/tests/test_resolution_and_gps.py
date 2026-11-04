@@ -3,7 +3,15 @@ import pytest
 from fastapi import HTTPException
 
 from app.services.geodesy import utm_to_wgs84, wgs84_to_utm
-from app.services.gps_check import pixel_errors, sample_errors, summarize
+from app.services.gps_check import (
+    build_report,
+    gsd_from_run_log,
+    ortho_gsd_of,
+    pixel_errors,
+    req_05_01_report,
+    sample_errors,
+    summarize,
+)
 from app.services.resolution import gsd_m, jpeg_size, needs_resolution_choice
 
 
@@ -25,6 +33,14 @@ def test_profile_scale_without_dsm_gsd_needs_resolution():
     assert needs_resolution_choice({}, {"ortho_scale": 1, "grid_reference": "/ref"}) is False
 
 
+def test_ortho_gsd_uses_the_run_log_when_the_job_has_none():
+    text = "处理记录：原始分辨率 0.044163 m/px，拼图分辨率 0.046620 m/px，DSM 0.093241 m"
+    assert gsd_from_run_log(text) == pytest.approx(0.046620)
+    assert ortho_gsd_of(None, {"dsm_gsd": None}, text) == pytest.approx(0.046620)
+    with pytest.raises(HTTPException):
+        ortho_gsd_of(None, {}, "")
+
+
 def test_gsd_is_height_over_scaled_focal():
     # 1508.19 px @ 1440 宽，像宽 2048 时焦距按比例放大
     got = gsd_m(80.0, 2048)
@@ -37,6 +53,34 @@ def test_jpeg_size_reads_sof():
     data = bytes.fromhex("ffd8ffc000080806000800")
     assert jpeg_size(data) == (2048, 1536)
     assert jpeg_size(b"not a jpeg") is None
+
+
+def test_report_shows_each_point_and_the_pixel_formula():
+    pose = np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]])
+    gps = np.array([[0.10, 0.0], [10.0, 0.0], [0.0, 10.20]])
+    report = build_report(
+        pose,
+        gps,
+        np.array([7, 8, 9]),
+        ["a.jpg", "b.jpg", "c.jpg"],
+        n=3,
+        gsd_m=0.05,
+        gsd_source="运行日志",
+        crs="EPSG:32650",
+        gps_source="检查点",
+    )
+    by_name = {p["name"]: p for p in report["points"]}
+    assert by_name["a.jpg"]["dist_m"] == pytest.approx(0.10)
+    assert by_name["a.jpg"]["error_px"] == pytest.approx(2.0)
+    assert by_name["a.jpg"]["over"] is False
+    assert by_name["c.jpg"]["error_px"] == pytest.approx(4.0)
+    assert by_name["c.jpg"]["over"] is True
+    assert report["n_over"] == 1
+    assert report["n_valid"] == 3
+    assert report["max_px"] == pytest.approx(4.0)
+    assert report["worst_name"] == "c.jpg"
+    assert report["threshold_m"] == pytest.approx(0.10)
+    assert report["rms_px"] == pytest.approx((20.0 / 3) ** 0.5)
 
 
 def test_pixel_error_is_metres_over_gsd():
@@ -65,3 +109,19 @@ def test_sample_is_stable_and_threshold_is_two_pixels():
 def test_pixel_error_rejects_nonpositive_gsd():
     with pytest.raises(HTTPException):
         pixel_errors(np.zeros((1, 2)), np.zeros((1, 2)), 0.0)
+
+
+def test_req_05_01_does_not_treat_camera_gnss_as_field_truth():
+    report = req_05_01_report()
+    assert report["requirement"] == "REQ-05-01"
+    assert report["accepted"] is False
+    assert "野外真实 GPS 真值" in report["message"]
+    assert "不具备验收条件" in report["message"]
+    by_no = {clause["no"]: clause for clause in report["clauses"]}
+    assert by_no["1"]["text"] == "每一个光谱波段均匀选取 20~30 个检测点位"
+    assert by_no["1"]["result"] == "未执行"
+    assert by_no["2"]["text"] == "与野外真实 GPS 真值坐标比对"
+    assert by_no["2"]["result"] == "未执行"
+    assert by_no["3"]["text"].startswith("平均位置误差严格小于 2 像素")
+    assert by_no["3"]["result"] == "不能判定"
+    assert by_no["4"]["result"] == "需求未给定"
