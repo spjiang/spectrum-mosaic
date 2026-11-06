@@ -204,6 +204,10 @@ def _consume_jobs(url: str, stop: threading.Event) -> None:
             time.sleep(2)
 
 
+# 内存不足被系统杀掉时自动续跑一次。再被杀掉就停，避免同一阶段无限重算。
+OOM_AUTO_RETRY = 1
+
+
 def _crash_message(code: int) -> str:
     if code == -9:
         return "计算进程被系统杀掉（内存不足，exit -9）。已完成的阶段仍保留，可失败重试。"
@@ -212,12 +216,31 @@ def _crash_message(code: int) -> str:
     return f"计算进程异常退出（exit {code}）。已完成的阶段仍保留，可失败重试。"
 
 
-def _report_child_crash(url: str, job_id: str, code: int) -> None:
+def _payload_oom_backoff(payload: dict[str, Any]) -> int:
+    snap = payload.get("params_snapshot") or {}
+    try:
+        return max(0, int(snap.get("oom_backoff") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def child_exit_event(job_id: str, code: int, backoff: int) -> dict[str, Any]:
+    """子进程异常退出时发给页面的事件。内存不足且还没自动续跑过，则降并发再跑，不标失败。"""
+    if int(code) == -9 and int(backoff) < OOM_AUTO_RETRY:
+        error = "计算进程被系统杀掉（内存不足，exit -9）。已自动降低并发，从已完成的阶段继续。"
+        event = "oom_retry"
+    else:
+        error = _crash_message(int(code))
+        event = "failed"
+    return {"schema_version": 1, "job_id": job_id, "event": event, "error": error}
+
+
+def _report_child_crash(url: str, job_id: str, code: int, payload: dict[str, Any] | None = None) -> None:
     """子进程被信号杀掉时发不出失败事件，页面会一直停在运行中。这里补报一次。"""
     if code in (0, None):
         return
     body = json.dumps(
-        {"schema_version": 1, "job_id": job_id, "event": "failed", "error": _crash_message(code)},
+        child_exit_event(job_id, int(code), _payload_oom_backoff(payload or {})),
         ensure_ascii=False,
     ).encode("utf-8")
     try:
@@ -253,7 +276,7 @@ def _run_payload(url: str, payload: dict[str, Any]) -> None:
         code = proc.wait()
         if code not in (0, None):
             log.warning("job child %s exit %s", job_id, code)
-            _report_child_crash(url, job_id, int(code))
+            _report_child_crash(url, job_id, int(code), payload)
     finally:
         if proc.poll() is None:
             terminate_process_tree(proc.pid)

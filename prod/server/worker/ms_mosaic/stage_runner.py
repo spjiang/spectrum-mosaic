@@ -9,6 +9,7 @@ from typing import Any
 from ms_mosaic.control import ControlState
 from ms_mosaic.cpu import resolve_cpu_budget, set_job_cpus
 from ms_mosaic.gpu import set_job_gpu
+from ms_mosaic.memory import set_oom_backoff
 from ms_mosaic.pipeline import run_mosaic
 from ms_mosaic.progress import NullReporter, ProgressReporter, global_percent_for, stage_index
 
@@ -90,11 +91,13 @@ def run_stages(
     control = control or ControlState()
     set_job_cpus(resolve_cpu_budget(params.get("cpus")))
     set_job_gpu(params.get("gpu"), _as_float(params.get("gpu_memory_gb")))
+    set_oom_backoff(params.get("oom_backoff"))
     try:
         return _run_stages_body(input_dir, out_dir, params=params, reporter=reporter, control=control)
     finally:
         set_job_cpus(None)
         set_job_gpu(None, None)
+        set_oom_backoff(0)
 
 
 def _run_stages_body(
@@ -152,6 +155,7 @@ def _run_stages_body(
             dsm_gsd=_as_float(params.get("dsm_gsd")),
             workers=_as_int(params.get("workers")),
             workers_at=_as_int(params.get("workers_at")),
+            max_features=_as_int(params.get("max_features")),
             workers_dense=_as_int(params.get("workers_dense")),
             workers_ortho=_as_int(params.get("workers_ortho")),
             memory_gb=_as_float(params.get("memory_gb")),

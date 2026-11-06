@@ -140,6 +140,50 @@ def test_paste_tile_drops_overlap_halo():
     assert (dst[:, 10:] == 7.0).all()
 
 
+def test_fit_concurrent_serializes_large_band_writes(monkeypatch):
+    """23.4 GB 上 7 个整幅写出不能一起跑。任务 #32 就是这样被系统杀掉的。"""
+    from ms_mosaic.parallel import fit_concurrent
+
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 23.4)
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: int(4 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(12 * 1024**3))
+    # 剩余 12 GB，扣 1.5 GB，每个 4 GB → 2，不能是 7
+    assert fit_concurrent(7, 4000) == 2
+    assert fit_concurrent(1, 4000) == 1
+
+
+def test_fit_concurrent_uses_all_bands_when_they_fit(monkeypatch):
+    from ms_mosaic.parallel import fit_concurrent
+
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 64.0)
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: int(2 * 1024**3))
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(48 * 1024**3))
+    assert fit_concurrent(7, 200) == 7
+
+
+def test_fit_concurrent_unlimited_without_memory_reading(monkeypatch):
+    from ms_mosaic.parallel import fit_concurrent
+
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: None)
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: None)
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: None)
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: None)
+    assert fit_concurrent(7, 8000) == 7
+
+
+def test_band_write_mb_counts_memmap_pages():
+    """单波段累加器 14 B/像元 + 写出 8 B。只算 8 B 会把 7 个波段一起放出去。"""
+    from ms_mosaic.pipeline import band_write_mb
+
+    # 13062×14410 是任务 #32 正射格网量级
+    mb = band_write_mb(13062, 14410, 1)
+    raw = (13062 * 14410 * 22) >> 20
+    assert mb == (raw * 5 + 3) // 4
+    assert mb > (13062 * 14410 * 8) >> 20 * 2
+
+
 def test_split_ortho_pools_keeps_bands_serial_when_few_workers():
     assert split_ortho_pools(7, 1) == (1, 1)
     assert split_ortho_pools(7, 2) == (1, 2)
@@ -167,8 +211,8 @@ def test_resolve_workers_uses_per_worker_estimate(monkeypatch):
     monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: int(float(gb) * 1024**3))
     monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: int(2 * 1024**3))
     monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: int(10 * 1024**3))
-    per = tile_worker_mb(2048 * 1536 * 3)  # Color 原始位深 48 张 ≈ 432MB + 640MB，实测峰值 1039MB
-    assert 1039 < per < 1150
+    per = tile_worker_mb(2048 * 1536 * 3)  # Color 48 张缓存 432MB + 640MB，实测峰值 1039MB，再留四分之一
+    assert per == ((432 + 640) * 5 + 3) // 4
     assert resolve_workers(None, per_worker_mb=per) == (10 * 1024 - 1536) // per
 
 
@@ -214,3 +258,43 @@ def test_split_ortho_pools_runs_several_ms_bands():
     n_par, per = split_ortho_pools(7, 7)
     assert n_par == 3 and per == 2
     assert n_par * per <= 7
+
+
+def test_plan_ortho_band_pools_estimates_each_worker_higher(monkeypatch):
+    """分波段正射按两倍单进程估计划分。
+
+    任务 #32 单进程估 928 MB，剩余刚够 8 个进程，4 波段 × 2 进程把预算占满，
+    子进程被系统回收。两倍估计下同样剩余只放 4 个进程，划分成 2 波段 × 2 进程。
+    """
+    from ms_mosaic.parallel import plan_ortho_band_pools
+
+    monkeypatch.setattr(
+        "ms_mosaic.parallel.cpu_cap",
+        lambda requested=None: 8 if requested is None else min(8, int(requested)),
+    )
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 0)
+    # 1536 MB 预留 + 恰好 8×928 MB。按 928 MB 能开 8 个，按 1856 MB 只能开 4 个。
+    usable = (1536 + 8 * 928) << 20
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: usable)
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: 0)
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: usable)
+    assert plan_ortho_band_pools(7, 8, 928) == (2, 2)
+
+
+def test_plan_ortho_band_pools_keeps_a_band_write_out_of_the_worker_budget(monkeypatch):
+    """一个波段算完就写出整幅，这段内存不能再分给块进程。"""
+    from ms_mosaic.parallel import plan_ortho_band_pools, reserve_memory
+
+    monkeypatch.setattr(
+        "ms_mosaic.parallel.cpu_cap",
+        lambda requested=None: 8 if requested is None else min(8, int(requested)),
+    )
+    monkeypatch.setattr("ms_mosaic.parallel.job_memory_gb", lambda: 0)
+    usable = (1536 + 8 * 928) << 20
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_memory_budget", lambda gb: usable)
+    monkeypatch.setattr("ms_mosaic.parallel.process_rss_bytes", lambda: 0)
+    monkeypatch.setattr("ms_mosaic.memory.available_bytes", lambda: usable)
+    with reserve_memory(4096):
+        n_par, per = plan_ortho_band_pools(7, 8, 928)
+    assert n_par * per < 4
+    assert (n_par, per) == (1, 1)

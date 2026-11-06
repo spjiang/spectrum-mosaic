@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.services import jobs as jobsvc
-from app.services.mq import QUEUE_EVENTS, QUEUE_PROGRESS
+from app.services.mq import MQPublisher, QUEUE_EVENTS, QUEUE_PROGRESS
 from app.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -84,6 +84,9 @@ def start_consumers(loop: asyncio.AbstractEventLoop) -> None:
 
     def on_event(db: Session, payload: dict) -> None:
         job = jobsvc.apply_event(db, payload)
+        if job is not None and payload.get("event") == "oom_retry" and job.status == "running":
+            jobsvc.publish_oom_resume(db, MQPublisher(), job)
+            db.commit()
         if job is not None:
             asyncio.run_coroutine_threadsafe(
                 hub.broadcast(str(job.id), {"type": "event", "job": _job_dict(job), "event": payload}),

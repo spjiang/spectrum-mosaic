@@ -25,6 +25,7 @@ def test_run_stages_forwards_template_params(tmp_path: Path, monkeypatch):
             "input_dir": str(inp),
             "output_dir": str(out),
             "workers_at": 4,
+            "max_features": 4096,
             "workers_dense": 6,
             "workers_ortho": 8,
             "min_agl_m": 7.5,
@@ -42,6 +43,7 @@ def test_run_stages_forwards_template_params(tmp_path: Path, monkeypatch):
     )
     assert result["status"] == "succeeded"
     assert captured["workers_at"] == 4
+    assert captured["max_features"] == 4096
     assert captured["workers_dense"] == 6
     assert captured["workers_ortho"] == 8
     assert captured["min_agl_m"] == 7.5

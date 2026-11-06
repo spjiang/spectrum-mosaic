@@ -86,6 +86,12 @@ function activeElapsedSeconds(
   return any ? sum : null;
 }
 
+function formatElapsedHours(hours: number): string {
+  const shown = Math.max(0, hours).toFixed(1);
+  const minutes = Math.round(Number(shown) * 60);
+  return `${shown} 小时（${minutes} 分钟）`;
+}
+
 export function jobElapsedHours(
   job: {
     started_at?: string | null;
@@ -97,12 +103,12 @@ export function jobElapsedHours(
   nowMs = Date.now(),
 ): string {
   const active = activeElapsedSeconds(job, nowMs);
-  if (active != null) return `${(active / 3600).toFixed(1)} 小时`;
+  if (active != null) return formatElapsedHours(active / 3600);
   const startMs = Date.parse(String(job.started_at || job.created_at || ""));
   if (!Number.isFinite(startMs)) return "—";
   const live = LIVE.has(job.status || "");
   const endMs = live ? nowMs : Date.parse(String(job.finished_at || ""));
   if (!Number.isFinite(endMs)) return "—";
   const hours = Math.max(0, (endMs - startMs) / 3_600_000);
-  return `${hours.toFixed(1)} 小时`;
+  return formatElapsedHours(hours);
 }

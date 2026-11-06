@@ -20,6 +20,10 @@ function foldAnnouncements(steps: StageStep[]): StageStep[] {
   for (const step of steps) {
     const prev = out[out.length - 1];
     const copy = { ...step };
+    if (prev && prev.name === copy.name && (prev.gpu || copy.gpu)) {
+      prev.gpu = true;
+      copy.gpu = true;
+    }
     if (prev && prev.name === copy.name) {
       const prevShort = seconds(prev) < 1;
       const copyShort = seconds(copy) < 1;
@@ -106,4 +110,9 @@ function orthoGroup(steps: StepNode[]): StepNode[] {
 /** 合计行收成上一级，被它覆盖的步骤收成下一级。上一级的时间就是下一级相加。 */
 export function nestStageSteps(steps: StageStep[]): StepNode[] {
   return orthoGroup(baGroup(foldAnnouncements(steps)));
+}
+
+export function stageUsedGpu(steps: StageStep[]): boolean {
+  const walk = (node: StepNode): boolean => Boolean(node.gpu) || (node.children || []).some(walk);
+  return nestStageSteps(steps).some(walk);
 }

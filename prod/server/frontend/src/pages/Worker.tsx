@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
-import { Alert, Button, Card, Col, Popconfirm, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Popconfirm, Progress, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import { QuestionCircleOutlined, ReloadOutlined, StopOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
@@ -11,6 +11,7 @@ import { TitleWithProgressHelp } from "../components/ProgressHelpTip";
 import { formatJobDateTime, jobElapsedHours } from "../jobTime";
 import { attachJobProcesses, fmtMb, jobComputeState, restoreOrphanHierarchy, type Proc } from "../processTree";
 import JobProcessTable from "../components/JobProcessTable";
+import JobPathCell from "../components/JobPathCell";
 
 type Memory = {
   worker_rss_mb?: number | null;
@@ -51,7 +52,15 @@ type Inspect = {
       available?: boolean;
       reason?: string;
       validated_stages?: string[];
-      devices?: { index: number; name: string; total_mb: number; free_mb: number; capability?: string }[];
+      devices?: {
+        index: number;
+        name: string;
+        total_mb: number;
+        free_mb: number;
+        used_mb?: number | null;
+        utilization?: number | null;
+        capability?: string;
+      }[];
     };
   } | null;
 };
@@ -326,10 +335,12 @@ export default function WorkerPage() {
           />
         )}
         <Table
+          className="worker-job-table"
           size="small"
           rowKey="key"
           pagination={false}
-          scroll={{ x: 1280 }}
+          tableLayout="fixed"
+          scroll={{ x: 2180 }}
           dataSource={currentRows}
           locale={{ emptyText: "Worker 空闲，没有正在计算的任务。" }}
           expandable={{
@@ -342,13 +353,13 @@ export default function WorkerPage() {
             {
               title: "任务号",
               dataIndex: "seq",
-              width: 88,
+              width: 84,
               render: (v, r) => <Typography.Text strong>{formatNo(v, r.id ? String(r.id).slice(0, 8) : "—")}</Typography.Text>,
             },
             {
               title: "来源",
               dataIndex: "source",
-              width: 100,
+              width: 96,
               render: (v, r) =>
                 r.compute_state === "orphan" ? (
                   <Tag color="orange">已脱离</Tag>
@@ -361,7 +372,7 @@ export default function WorkerPage() {
             {
               title: "状态",
               dataIndex: "status",
-              width: 110,
+              width: 100,
               render: (v) => <JobStatusTag status={v} />,
             },
             {
@@ -372,60 +383,65 @@ export default function WorkerPage() {
             },
             {
               title: "流程",
-              width: 220,
+              width: 200,
               render: (_, r) => <JobStageFlow job={r} variant="compact" />,
             },
             {
               title: "进程",
               dataIndex: "process_count",
-              width: 140,
+              width: 156,
               render: (v, r) => (v ? `${v} 个 / ${fmtMb(r.process_rss_mb)}` : "—"),
             },
             {
               title: "开始时间",
               dataIndex: "started_at",
-              width: 170,
+              width: 168,
               render: (v) => formatJobDateTime(v),
             },
             {
               title: "结束时间",
               dataIndex: "finished_at",
-              width: 170,
+              width: 168,
               render: (v) => formatJobDateTime(v),
             },
             {
               title: "总耗时",
-              width: 110,
+              width: 168,
               render: (_, r) => jobElapsedHours(r),
             },
             {
               title: "输入",
               dataIndex: "input_dir",
-              ellipsis: true,
-              render: (v) => (v ? <Typography.Text copyable={{ text: v }}>{v}</Typography.Text> : "—"),
+              width: 148,
+              onCell: () => ({ className: "job-path-cell" }),
+              render: (v) => <JobPathCell value={v} />,
             },
             {
               title: "输出",
               dataIndex: "output_dir",
-              ellipsis: true,
-              render: (v) => (v ? <Typography.Text copyable={{ text: v }}>{v}</Typography.Text> : "—"),
+              width: 148,
+              onCell: () => ({ className: "job-path-cell" }),
+              render: (v) => <JobPathCell value={v} />,
             },
             {
               title: "说明",
               dataIndex: "message",
+              width: 140,
               ellipsis: true,
               render: (v) => v || "—",
             },
             {
               title: "操作",
-              width: 220,
+              width: 360,
+              fixed: "right",
+              onCell: () => ({ className: "worker-actions-cell" }),
               render: (_, r) => (
-                <Space wrap size={4}>
-                  <JobActions job={r} inspect={data} computeState={r.compute_state} onChanged={() => reload()} />
+                <div className="worker-actions">
+                  <JobActions nowrap job={r} inspect={data} computeState={r.compute_state} onChanged={() => reload()} />
                   <Button type="link" size="small" onClick={() => nav(`/execute?job=${r.id}`)}>
                     监控
                   </Button>
-                </Space>
+                </div>
               ),
             },
           ]}
@@ -517,7 +533,31 @@ export default function WorkerPage() {
               { title: "卡号", dataIndex: "index", width: 70 },
               { title: "型号", dataIndex: "name" },
               { title: "计算能力", dataIndex: "capability", width: 100 },
+              {
+                title: "使用率",
+                dataIndex: "utilization",
+                width: 140,
+                render: (v: number | null | undefined) =>
+                  v == null ? (
+                    "—"
+                  ) : (
+                    <Progress
+                      percent={Math.max(0, Math.min(100, Math.round(v)))}
+                      size="small"
+                      strokeColor={v >= 80 ? "#d48806" : "#1b6bbe"}
+                    />
+                  ),
+              },
               { title: "显存总量", dataIndex: "total_mb", width: 120, render: (v: number) => fmtMb(v) },
+              {
+                title: "已用显存",
+                dataIndex: "used_mb",
+                width: 120,
+                render: (v: number | null | undefined, row: { total_mb?: number; free_mb?: number }) => {
+                  const used = v ?? (row.total_mb != null && row.free_mb != null ? row.total_mb - row.free_mb : null);
+                  return used == null ? "—" : fmtMb(used);
+                },
+              },
               { title: "当前空闲", dataIndex: "free_mb", width: 120, render: (v: number) => fmtMb(v) },
             ]}
           />
@@ -526,7 +566,7 @@ export default function WorkerPage() {
           {w?.gpus?.available
             ? `GPU 运行库已就绪。匹配固定走 CPU。当前会用 GPU 的阶段：${(w.gpus.validated_stages || []).join("、") || "暂无，全部走 CPU"}。`
             : `${w?.gpus?.reason || "计算节点未上报显卡"}，任务全部使用 CPU，结果相同。`}
-          显卡信息每 60 秒刷新一次。
+          使用率和显存大约每 4 秒刷新。
         </Typography.Paragraph>
       </Card>
 

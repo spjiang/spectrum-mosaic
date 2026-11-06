@@ -10,6 +10,7 @@ const HIGHLIGHT = [
   "dsm_gsd",
   "cache_dir",
   "workers_at",
+  "max_features",
   "memory_gb",
   "cpus",
   "gpu",

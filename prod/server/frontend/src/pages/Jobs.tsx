@@ -45,8 +45,8 @@ const COL_W = {
   gpu: 90,
   created: 170,
   finished: 170,
-  elapsed: 110,
-  actions: 96,
+  elapsed: 180,
+  actions: 128,
 };
 
 export default function JobsPage() {
@@ -65,7 +65,7 @@ export default function JobsPage() {
   const [expanded, setExpanded] = useState<string[]>([]);
   const [detailId, setDetailId] = useState<string | undefined>();
   const nav = useNavigate();
-  const { widths, setWidth, total } = useColumnWidths("jobs-table-v7", COL_W);
+  const { widths, setWidth, total } = useColumnWidths("jobs-table-v8", COL_W);
 
   async function reload() {
     await refresh();
@@ -240,6 +240,7 @@ export default function JobsPage() {
           />
         </div>
         <Table
+          className="jobs-table"
           rowKey="id"
           dataSource={dataSource}
           pagination={{ pageSize: 12, showSizeChanger: false, showTotal: (n) => `共 ${n} 条` }}
@@ -315,6 +316,8 @@ export default function JobsPage() {
             }),
             col("actions", {
               title: "操作",
+              fixed: "right",
+              onCell: () => ({ className: "jobs-actions-cell" }),
               render: (_: unknown, r: any) => (
                 <JobRowMenu
                   job={r}

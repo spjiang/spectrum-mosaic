@@ -11,7 +11,7 @@ import multiprocessing
 import os
 import time
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from ms_mosaic.camera import Camera, Pose
 from ms_mosaic.catalog import scan_directory
 from ms_mosaic.features import extract_file, load_keypoints
 from ms_mosaic.matching import MIN_INLIERS, PairMatches, geometric_verify, match_pair
-from ms_mosaic.cpu import cpu_cap, job_cpus
+from ms_mosaic.cpu import cpu_cap, host_reserve, job_cpus
 from ms_mosaic.memory import resolve_memory_budget, visible_limit_bytes
 from ms_mosaic.pairs import select_pairs
 from ms_mosaic.at import calibration_stages
@@ -41,8 +41,8 @@ from ms_mosaic.tracks import Tracks, build_tracks
 
 _SHARED: dict = {}
 
-# 单进程 SIFT 实测约 300MB；留余量避免 12 进程把 Docker 虚拟机打满后被 oom_kill。
-_AT_WORKER_MB = 450
+# 单进程 SIFT 实测约 300MB，估计取 450，再留四分之一。按估满开进程会把内存撑死。
+_AT_WORKER_MB = (450 * 5 + 3) // 4
 _AT_RESERVE_MB = 1024
 
 
@@ -87,7 +87,7 @@ def cap_at_workers(
         cpu_limit = cpu_cap()
     else:
         cpus = _cpu_count()
-        cpu_limit = max(1, cpus - 1 if cpus > 1 else 1)
+        cpu_limit = max(1, cpus - host_reserve(cpus))
         if budget_bytes is None:
             cpu_limit = min(cpu_limit, 8)
     if budget_bytes is None:
@@ -187,7 +187,7 @@ def _extract_worker(job):
     return index
 
 
-def _match_init(cache_dir, cameras_by_band: dict):
+def _match_init(cache_dir, cameras_by_band: dict, device=None, max_features: int = 8192):
     from ms_mosaic.parallel import prefer_oom_kill
 
     _limit_blas_threads()
@@ -195,21 +195,25 @@ def _match_init(cache_dir, cameras_by_band: dict):
     prefer_oom_kill()
     _SHARED["cameras"] = cameras_by_band
     _SHARED["cache_dir"] = str(cache_dir)
+    _SHARED["feature_device"] = device
+    _SHARED["max_features"] = int(max_features)
 
 
 def _match_worker(job):
     i, j, path_i, path_j, band = job
     cam = _SHARED["cameras"][band]
     cache = Path(_SHARED["cache_dir"])
-    fi = extract_file(Path(path_i), cache_dir=cache)
-    fj = extract_file(Path(path_j), cache_dir=cache)
+    device = _SHARED.get("feature_device")
+    limit = int(_SHARED["max_features"])
+    fi = extract_file(Path(path_i), cache_dir=cache, max_features=limit, device=device)
+    fj = extract_file(Path(path_j), cache_dir=cache, max_features=limit, device=device)
     pm = match_pair(i, j, fi, fj, cam, cam)
     if pm is None:
         return None
     return (pm.i, pm.j, pm.indices, pm.model)
 
 
-def _band_pair_candidates(block: Block, ground_z: float) -> list:
+def _band_pair_candidates_sequential(block: Block, ground_z: float) -> list:
     """按波段组内选像对，对齐 LiMapper「关联影像序列」按组连通的做法。"""
     from ms_mosaic.pairs import PairCandidate
 
@@ -228,6 +232,37 @@ def _band_pair_candidates(block: Block, ground_z: float) -> list:
                 continue
             seen.add(key)
             out.append(cand)
+    out.sort(key=lambda p: -p.overlap)
+    return out
+
+
+def _band_pair_candidates(block: Block, ground_z: float) -> list:
+    """多波段时各组足迹重叠并行算，再合并排序。方程与顺序无关。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs: list[tuple] = []
+    for band in block.band_order():
+        band_ims = block.by_band(band)
+        if len(band_ims) < 2 or band not in block.cameras:
+            continue
+        cam = block.cameras[band]
+        cameras = {im.index: cam for im in band_ims}
+        poses = {im.index: block.poses[im.index] for im in band_ims}
+        jobs.append((cameras, poses))
+
+    if len(jobs) <= 1:
+        return _band_pair_candidates_sequential(block, ground_z)
+
+    seen: set[tuple[int, int]] = set()
+    out = []
+    with ThreadPoolExecutor(max_workers=min(len(jobs), 8)) as pool:
+        for part in pool.map(lambda item: select_pairs(item[0], item[1], ground_z), jobs):
+            for cand in part:
+                key = (cand.i, cand.j)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(cand)
     out.sort(key=lambda p: -p.overlap)
     return out
 
@@ -252,10 +287,11 @@ def run_sparse(
     calibrate_intrinsics: bool = True,
     ba_stage3: bool = True,
     log=lambda *_: None,
+    on_catalog_done=None,
 ) -> SparseResult:
     """全波段稀疏重建（特征/匹配/空三）。有几个波长就做几组，不限于 S810 的 8 组。输入目录只读。"""
     timings: dict[str, float] = {}
-    t0 = time.time()
+    t0 = time.perf_counter()
 
     shots = scan_directory(input_dir, max_index=max_index)
     keep, reasons = usable_shots(
@@ -272,6 +308,9 @@ def run_sparse(
     images = list(block.images)
     primary = block.primary()
     log(f"曝光 {len(shots)} → 可用 {len(keep)}（过滤 {reasons}），影像 {len(images)} 张（含各波段）")
+    timings["catalog"] = time.perf_counter() - t0
+    if on_catalog_done is not None:
+        on_catalog_done(timings["catalog"])
 
     poses = {im.index: block.poses[im.index] for im in images}
     candidates = _band_pair_candidates(block, block.ground_z)
@@ -316,9 +355,13 @@ def run_sparse(
         log(f"空三并行下调 {requested} → {workers}（按{why}封顶）")
     else:
         log(f"空三并行 {workers} 进程")
+    if int(max_features) < 1:
+        raise ValueError(f"每张影像特征点上限必须是正整数，当前 {max_features}")
+    max_features = int(max_features)
+    log(f"每张影像特征点上限 {max_features}")
     t = time.time()
     jobs = [(i, p, str(cache_dir), max_features) for i, p in zip(indices, paths)]
-    _extract_all(jobs, workers, log=log)
+    feature_device = _extract_features(jobs, workers, log)
     timings["features"] = time.time() - t
     log(f"特征提取 {len(jobs)} 张，{timings['features']:.1f}s")
 
@@ -327,7 +370,15 @@ def run_sparse(
     pair_jobs = [
         (c.i, c.j, path_by[c.i], path_by[c.j], band_by[c.i]) for c in candidates
     ]
-    matches = _match_all(pair_jobs, workers, cache_dir, dict(block.cameras), log=log)
+    matches = _match_all(
+        pair_jobs,
+        workers,
+        cache_dir,
+        dict(block.cameras),
+        feature_device=feature_device,
+        max_features=max_features,
+        log=log,
+    )
     timings["matching"] = time.time() - t
     log(f"匹配 {len(matches)}/{len(candidates)} 对成功，{timings['matching']:.1f}s")
 
@@ -343,7 +394,8 @@ def run_sparse(
 
     # 交会只要关键点。不加载描述子，峰值大约少 8 GB（1992×8192×128 float32）。
     keypoints = {
-        i: load_keypoints(Path(p), cache_dir=cache_dir) for i, p in zip(indices, paths)
+        i: load_keypoints(Path(p), cache_dir=cache_dir, max_features=max_features)
+        for i, p in zip(indices, paths)
     }
     # run_at 交会后会清空 keypoints，点数必须先记下。
     keypoint_counts = {i: int(len(kp)) for i, kp in keypoints.items()}
@@ -445,23 +497,105 @@ def _extract_all(jobs: list, workers: int, log=lambda *_: None) -> None:
         _map_progress(pool, _extract_worker, jobs, log=log, label="提取", unit="张")
 
 
+def _extract_gpu_worker(job):
+    index, path, cache_dir, max_features, device = job
+    extract_file(Path(path), cache_dir=Path(cache_dir), max_features=max_features, device=device)
+    return index
+
+
+def _extract_all_gpu(jobs: list, device: int, workers: int, log=lambda *_: None) -> None:
+    """读图用多线程，提点在一张卡上串行。多进程各建一个 CUDA 上下文会把 T4 挤满。"""
+    from ms_mosaic.features import extract_time_totals
+    from ms_mosaic.features import reset_extract_time
+
+    threads = max(1, min(int(workers), 16))
+    packed = [(*job, int(device)) for job in jobs]
+    total = len(packed)
+    if total == 0:
+        return
+    reset_extract_time()
+    log(f"特征提取：读图 {threads} 线程，提点在 GPU {device} 上串行")
+    done = 0
+    t0 = time.time()
+    last = t0
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        futures = [pool.submit(_extract_gpu_worker, job) for job in packed]
+        for fut in as_completed(futures):
+            fut.result()
+            done += 1
+            now = time.time()
+            if done == total or now - last >= 15.0:
+                read_s, gpu_s = extract_time_totals()
+                log(
+                    f"已提取 {done}/{total} 张，用时 {now - t0:.0f} 秒，"
+                    f"读图累计 {read_s:.0f} 秒，GPU {device} 提点累计（含送入显卡）{gpu_s:.0f} 秒"
+                )
+                last = now
+
+
+def _extract_features(jobs: list, workers: int, log=lambda *_: None) -> int | None:
+    """按任务 GPU 设置提特征。返回显卡号；走 CPU 时返回 None，供匹配沿用同一套缓存。"""
+    from ms_mosaic.gpu import GpuChoice
+    from ms_mosaic.gpu import describe as describe_gpu
+    from ms_mosaic.gpu import select as select_gpu
+    from ms_mosaic.sift_gpu import GpuSiftUnavailable
+    from ms_mosaic.sift_gpu import prepare as prepare_gpu_sift
+
+    choice = select_gpu("S2_features")
+    feature_device = None
+    if choice.device is not None:
+        try:
+            prepare_gpu_sift(choice.device)
+            feature_device = choice.device
+        except GpuSiftUnavailable as exc:
+            choice = GpuChoice(device=None, budget_bytes=0, name="", reason=str(exc))
+    log(describe_gpu("特征提取", choice))
+    if feature_device is None:
+        _extract_all(jobs, workers, log=log)
+        return None
+    _extract_all_gpu(jobs, feature_device, workers, log=log)
+    return feature_device
+
+
 def _match_all(
-    pair_jobs: list, workers: int, cache_dir: Path, cameras: dict, *, log=lambda *_: None
+    pair_jobs: list,
+    workers: int,
+    cache_dir: Path,
+    cameras: dict,
+    feature_device: int | None = None,
+    *,
+    max_features: int = 8192,
+    log=lambda *_: None,
 ) -> list[PairMatches]:
     # S810 实测 GPU 精确 kNN 比 32 进程 FLANN 慢约 4.6×，匹配只走 CPU。
     log(f"匹配：CPU FLANN，{workers} 进程")
-    return _match_all_cpu(pair_jobs, workers, cache_dir, cameras, log=log)
+    return _match_all_cpu(
+        pair_jobs,
+        workers,
+        cache_dir,
+        cameras,
+        feature_device,
+        max_features=max_features,
+        log=log,
+    )
 
 
 def _match_all_cpu(
-    pair_jobs: list, workers: int, cache_dir: Path, cameras: dict, log=lambda *_: None
+    pair_jobs: list,
+    workers: int,
+    cache_dir: Path,
+    cameras: dict,
+    feature_device: int | None = None,
+    *,
+    max_features: int = 8192,
+    log=lambda *_: None,
 ) -> list[PairMatches]:
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(
         max_workers=workers,
         mp_context=ctx,
         initializer=_match_init,
-        initargs=(str(cache_dir), cameras),
+        initargs=(str(cache_dir), cameras, feature_device, int(max_features)),
     ) as pool:
         raw = _map_progress(
             pool, _match_worker, pair_jobs, log=log, label="匹配", unit="对", chunksize=4
@@ -472,9 +606,10 @@ def _match_all_cpu(
 class _FeatLRU:
     """像对按影像复用描述子，避免每对都重新解 npz。"""
 
-    def __init__(self, cache_dir: Path, limit: int = 32):
+    def __init__(self, cache_dir: Path, limit: int = 32, max_features: int = 8192):
         self.cache_dir = Path(cache_dir)
         self.limit = int(limit)
+        self.max_features = int(max_features)
         self._data: OrderedDict[str, object] = OrderedDict()
 
     def get(self, path) -> object:
@@ -482,7 +617,7 @@ class _FeatLRU:
         if key in self._data:
             self._data.move_to_end(key)
             return self._data[key]
-        feats = extract_file(Path(path), cache_dir=self.cache_dir)
+        feats = extract_file(Path(path), cache_dir=self.cache_dir, max_features=self.max_features)
         self._data[key] = feats
         if len(self._data) > self.limit:
             self._data.popitem(last=False)
@@ -511,6 +646,7 @@ def _match_all_gpu(
     cameras: dict,
     choice,
     *,
+    max_features: int = 8192,
     log=lambda *_: None,
 ) -> list[PairMatches]:
     """单 CUDA 上下文精确 kNN；几何校验仍走 CPU MAGSAC。
@@ -526,7 +662,7 @@ def _match_all_gpu(
         f"匹配走 GPU 精确 kNN（COLMAP exhaustive），1 个 CUDA 上下文；"
         f"几何校验 {workers} 进程 CPU MAGSAC"
     )
-    cache = _FeatLRU(cache_dir)
+    cache = _FeatLRU(cache_dir, max_features=max_features)
     pending: list = []
     n_pairs = len(pair_jobs)
     t0 = time.time()

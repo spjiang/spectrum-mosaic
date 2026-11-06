@@ -21,7 +21,9 @@ GNSS 位置先验直接进法方程，以及畸变参数分阶段释放而不是
 from __future__ import annotations
 
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import queue
+import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -197,6 +199,20 @@ def _keypoints_of(features: Features | np.ndarray) -> np.ndarray:
     return features.keypoints if isinstance(features, Features) else np.asarray(features)
 
 
+def _dlt_null(a: np.ndarray, device: int | None) -> np.ndarray:
+    """DLT 系数矩阵的零空间行，与 ``np.linalg.svd(a)[2][:, -1]`` 相同。
+
+    device 不为空时用显卡上的同一分解。奇异向量整体变号不影响后面的 h[:3]/h[3]。
+    """
+    if device is None:
+        return np.linalg.svd(a)[2][:, -1]
+    import cupy as cp
+
+    with cp.cuda.Device(int(device)):
+        h = cp.linalg.svd(cp.asarray(a))[2][:, -1]
+        return cp.asnumpy(h)
+
+
 def triangulate_tracks(
     tracks: Tracks,
     cameras: dict[int, Camera],
@@ -204,6 +220,8 @@ def triangulate_tracks(
     features: dict[int, Features] | dict[int, np.ndarray],
     *,
     min_angle_deg: float = MIN_TRIANGULATION_ANGLE_DEG,
+    device: int | None = None,
+    log=None,
 ) -> tuple[np.ndarray, list[Observation]]:
     """全部轨迹批量交会。交会角过小的点几何上不可靠，直接丢弃。
 
@@ -249,8 +267,24 @@ def triangulate_tracks(
 
     pts = np.full((lengths.size, 3), np.nan)
     ok = np.zeros(lengths.size, bool)
-    # 按观测数分组批量 DLT（Hartley & Zisserman 2004, §12.2）；每组内与逐条 SVD 同一 LAPACK 例程
+    # 按观测数分组批量 DLT（Hartley & Zisserman 2004, §12.2）；每组内与逐条 SVD 同一分解
     chunk = 200_000
+    gpu_failed = False
+    todo = int(np.count_nonzero(n_obs >= MIN_OBS_PER_TRACK))
+    done_tracks = 0
+    reported = 0
+    report_every = max(1, todo // 10)
+
+    def _tri_progress(force: bool = False) -> None:
+        nonlocal reported
+        if log is None or todo <= 0 or done_tracks == reported:
+            return
+        if force or done_tracks == todo or done_tracks - reported >= report_every:
+            log(f"前方交会 {done_tracks}/{todo} 条轨迹")
+            reported = done_tracks
+
+    if log is not None and todo:
+        log(f"前方交会：{todo} 条轨迹，按观测数分批分解")
     for k in np.unique(n_obs[n_obs >= MIN_OBS_PER_TRACK]):
         tids_all = np.flatnonzero(n_obs == k)
         for c0 in range(0, tids_all.size, chunk):
@@ -263,7 +297,14 @@ def triangulate_tracks(
             a = np.empty((tids.size, 2 * k, 4))
             a[:, 0::2] = x * p[:, :, 2] - p[:, :, 0]
             a[:, 1::2] = y * p[:, :, 2] - p[:, :, 1]
-            h = np.linalg.svd(a)[2][:, -1]
+            use_gpu = device is not None and not gpu_failed
+            try:
+                h = _dlt_null(a, device if use_gpu else None)
+            except Exception as exc:
+                gpu_failed = True
+                if log is not None:
+                    log(f"前方交会：显卡分解失败（{exc}），改用 CPU")
+                h = _dlt_null(a, None)
             good = np.abs(h[:, 3]) >= 1e-12
             point = np.full((tids.size, 3), np.nan)
             point[good] = h[good, :3] / h[good, 3:4]
@@ -280,10 +321,19 @@ def triangulate_tracks(
             accept = np.all(np.isfinite(point), axis=1) & (angle >= min_angle_deg) & np.all(depth > 0, axis=1)
             pts[tids] = point
             ok[tids] = accept
+            done_tracks += int(tids.size)
+            _tri_progress()
+    _tri_progress(force=True)
 
     kept = np.flatnonzero(ok)
     observations: list[Observation] = []
+    n_kept = int(kept.size)
+    obs_every = max(1, n_kept // 8)
+    if log is not None and n_kept:
+        log(f"前方交会：保留 {n_kept} 个物方点，正在整理观测")
     for point_id, t in enumerate(kept):
+        if log is not None and point_id and point_id % obs_every == 0:
+            log(f"前方交会：整理观测 {point_id}/{n_kept}")
         b = int(starts[t])
         for j in range(b, b + int(n_obs[t])):
             observations.append(Observation(int(img[j]), point_id, uv[j]))
@@ -338,6 +388,73 @@ def _distortion_terms(xn: np.ndarray, yn: np.ndarray, intr: np.ndarray):
     }
 
 
+_ba_gpu_time = {"copy_to": 0.0, "calc": 0.0, "copy_back": 0.0}
+
+
+def _ba_gpu_add(copy_to: float = 0.0, calc: float = 0.0, copy_back: float = 0.0) -> None:
+    _ba_gpu_time["copy_to"] += copy_to
+    _ba_gpu_time["calc"] += calc
+    _ba_gpu_time["copy_back"] += copy_back
+
+
+def take_ba_gpu_time() -> dict[str, float]:
+    snap = dict(_ba_gpu_time)
+    for key in _ba_gpu_time:
+        _ba_gpu_time[key] = 0.0
+    return snap
+
+
+def format_ba_gpu_time(device: int, snap: dict[str, float]) -> str:
+    return (
+        f"GPU {int(device)} 复制到显卡 {snap['copy_to']:.1f} 秒，"
+        f"显卡计算 {snap['calc']:.1f} 秒，复制回内存 {snap['copy_back']:.1f} 秒"
+    )
+
+
+def _project_batch_gpu(
+    rotmats: np.ndarray,
+    centers: np.ndarray,
+    intr_full: np.ndarray,
+    points: np.ndarray,
+    obs_image: np.ndarray,
+    obs_camera: np.ndarray,
+    obs_point: np.ndarray,
+    device: int,
+) -> tuple[np.ndarray, dict, np.ndarray]:
+    """与 _project_batch 同一公式。结果拷回 CPU，后面的雅可比求导不用改。"""
+    import cupy as cp
+
+    with cp.cuda.Device(int(device)):
+        started = time.perf_counter()
+        oi = cp.asarray(obs_image)
+        op = cp.asarray(obs_point)
+        oc = cp.asarray(obs_camera)
+        pts = cp.asarray(points)
+        ctr = cp.asarray(centers)
+        rot = cp.asarray(rotmats)
+        intr = cp.asarray(intr_full)
+        cp.cuda.Stream.null.synchronize()
+        copy_to = time.perf_counter() - started
+        started = time.perf_counter()
+        delta = pts[op] - ctr[oi]
+        pc = cp.einsum("nij,nj->ni", rot[oi], delta)
+        z = pc[:, 2]
+        z = cp.where(cp.abs(z) < 1e-9, 1e-9, z)
+        xn = pc[:, 0] / z
+        yn = pc[:, 1] / z
+        terms = _distortion_terms(xn, yn, intr[oc])
+        terms["xn"], terms["yn"], terms["z"] = xn, yn, z
+        cp.cuda.Stream.null.synchronize()
+        calc = time.perf_counter() - started
+        started = time.perf_counter()
+        out = {key: cp.asnumpy(val) for key, val in terms.items()}
+        pc_np = cp.asnumpy(pc)
+        cp.cuda.Stream.null.synchronize()
+        copy_back = time.perf_counter() - started
+    _ba_gpu_add(copy_to, calc, copy_back)
+    return np.stack([out["u"], out["v"]], axis=1), out, pc_np
+
+
 def _project_batch(
     rotmats: np.ndarray,
     centers: np.ndarray,
@@ -346,8 +463,16 @@ def _project_batch(
     obs_image: np.ndarray,
     obs_camera: np.ndarray,
     obs_point: np.ndarray,
+    device: int | None = None,
 ) -> tuple[np.ndarray, dict, np.ndarray]:
     """向量化投影。intr_full 为 (n_cam, 10)，列序同 INTRINSIC_NAMES。"""
+    if device is not None and not getattr(_project_batch, "gpu_failed", False):
+        try:
+            return _project_batch_gpu(
+                rotmats, centers, intr_full, points, obs_image, obs_camera, obs_point, device
+            )
+        except Exception:
+            _project_batch.gpu_failed = True
     delta = points[obs_point] - centers[obs_image]
     pc = np.einsum("nij,nj->ni", rotmats[obs_image], delta)
     z = pc[:, 2]
@@ -431,6 +556,20 @@ def _intrinsic_sigma(camera: Camera) -> np.ndarray:
     )
 
 
+def _stack_observations(observations: list[Observation]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """把观测列表压成三列数组，供分波段 spawn 时切片，避免百万条 Observation 复制。"""
+    n = len(observations)
+    if n == 0:
+        z64 = np.zeros(0, np.int64)
+        return z64, z64.copy(), np.zeros((0, 2), np.float64)
+    obs_image_ids = np.fromiter((o.image for o in observations), np.int64, n)
+    obs_point_ids = np.fromiter((o.point for o in observations), np.int64, n)
+    obs_uv = np.empty((n, 2), np.float64)
+    for i, o in enumerate(observations):
+        obs_uv[i] = o.uv
+    return obs_image_ids, obs_point_ids, obs_uv
+
+
 class BAProblem:
     """把一次平差整理成 least_squares 需要的 (x0, residuals, jacobian)。
 
@@ -446,7 +585,7 @@ class BAProblem:
         cameras: dict[str, Camera],
         poses: dict[int, Pose],
         points: np.ndarray,
-        observations: list[Observation],
+        observations: list[Observation] | None,
         image_camera: dict[int, str],
         gps: dict[int, np.ndarray],
         attitude_rotation: dict[int, np.ndarray],
@@ -455,6 +594,9 @@ class BAProblem:
         sigma_attitude_rad: float = np.radians(3.0),
         free_names: tuple[str, ...] = CALIBRATION_STAGES[-1],
         intrinsic_prior: dict[str, Camera] | None = None,
+        obs_image_ids: np.ndarray | None = None,
+        obs_point_ids: np.ndarray | None = None,
+        obs_uv: np.ndarray | None = None,
     ) -> None:
         self.image_ids = sorted(poses)
         self.img_pos = {i: k for k, i in enumerate(self.image_ids)}
@@ -465,12 +607,29 @@ class BAProblem:
         self.free_idx = [INTRINSIC_NAMES.index(n) for n in free_names]
         self.sigma_attitude_rad = sigma_attitude_rad
 
-        self.obs_image = np.array([self.img_pos[o.image] for o in observations], int)
-        self.obs_camera = np.array(
-            [self.cam_pos[image_camera[o.image]] for o in observations], int
-        )
-        self.obs_point = np.array([o.point for o in observations], int)
-        self.obs_uv = np.array([o.uv for o in observations], float)
+        if obs_image_ids is not None:
+            if observations:
+                raise ValueError("observations 与 obs_image_ids 不能同时传入")
+            n = int(obs_image_ids.size)
+            self.obs_image = np.fromiter(
+                (self.img_pos[int(i)] for i in obs_image_ids), np.int32, n
+            )
+            self.obs_camera = np.fromiter(
+                (self.cam_pos[image_camera[int(i)]] for i in obs_image_ids), np.int32, n
+            )
+            self.obs_point = np.asarray(obs_point_ids, np.int64)
+            self.obs_uv = np.asarray(obs_uv, np.float64)
+            self.n_obs = n
+        elif observations is not None:
+            self.obs_image = np.array([self.img_pos[o.image] for o in observations], int)
+            self.obs_camera = np.array(
+                [self.cam_pos[image_camera[o.image]] for o in observations], int
+            )
+            self.obs_point = np.array([o.point for o in observations], int)
+            self.obs_uv = np.array([o.uv for o in observations], float)
+            self.n_obs = len(observations)
+        else:
+            raise ValueError("必须提供 observations 或 obs_image_ids")
 
         # 原点平移到测区中心。UTM 的 67 万 / 262 万量级会毁掉法方程条件数。
         self.origin = np.mean([gps[i] for i in self.image_ids], axis=0)
@@ -500,7 +659,6 @@ class BAProblem:
         self.n_cam = len(self.camera_keys)
         self.n_free = len(free_names)
         self.n_pts = int(points.shape[0])
-        self.n_obs = len(observations)
         self.off_center = self.n_img * 3
         self.off_intr = self.n_img * 6
         self.off_point = self.off_intr + self.n_cam * self.n_free
@@ -618,7 +776,7 @@ class BAProblem:
         return np.linalg.norm(uv - self.obs_uv, axis=1)
 
 
-    def linearize(self, x: np.ndarray, obs_idx: np.ndarray | None = None):
+    def linearize(self, x: np.ndarray, obs_idx: np.ndarray | None = None, device: int | None = None):
         """把问题在 x 处线性化，返回逐观测的雅可比块与残差。
 
         A: (n, 2, 6) 对位姿 [δ | C]
@@ -652,7 +810,7 @@ class BAProblem:
                 intr_full,
             )
         uv, terms, pc = _project_batch(
-            rotmats, centers, intr_full, pts, obs_image, obs_camera, obs_point
+            rotmats, centers, intr_full, pts, obs_image, obs_camera, obs_point, device=device
         )
         z = terms["z"]
         m = np.zeros((n_obs, 2, 3))
@@ -832,6 +990,7 @@ def _assemble_band(
     huber_px: float,
     *,
     chunk: int = _BA_CHUNK_OBS,
+    device: int | None = None,
 ):
     """组出一个波段的法方程。与整块组装时该波段对应的子块相同。
 
@@ -860,7 +1019,7 @@ def _assemble_band(
     step = max(1, int(chunk))
     for start in range(0, n_obs, step):
         sl = slice(start, start + step)
-        a, d, b, r, _, _, _ = problem.linearize(x, band.obs_idx[sl])
+        a, d, b, r, _, _, _ = problem.linearize(x, band.obs_idx[sl], device=device)
         weight, _ = _huber_weights(r, huber_px)
         sw = np.sqrt(weight)
         jc = np.concatenate([a, d], axis=2) * sw[:, None, None]
@@ -943,12 +1102,154 @@ def _pair_schur(z_pose: np.ndarray, w_pose: np.ndarray, band: _SchurBand, *, chu
     return acc + acc.transpose(1, 0, 3, 2)
 
 
-def _damp_solve_band(normal: _BandNormal, lam: float, *, chunk: int = _BA_CHUNK_OBS):
+def _damp_solve_band_gpu(normal: _BandNormal, lam: float, device: int, *, chunk: int = _BA_CHUNK_OBS):
+    """和 _damp_solve_band 同一公式。矩阵乘、3×3 求逆和降阶方程放到显卡，分组求和仍在 CPU。
+
+    求和次序与 CPU 相同。显卡只替换乘法和分解，一块结果与 CPU 差在 1e-14 量级。
+    """
+    import cupy as cp
+
+    band = normal.band
+    n_pts = band.n_pts
+    n_img = band.n_img
+    n_obs = int(band.obs_idx.size)
+    n_free = normal.w_intr.shape[1]
+    n_pose = n_img * 6
+    u_d = normal.u + np.diag(lam * np.maximum(np.diag(normal.u), 1e-9))
+    with cp.cuda.Device(device):
+        if n_pts == 0:
+            started = time.perf_counter()
+            u_g = cp.asarray(u_d)
+            g_g = cp.asarray(normal.g_c)
+            cp.cuda.Stream.null.synchronize()
+            copy_to = time.perf_counter() - started
+            started = time.perf_counter()
+            dc_g = cp.linalg.solve(u_g, g_g)
+            cp.cuda.Stream.null.synchronize()
+            calc = time.perf_counter() - started
+            started = time.perf_counter()
+            dc = cp.asnumpy(dc_g)
+            cp.cuda.Stream.null.synchronize()
+            _ba_gpu_add(copy_to, calc, time.perf_counter() - started)
+            return dc, np.zeros((0, 3))
+        v = normal.v
+        v_d = v + lam * np.maximum(v.diagonal(axis1=1, axis2=2), 1e-9)[:, :, None] * np.eye(3)
+        started = time.perf_counter()
+        v_g = cp.asarray(v_d)
+        cp.cuda.Stream.null.synchronize()
+        copy_to = time.perf_counter() - started
+        try:
+            started = time.perf_counter()
+            v_inv_g = cp.linalg.inv(v_g)
+            cp.cuda.Stream.null.synchronize()
+            _ba_gpu_add(copy_to, time.perf_counter() - started, 0.0)
+        except cp.linalg.LinAlgError:
+            _ba_gpu_add(copy_to, 0.0, 0.0)
+            return None
+        started = time.perf_counter()
+        w_pose_g = cp.asarray(normal.w_pose)
+        w_intr_g = cp.asarray(normal.w_intr)
+        g_p = cp.asarray(normal.g_p.reshape(n_pts, 3))
+        cp.cuda.Stream.null.synchronize()
+        copy_to = time.perf_counter() - started
+        started = time.perf_counter()
+        q_g = cp.einsum("nij,nj->ni", v_inv_g, g_p)
+        cp.cuda.Stream.null.synchronize()
+        _ba_gpu_add(copy_to, time.perf_counter() - started, 0.0)
+        z_pose = np.empty_like(normal.w_pose)
+        same_obs = np.zeros((n_img, 6, 6))
+        pose_intr = np.zeros((n_img, 6, n_free))
+        yg_pose = np.zeros((n_img, 6))
+        step = max(1, int(chunk))
+        for start in range(0, n_obs, step):
+            sl = slice(start, start + step)
+            started = time.perf_counter()
+            pt_g = cp.asarray(band.obs_pt[sl])
+            cp.cuda.Stream.null.synchronize()
+            copy_to = time.perf_counter() - started
+            started = time.perf_counter()
+            wp = w_pose_g[sl]
+            zp = cp.matmul(wp, v_inv_g[pt_g])
+            same = cp.matmul(zp, cp.transpose(wp, (0, 2, 1)))
+            cross = cp.matmul(zp, cp.transpose(w_intr_g[pt_g], (0, 2, 1)))
+            yg = cp.einsum("nij,nj->ni", wp, q_g[pt_g])
+            cp.cuda.Stream.null.synchronize()
+            calc = time.perf_counter() - started
+            started = time.perf_counter()
+            z_pose[sl] = cp.asnumpy(zp)
+            same_np = cp.asnumpy(same)
+            cross_np = cp.asnumpy(cross)
+            yg_np = cp.asnumpy(yg)
+            cp.cuda.Stream.null.synchronize()
+            _ba_gpu_add(copy_to, calc, time.perf_counter() - started)
+            same_obs += _group_sum(band.obs_img[sl], same_np, n_img)
+            pose_intr += _group_sum(band.obs_img[sl], cross_np, n_img)
+            yg_pose += _group_sum(band.obs_img[sl], yg_np, n_img)
+            del zp
+        started = time.perf_counter()
+        z_intr_g = cp.matmul(w_intr_g, v_inv_g)
+        cp.cuda.Stream.null.synchronize()
+        calc = time.perf_counter() - started
+        started = time.perf_counter()
+        z_intr = cp.asnumpy(z_intr_g)
+        q = cp.asnumpy(q_g)
+        v_inv = cp.asnumpy(v_inv_g)
+        cp.cuda.Stream.null.synchronize()
+        _ba_gpu_add(0.0, calc, time.perf_counter() - started)
+
+    pose_pose = _pair_schur(z_pose, normal.w_pose, band, chunk=_BA_PAIR_CHUNK)
+    del z_pose
+    local = np.arange(n_img)
+    pose_pose[local, local] += same_obs
+    s = u_d
+    s[:n_pose, :n_pose] -= pose_pose.transpose(0, 2, 1, 3).reshape(n_pose, n_pose)
+    del pose_pose
+    cross = pose_intr.reshape(n_pose, n_free)
+    s[:n_pose, n_pose:] -= cross
+    s[n_pose:, :n_pose] -= cross.T
+    s[n_pose:, n_pose:] -= np.einsum("nik,njk->ij", z_intr, normal.w_intr)
+    rhs = normal.g_c - np.concatenate([yg_pose.ravel(), np.einsum("nij,nj->i", normal.w_intr, q)])
+    with cp.cuda.Device(device):
+        try:
+            started = time.perf_counter()
+            s_g = cp.asarray(s)
+            rhs_g = cp.asarray(rhs)
+            cp.cuda.Stream.null.synchronize()
+            copy_to = time.perf_counter() - started
+            started = time.perf_counter()
+            dc_g = cp.linalg.solve(s_g, rhs_g)
+            cp.cuda.Stream.null.synchronize()
+            calc = time.perf_counter() - started
+            started = time.perf_counter()
+            dc = cp.asnumpy(dc_g)
+            cp.cuda.Stream.null.synchronize()
+            _ba_gpu_add(copy_to, calc, time.perf_counter() - started)
+        except cp.linalg.LinAlgError:
+            return None
+
+    dc_pose = dc[:n_pose].reshape(n_img, 6)
+    wt_dc = np.einsum("nij,i->nj", normal.w_intr, dc[n_pose:])
+    w_pose = normal.w_pose
+    for start in range(0, n_obs, step):
+        sl = slice(start, start + step)
+        contrib = np.einsum("nij,ni->nj", w_pose[sl], dc_pose[band.obs_img[sl]])
+        wt_dc += _group_sum(band.obs_pt[sl], contrib, n_pts)
+    g_p_np = normal.g_p.reshape(n_pts, 3)
+    dp = np.einsum("nij,nj->ni", v_inv, g_p_np - wt_dc)
+    return dc, dp
+
+
+def _damp_solve_band(normal: _BandNormal, lam: float, *, chunk: int = _BA_CHUNK_OBS, device: int | None = None):
     """加阻尼并做这个波段的 Schur 消元。奇异时返回 None，让外层加大 λ。
 
     S = U − W V⁻¹ Wᵀ 按块直接算：位姿-位姿块来自同一观测（对角）与同点观测对；
     位姿-内参、内参-内参来自逐点内参块。数学上与稀疏阵相乘相同，只是求和次序不同。
     """
+    if device is not None and not getattr(_damp_solve_band, "gpu_failed", False):
+        try:
+            return _damp_solve_band_gpu(normal, lam, int(device), chunk=chunk)
+        except Exception:
+            _damp_solve_band.gpu_failed = True
     band = normal.band
     n_pts = band.n_pts
     n_img = band.n_img
@@ -1043,6 +1344,8 @@ def solve_lm(
     verbose: int = 0,
     band_parallel: bool = True,
     log=None,
+    device: int | None = None,
+    label: str = "",
 ) -> np.ndarray:
     """Schur 补 Levenberg-Marquardt。
 
@@ -1067,6 +1370,20 @@ def solve_lm(
     """
     x = problem.x0.copy()
     lam = initial_lambda
+    pace = f"平差 {label} " if label else "平差 "
+
+    def _pace(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    def _pace_gpu(tag: str) -> None:
+        if device is None:
+            return
+        snap = take_ba_gpu_time()
+        if snap["copy_to"] + snap["calc"] + snap["copy_back"] <= 0:
+            return
+        _pace(f"{pace}{tag}：{format_ba_gpu_time(int(device), snap)}")
+
     bands = _separable_bands(problem) if band_parallel else None
     workers = 1
     if bands:
@@ -1094,6 +1411,7 @@ def solve_lm(
             problem.obs_image,
             problem.obs_camera,
             problem.obs_point,
+            device=device,
         )
         _, robust = _huber_weights(uv - problem.obs_uv, huber_px)
         gps_res, att_res, intr_res = problem.prior_residuals(centers, rotmats, intr_full)
@@ -1119,15 +1437,20 @@ def solve_lm(
             if cached["x"] is not x:
                 cached["assembled"] = None
                 if pool is None:
-                    cached["assembled"] = [_assemble_band(problem, b, x, huber_px) for b in bands]
+                    cached["assembled"] = [
+                        _assemble_band(problem, b, x, huber_px, device=device) for b in bands
+                    ]
                 else:
                     cached["assembled"] = list(
                         pool.map(lambda b: _assemble_band(problem, b, x, huber_px), bands)
                     )
                 cached["x"] = x
             items = cached["assembled"]
+            # 多波段挤在同一进程的线程里时不进显卡，避免几个线程抢一个 CUDA 上下文。
+            # 正式路径是一个进程一个波段，device 在这里生效。
+            dev = device if pool is None else None
             if pool is None:
-                solved = [_damp_solve_band(item, lam_now) for item in items]
+                solved = [_damp_solve_band(item, lam_now, device=dev) for item in items]
             else:
                 solved = list(pool.map(lambda item: _damp_solve_band(item, lam_now), items))
             if any(part is None for part in solved):
@@ -1136,8 +1459,10 @@ def solve_lm(
         for i in range(0, len(bands), step):
             chunk = bands[i : i + step]
             if pool is None:
-                assembled = [_assemble_band(problem, band, x, huber_px) for band in chunk]
-                solved = [_damp_solve_band(item, lam_now) for item in assembled]
+                assembled = [
+                    _assemble_band(problem, band, x, huber_px, device=device) for band in chunk
+                ]
+                solved = [_damp_solve_band(item, lam_now, device=device) for item in assembled]
             else:
                 assembled = list(
                     pool.map(lambda band: _assemble_band(problem, band, x, huber_px), chunk)
@@ -1188,24 +1513,32 @@ def solve_lm(
 
     try:
         cost = total_cost(x)
+        _pace_gpu("初始代价")
         for iteration in range(max_iterations):
+            _pace(f"{pace}第 {iteration + 1}/{max_iterations} 轮")
             if bands is not None:
                 while True:
                     solved = solve_bands(lam)
                     if solved is None:
                         lam *= 10.0
+                        _pace_gpu(f"第 {iteration + 1} 轮")
                         if lam > 1e12:
+                            _pace(f"{pace}停止（{iteration + 1} 轮）")
                             return x
+                        _pace(f"{pace}第 {iteration + 1} 轮步长被拒，继续")
                         continue
                     action = consider(*solved, iteration)
+                    _pace_gpu(f"第 {iteration + 1} 轮")
                     if action == "retry":
+                        _pace(f"{pace}第 {iteration + 1} 轮步长被拒，继续")
                         continue
                     if action == "done":
+                        _pace(f"{pace}已收敛（{iteration + 1} 轮）")
                         return x
                     break
                 continue
 
-            a, d, b, r, centers, rotmats, intr_full = problem.linearize(x)
+            a, d, b, r, centers, rotmats, intr_full = problem.linearize(x, device=device)
             weight, _ = _huber_weights(r, huber_px)
             sw = np.sqrt(weight)[:, None, None]
             a = a * sw
@@ -1281,16 +1614,22 @@ def solve_lm(
                 except np.linalg.LinAlgError:
                     lam *= 10.0
                     if lam > 1e12:
+                        _pace(f"{pace}停止（{iteration + 1} 轮）")
                         return x
+                    _pace(f"{pace}第 {iteration + 1} 轮步长被拒，继续")
                     continue
 
                 dp = np.einsum("nij,nj->ni", v_inv, (g_p - (w.T @ dc)).reshape(n_pts, 3))
                 action = consider(dc, dp, iteration)
+                _pace_gpu(f"第 {iteration + 1} 轮")
                 if action == "retry":
+                    _pace(f"{pace}第 {iteration + 1} 轮步长被拒，继续")
                     continue
                 if action == "done":
+                    _pace(f"{pace}已收敛（{iteration + 1} 轮）")
                     return x
                 break
+        _pace(f"{pace}达到 {max_iterations} 轮上限")
         return x
     finally:
         if pool is not None:
@@ -1344,6 +1683,7 @@ def bundle_adjust(
     max_iterations: int = 40,
     verbose: int = 0,
     log=None,
+    gpu: bool = False,
 ) -> tuple[dict[str, Camera], dict[int, Pose], np.ndarray, np.ndarray]:
     """一次平差。返回 (相机, 位姿, 物方点, 每观测重投影残差像素)。
 
@@ -1352,7 +1692,16 @@ def bundle_adjust(
     并行。共用一个 λ 时任一波段步长被拒就要 8 个波段一起重组装重试，阶段 2
     实测因此从 23 min 拖到 2 h 12 min。
     """
-    groups = _camera_groups(points, observations, image_camera, poses)
+    from ms_mosaic.gpu import assign_devices, describe
+
+    obs_img, obs_pt, obs_uv = _stack_observations(observations)
+    groups = _camera_groups(
+        points, image_camera, poses, obs_image_ids=obs_img, obs_point_ids=obs_pt
+    )
+    n_slot = len(groups) if groups is not None and len(groups) > 1 else 1
+    choice, devices = assign_devices("S2_ba", n_slot) if gpu else (None, [None] * n_slot)
+    if gpu and log is not None and choice is not None:
+        log(describe("平差", choice))
     if groups is not None and len(groups) > 1:
         return _bundle_adjust_by_camera(
             groups,
@@ -1363,6 +1712,9 @@ def bundle_adjust(
             image_camera,
             gps,
             attitude_rotation,
+            obs_image_ids=obs_img,
+            obs_point_ids=obs_pt,
+            obs_uv=obs_uv,
             sigma_xyz=sigma_xyz,
             sigma_attitude_rad=sigma_attitude_rad,
             free_names=free_names,
@@ -1370,6 +1722,7 @@ def bundle_adjust(
             max_iterations=max_iterations,
             verbose=verbose,
             log=log,
+            devices=devices,
         )
     problem = BAProblem(
         cameras,
@@ -1384,7 +1737,13 @@ def bundle_adjust(
         free_names=free_names,
         intrinsic_prior=intrinsic_prior,
     )
-    x = solve_lm(problem, max_iterations=max_iterations, verbose=verbose, log=log)
+    x = solve_lm(
+        problem,
+        max_iterations=max_iterations,
+        verbose=verbose,
+        log=log,
+        device=devices[0] if devices else None,
+    )
     out_cameras, out_poses, out_points = problem.unpack(x)
     return out_cameras, out_poses, out_points, problem.reprojection_px(x)
 
@@ -1399,20 +1758,33 @@ class _CameraGroup:
 
 def _camera_groups(
     points: np.ndarray,
-    observations: list[Observation],
     image_camera: dict[int, str],
     poses: dict[int, Pose],
+    observations: list[Observation] | None = None,
+    *,
+    obs_image_ids: np.ndarray | None = None,
+    obs_point_ids: np.ndarray | None = None,
 ) -> list[_CameraGroup] | None:
     """按相机把观测分组；有物方点跨相机时返回 None（方程耦合，不能拆）。"""
-    if not observations:
+    if obs_image_ids is not None and obs_point_ids is not None:
+        n = int(obs_image_ids.size)
+    elif observations:
+        obs_image_ids, obs_point_ids, _ = _stack_observations(observations)
+        n = int(obs_image_ids.size)
+    else:
+        return None
+    if n == 0:
         return None
     keys = sorted({image_camera[i] for i in poses})
     if len(keys) <= 1:
         return None
     key_pos = {k: n for n, k in enumerate(keys)}
-    n = len(observations)
-    obs_cam = np.fromiter((key_pos[image_camera[o.image]] for o in observations), np.int32, n)
-    obs_pt = np.fromiter((o.point for o in observations), np.int64, n)
+    max_img = max(int(obs_image_ids.max()), max(poses))
+    lut = np.full(max_img + 1, len(keys), np.int32)
+    for i in poses:
+        lut[i] = key_pos[image_camera[i]]
+    obs_cam = lut[obs_image_ids]
+    obs_pt = np.asarray(obs_point_ids, np.int64)
     n_pts = int(points.shape[0])
     lo = np.full(n_pts, len(keys), np.int32)
     hi = np.full(n_pts, -1, np.int32)
@@ -1448,28 +1820,50 @@ def _ba_process_init() -> None:
 def _solve_camera_group(job: dict):
     """一个波段的独立 LM。顶层函数才能被 spawn 进程导入。"""
     g: _CameraGroup = job["group"]
-    local_of = np.full(int(job["n_global_pts"]), -1, np.int64)
-    local_of[g.point_ids] = np.arange(g.point_ids.size)
-    sub_obs = [
-        Observation(o.image, int(local_of[o.point]), o.uv) for o in job["observations"]
-    ]
-    problem = BAProblem(
-        {g.key: job["camera"]},
-        job["poses"],
-        job["points"],
-        sub_obs,
-        {i: g.key for i in g.image_ids},
-        job["gps"],
-        job["att"],
-        sigma_xyz=job["sigma_xyz"],
-        sigma_attitude_rad=job["sigma_attitude_rad"],
-        free_names=job["free_names"],
-        intrinsic_prior=job["prior"],
-    )
-    del sub_obs
-    x = solve_lm(problem, max_iterations=job["max_iterations"], verbose=job["verbose"])
-    cams, sub_out, pts = problem.unpack(x)
-    return g, cams, sub_out, pts, problem.reprojection_px(x)
+    progress = job.get("progress")
+    direct = job.get("log")
+
+    def _note(msg: str) -> None:
+        if progress is not None:
+            progress.put(msg)
+        elif direct is not None:
+            direct(msg)
+
+    try:
+        local_of = np.full(int(job["n_global_pts"]), -1, np.int64)
+        local_of[g.point_ids] = np.arange(g.point_ids.size)
+        sub_pt = local_of[job["obs_point_ids"]]
+        problem = BAProblem(
+            {g.key: job["camera"]},
+            job["poses"],
+            job["points"],
+            None,
+            {i: g.key for i in g.image_ids},
+            job["gps"],
+            job["att"],
+            sigma_xyz=job["sigma_xyz"],
+            sigma_attitude_rad=job["sigma_attitude_rad"],
+            free_names=job["free_names"],
+            intrinsic_prior=job["prior"],
+            obs_image_ids=job["obs_image_ids"],
+            obs_point_ids=sub_pt,
+            obs_uv=job["obs_uv"],
+        )
+        x = solve_lm(
+            problem,
+            max_iterations=job["max_iterations"],
+            verbose=job["verbose"],
+            device=job.get("device"),
+            log=_note,
+            label=str(g.key),
+        )
+        cams, sub_out, pts = problem.unpack(x)
+        return g, cams, sub_out, pts, problem.reprojection_px(x)
+    finally:
+        # 普通队列要等发送线程刷完。Manager 队列没有这一步。
+        if progress is not None and hasattr(progress, "join_thread"):
+            progress.close()
+            progress.join_thread()
 
 
 def _bundle_adjust_by_camera(
@@ -1482,6 +1876,9 @@ def _bundle_adjust_by_camera(
     gps: dict[int, np.ndarray],
     attitude_rotation: dict[int, np.ndarray],
     *,
+    obs_image_ids: np.ndarray,
+    obs_point_ids: np.ndarray,
+    obs_uv: np.ndarray,
     sigma_xyz,
     sigma_attitude_rad,
     free_names,
@@ -1489,6 +1886,7 @@ def _bundle_adjust_by_camera(
     max_iterations,
     verbose,
     log,
+    devices: list[int | None] | None = None,
 ):
     n_free = len(free_names)
     per_worker = max(
@@ -1504,7 +1902,10 @@ def _bundle_adjust_by_camera(
 
     n_global = int(points.shape[0])
     jobs = []
-    for g in groups:
+    for n, g in enumerate(groups, start=1):
+        if log is not None:
+            log(f"平差：{g.key} 观测 {int(g.obs_idx.size)} 条，正在拆出（{n}/{len(groups)}）")
+        idx = g.obs_idx
         jobs.append(
             {
                 "group": g,
@@ -1512,7 +1913,9 @@ def _bundle_adjust_by_camera(
                 "camera": cameras[g.key],
                 "poses": {i: poses[i] for i in g.image_ids},
                 "points": points[g.point_ids],
-                "observations": [observations[int(k)] for k in g.obs_idx],
+                "obs_image_ids": obs_image_ids[idx],
+                "obs_point_ids": obs_point_ids[idx],
+                "obs_uv": obs_uv[idx],
                 "gps": {i: gps[i] for i in g.image_ids},
                 "att": {i: attitude_rotation[i] for i in g.image_ids},
                 "sigma_xyz": sigma_xyz,
@@ -1521,16 +1924,52 @@ def _bundle_adjust_by_camera(
                 "prior": {g.key: (intrinsic_prior or cameras)[g.key]},
                 "max_iterations": max_iterations,
                 "verbose": verbose,
+                "device": None if devices is None else devices[len(jobs)],
             }
         )
 
     if workers > 1:
+        if log is not None:
+            log(f"平差：正在启动 {workers} 个进程")
         ctx = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(
-            max_workers=workers, mp_context=ctx, initializer=_ba_process_init
-        ) as pool:
-            results = list(pool.map(_solve_camera_group, jobs))
+        # 进程池用 spawn，普通 Queue 不能再被 pickle 进任务。Manager 队列可以。
+        manager = ctx.Manager() if log is not None else None
+        progress = manager.Queue() if manager is not None else None
+        if progress is not None:
+            for job in jobs:
+                job["progress"] = progress
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers, mp_context=ctx, initializer=_ba_process_init
+            ) as pool:
+                futures = [pool.submit(_solve_camera_group, job) for job in jobs]
+                pending = set(futures)
+                quiet_since = time.monotonic()
+                while pending:
+                    done, pending = wait(pending, timeout=15, return_when=FIRST_COMPLETED)
+                    noted = 0
+                    if progress is not None:
+                        while True:
+                            try:
+                                msg = progress.get_nowait()
+                            except queue.Empty:
+                                break
+                            noted += 1
+                            if log is not None:
+                                log(msg)
+                    if done or noted:
+                        quiet_since = time.monotonic()
+                    elif log is not None and time.monotonic() - quiet_since >= 15:
+                        log(f"平差仍在计算，{len(pending)} 个波段未结束")
+                        quiet_since = time.monotonic()
+                results = [fut.result() for fut in futures]
+        finally:
+            if manager is not None:
+                manager.shutdown()
     else:
+        if log is not None:
+            for job in jobs:
+                job["log"] = log
         results = [_solve_camera_group(job) for job in jobs]
 
     out_cameras = dict(cameras)
@@ -1554,22 +1993,46 @@ def drop_outliers(
     min_obs: int = MIN_OBS_PER_TRACK,
 ) -> tuple[np.ndarray, list[Observation], int]:
     """剔除残差超限的观测，再丢掉观测数不足的物方点，并重新编号。"""
+    n = len(observations)
+    if n == 0:
+        return np.array(points, copy=True).reshape(-1, 3), [], 0
+    if residual_px.size != n:
+        raise ValueError("residual_px 长度必须与 observations 一致")
+
+    dropped = int(np.count_nonzero(residual_px > threshold_px))
     keep = residual_px <= threshold_px
-    survivors = [o for o, k in zip(observations, keep) if k]
+    if not np.any(keep):
+        return np.zeros((0, 3), dtype=points.dtype), [], dropped
 
-    counts: dict[int, int] = {}
-    for o in survivors:
-        counts[o.point] = counts.get(o.point, 0) + 1
-    good_points = {p for p, c in counts.items() if c >= min_obs}
+    images = np.empty(n, np.int64)
+    point_ids = np.empty(n, np.int64)
+    uv = np.empty((n, 2), np.float64)
+    for i, o in enumerate(observations):
+        images[i] = o.image
+        point_ids[i] = o.point
+        uv[i] = o.uv
 
-    remap: dict[int, int] = {}
-    new_points = []
-    for old in sorted(good_points):
-        remap[old] = len(new_points)
-        new_points.append(points[old])
+    surv_images = images[keep]
+    surv_points = point_ids[keep]
+    surv_uv = uv[keep]
 
-    new_obs = [Observation(o.image, remap[o.point], o.uv) for o in survivors if o.point in remap]
-    return np.array(new_points).reshape(-1, 3), new_obs, int((~keep).sum())
+    max_pid = max(int(surv_points.max()), int(points.shape[0]) - 1)
+    counts = np.bincount(surv_points, minlength=max_pid + 1)
+    good_pids = np.sort(np.flatnonzero(counts >= min_obs))
+    if good_pids.size == 0:
+        return np.zeros((0, 3), dtype=points.dtype), [], dropped
+
+    new_points = points[good_pids]
+    remap = np.full(max_pid + 1, -1, np.int64)
+    remap[good_pids] = np.arange(good_pids.size, dtype=np.int64)
+
+    mapped = remap[surv_points]
+    valid = mapped >= 0
+    idx = np.flatnonzero(valid)
+    new_obs = [
+        Observation(int(surv_images[i]), int(mapped[i]), surv_uv[i]) for i in idx
+    ]
+    return np.asarray(new_points).reshape(-1, 3), new_obs, dropped
 
 
 def run_at(
@@ -1603,7 +2066,12 @@ def run_at(
     # 自标定先验的锚点，整个空三过程固定不变
     intrinsic_prior = dict(cameras)
     per_image_cameras = {i: cameras[image_camera[i]] for i in poses}
-    points, observations = triangulate_tracks(tracks, per_image_cameras, poses, features)
+    # 批量 SVD 本身显卡和 CPU 接近，但每批小矩阵拷上再拷回更慢（#22 整段 1 分 33 秒，本机 CPU 20 秒）。
+    # 分解仍是 np.linalg.svd 的零空间行，方程不变。
+    _say("前方交会：主进程 CPU 分解")
+    points, observations = triangulate_tracks(
+        tracks, per_image_cameras, poses, features, device=None, log=_say
+    )
     # 交会完毕关键点不再参与 BA；清空调用方字典，给法方程腾出峰值。
     if isinstance(features, dict):
         features.clear()
@@ -1629,6 +2097,7 @@ def run_at(
             intrinsic_prior=intrinsic_prior,
             verbose=verbose,
             log=_say,
+            gpu=True,
         )
         rms = float(np.sqrt(np.mean(residual_px**2)))
         points, observations, dropped = drop_outliers(

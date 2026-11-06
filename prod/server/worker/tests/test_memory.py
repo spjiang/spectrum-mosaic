@@ -23,6 +23,17 @@ def test_resolve_memory_budget_keeps_value_under_limit(monkeypatch):
     assert resolve_memory_budget(36) == 36 * 1024**3
 
 
+def test_oom_backoff_halves_budget(monkeypatch):
+    from ms_mosaic.memory import set_oom_backoff
+
+    monkeypatch.setattr("ms_mosaic.memory.visible_limit_bytes", lambda: int(40.3 * 1024**3))
+    set_oom_backoff(1)
+    try:
+        assert resolve_memory_budget(36) == (36 * 1024**3) >> 1
+    finally:
+        set_oom_backoff(0)
+
+
 def test_cap_workers_uses_available_not_just_engine_budget():
     n = cap_workers(
         12,

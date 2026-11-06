@@ -12,8 +12,10 @@ from dataclasses import dataclass
 AUTO_FRACTION = 0.85
 MIN_CAPABILITY = (7, 0)
 
-# 通过三层验证的阶段。新增前必须先过对拍、小窗口验证台和全量比对报告。
-VALIDATED_STAGES: frozenset[str] = frozenset()
+# 特征提取、平差消元、密集匹配的半全局聚合在任务配置了 GPU 时走显卡。
+# 前方交会不在这里：批量小矩阵拷上显卡再拷回，比主进程 CPU 分解慢。
+# 匹配、正射不在这里：匹配单卡比 32 进程 FLANN 慢；正射显卡重采样和 CPU 差到 2 个灰度。
+VALIDATED_STAGES: frozenset[str] = frozenset({"S2_features", "S2_ba", "S3_dense"})
 
 _MB = 2**20
 _GB = 2**30
@@ -167,6 +169,25 @@ def trial_stages() -> frozenset[str]:
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
 
 
+def assign_devices(stage: str, n: int) -> tuple[GpuChoice, list[int | None]]:
+    """这个阶段每个分块用哪张卡。
+
+    关闭、没有卡、或不在白名单时全是 CPU。指定卡号时每块都用那张。
+    自动且有多张可用卡时按块轮流，避免 8 个波段挤在同一张卡上。
+    """
+    choice = select(stage)
+    count = max(0, int(n))
+    if choice.device is None or count == 0:
+        return choice, [None] * count
+    if _job_setting != "auto":
+        return choice, [choice.device] * count
+    gpus, _missing = probe()
+    usable = [g.index for g in gpus if g.capability >= MIN_CAPABILITY]
+    if len(usable) <= 1:
+        return choice, [choice.device] * count
+    return choice, [usable[i % len(usable)] for i in range(count)]
+
+
 def select(stage: str) -> GpuChoice:
     gpus, reason = probe()
     trial = trial_stages() - VALIDATED_STAGES
@@ -176,7 +197,7 @@ def select(stage: str) -> GpuChoice:
     return choice
 
 
-SUMMARY_TTL_S = 60.0
+SUMMARY_TTL_S = 3.0
 _summary_cache: tuple[float, dict] | None = None
 
 
@@ -212,25 +233,46 @@ def _runtime_installed() -> bool:
         return False
 
 
-def _query_nvidia_smi() -> tuple[list[GpuInfo], str | None]:
+def _usage_by_index(text: str) -> dict[int, dict[str, int]]:
+    """同一行 nvidia-smi 输出里的计算占用和已用显存。前 5 列仍给选卡用。"""
+    usage: dict[int, dict[str, int]] = {}
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 7:
+            continue
+        try:
+            usage[int(parts[0])] = {
+                "utilization": int(float(parts[5])),
+                "used_mb": int(float(parts[6])),
+            }
+        except ValueError:
+            continue
+    return usage
+
+
+def _query_nvidia_smi() -> tuple[list[GpuInfo], str | None, dict[int, dict[str, int]]]:
     import shutil
     import subprocess
 
     exe = shutil.which("nvidia-smi")
     if exe is None:
-        return [], "未检测到显卡"
+        return [], "未检测到显卡", {}
     try:
         out = subprocess.run(
-            [exe, "--query-gpu=index,name,memory.total,memory.free,compute_cap", "--format=csv,noheader,nounits"],
+            [
+                exe,
+                "--query-gpu=index,name,memory.total,memory.free,compute_cap,utilization.gpu,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
             check=True,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
-        return [], f"GPU 驱动不可用（{exc}）"
+        return [], f"GPU 驱动不可用（{exc}）", {}
     gpus = parse_nvidia_smi(out)
-    return gpus, None if gpus else "未检测到显卡"
+    return gpus, None if gpus else "未检测到显卡", _usage_by_index(out)
 
 
 def summary(now: float | None = None) -> dict:
@@ -241,7 +283,7 @@ def summary(now: float | None = None) -> dict:
     t = time.monotonic() if now is None else now
     if _summary_cache is not None and t - _summary_cache[0] < SUMMARY_TTL_S:
         return _summary_cache[1]
-    gpus, reason = _query_nvidia_smi()
+    gpus, reason, usage = _query_nvidia_smi()
     runtime = _runtime_installed()
     if gpus and not runtime:
         reason = "未安装 GPU 运行库"
@@ -256,6 +298,8 @@ def summary(now: float | None = None) -> dict:
                 "name": g.name,
                 "total_mb": g.total_mb,
                 "free_mb": g.free_mb,
+                "used_mb": usage.get(g.index, {}).get("used_mb", max(0, g.total_mb - g.free_mb)),
+                "utilization": usage.get(g.index, {}).get("utilization"),
                 "capability": f"{g.capability[0]}.{g.capability[1]}",
             }
             for g in gpus

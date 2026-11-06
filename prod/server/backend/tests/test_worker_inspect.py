@@ -103,6 +103,62 @@ def test_inspect_attaches_orphan_compute(tmp_path: Path, monkeypatch):
     assert out["active_jobs"][0]["compute_state"] == "orphan"
 
 
+def test_inspect_attaches_job_child_when_current_job_missing(tmp_path: Path, monkeypatch):
+    jid = "2c19e880-55b8-4514-92f5-8e821cd94be2"
+    path = tmp_path / ".worker" / "status.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "pid": 7,
+                "listening": True,
+                "current_job": None,
+                "memory": {"job_rss_mb": 12000.0},
+                "processes": [
+                    {"pid": 7, "ppid": 1, "cmdline": "python -m ms_mosaic.worker_main"},
+                    {
+                        "pid": 99,
+                        "ppid": 7,
+                        "rss_mb": 800.0,
+                        "cmdline": "python -m ms_mosaic.job_child --ms-job-x /tmp/p.json",
+                    },
+                    {
+                        "pid": 3786,
+                        "ppid": 99,
+                        "rss_mb": 1800.0,
+                        "cmdline": "python -c from multiprocessing.spawn import spawn_main",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.services.worker_inspect.queue_stats", lambda _u: {"consumers": 1, "messages": 0})
+    db = MagicMock()
+    db.scalars.return_value = [
+        SimpleNamespace(
+            id=jid,
+            seq=35,
+            status="running",
+            current_stage="S5_ortho",
+            completed_stage="S4_dsm",
+            global_percent=71.0,
+            message="",
+            input_dir="/data/in",
+            output_dir="/data/out",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+            finished_at=None,
+        )
+    ]
+    out = inspect_worker(db, Settings(data_roots=str(tmp_path)))
+    current = out["worker"]["current_job"]
+    assert current["job_id"] == jid
+    assert current["pid"] == 99
+    assert out["active_jobs"][0]["compute_state"] == "live"
+
+
 def test_inspect_in_worker_pool_is_live(tmp_path: Path, monkeypatch):
     jid = "1b08d979-44a7-4303-91e4-7d910bc83bd1"
     path = tmp_path / ".worker" / "status.json"
@@ -200,8 +256,11 @@ def test_inspect_does_not_attach_orphan_for_in_worker_children(tmp_path: Path, m
         )
     ]
     out = inspect_worker(db, Settings(data_roots=str(tmp_path)))
-    assert not (out["worker"].get("current_job") or {}).get("orphan_compute")
-    assert out["active_jobs"][0]["compute_state"] == "stale"
+    current = out["worker"]["current_job"]
+    assert current["job_id"] == jid
+    assert current["pid"] == 7
+    assert not current.get("orphan_compute")
+    assert out["active_jobs"][0]["compute_state"] == "live"
 
 
 def test_inspect_stale_file(tmp_path: Path, monkeypatch):

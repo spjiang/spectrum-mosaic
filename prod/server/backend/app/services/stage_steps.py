@@ -11,6 +11,9 @@ from pathlib import Path
 
 log = logging.getLogger("uvicorn.error")
 
+# 阶段墙钟：同一节点内两条日志超过此间隔视为睡眠/死机，不计入（正射块进度常见数分钟一行）。
+STAGE_RUN_IDLE_GAP_S = 7200.0
+
 STAGES = (
     "S0_io",
     "S1_catalog",
@@ -81,6 +84,52 @@ def _shared_ortho_step(share: dict) -> dict | None:
     return _step("多光谱正射", share.get("detail") or "", max(0.0, (end - start).total_seconds()), end)
 
 
+def _uses_gpu(text: str) -> bool:
+    """这行日志是在用显卡，而不是退回 CPU。"""
+    if "半全局聚合 GPU" in text:
+        return True
+    if "使用 CPU" in text or "用 CPU" in text:
+        return False
+    return re.search(r"GPU\s*\d", text) is not None
+
+
+def _gpu_step_name(stage: str, msg: str) -> str | None:
+    """用了显卡的那一行，对应哪一个分项。平差阶段要等后面的「阶段 N」才落得上。"""
+    if not _uses_gpu(msg):
+        return None
+    body = _strip_seconds(msg)
+    if stage == "S2_at":
+        if body.startswith("特征提取"):
+            return "特征提取"
+        if body.startswith("前方交会"):
+            return "前方交会"
+        if body.startswith("平差"):
+            return "平差阶段"
+    if stage == "S3_dense":
+        if body.startswith("粗格网"):
+            return "粗格网"
+        if body.startswith("密集匹配"):
+            return "细格网"
+    if stage == "S5_ortho":
+        band = re.search(r"\(([^)]+)\)\s*[：:]", body)
+        if band:
+            return f"正射 {band.group(1)}"
+    return None
+
+
+def _gpu_hit(name: str, target: str) -> bool:
+    if target == "平差阶段":
+        return name.startswith("平差阶段")
+    return name == target
+
+
+def _mark_gpu(steps: list[dict], target: str) -> bool:
+    if steps and _gpu_hit(steps[-1]["name"], target):
+        steps[-1]["gpu"] = True
+        return True
+    return False
+
+
 def _step(name: str, detail: str, elapsed: float | None, ts: datetime | None, *, status: str = "done") -> dict:
     return {
         "name": name,
@@ -113,11 +162,32 @@ def _finish_elapsed(steps: list[dict]) -> None:
             continue
         if step["elapsed_s"] is None and prev is None and isinstance(anchor, datetime):
             prev = anchor
+        if step.pop("_open", False):
+            # 开工行的耗时收到本阶段最后一条，下一项从那里接着算。
+            until = step.pop("_until", None)
+            prev = until if isinstance(until, datetime) else ts
+            step.pop("_ts", None)
+            continue
         if step["elapsed_s"] is None and prev is not None and ts is not None:
             step["elapsed_s"] = max(0.0, (ts - prev).total_seconds())
         if ts is not None:
             prev = ts
         step.pop("_ts", None)
+
+
+def _seal_open(steps: list[dict], end: datetime | None, status: str) -> None:
+    """细格网的日志在开扫前打出。耗时从这一行记到本阶段最后一条，而不是到下一行。"""
+    if not isinstance(end, datetime):
+        return
+    for step in steps:
+        if not step.get("_open"):
+            continue
+        ts = step.get("_ts")
+        if step["elapsed_s"] is None and isinstance(ts, datetime) and end >= ts:
+            step["elapsed_s"] = (end - ts).total_seconds()
+        step["_until"] = end
+        if status == "running":
+            step["status"] = "running"
 
 
 def parse_stage_steps(
@@ -139,6 +209,9 @@ def parse_stage_steps(
     # 同一阶段再次 start 后，下一行从这次 start 起算，不能去减上一次的时间。
     restart_next: set[str] = set()
     anchors: dict[str, datetime] = {}
+    # 含块进度。细格网的开工行早于真正扫完，耗时要收到本阶段最后一条。
+    last_seen: dict[str, datetime] = {}
+    pending_gpu: str | None = None
     for raw in text.splitlines():
         msg = _message(raw)
         if not msg or "mq publisher" in msg or msg.startswith("RuntimeWarning"):
@@ -151,6 +224,7 @@ def parse_stage_steps(
             continue
         started = _START.search(msg)
         if started:
+            pending_gpu = None
             current = started.group(1)
             tail = started.group(2).strip()
             if current in buckets and ts is not None:
@@ -178,6 +252,8 @@ def parse_stage_steps(
             continue
         if current not in buckets:
             continue
+        if ts is not None:
+            last_seen[current] = ts
         if current == "S5_ortho" and msg.startswith("多光谱正射几何共用"):
             share = {"start": ts, "end": ts, "detail": _ms_share_detail(msg), "closed": False}
             continue
@@ -191,8 +267,15 @@ def parse_stage_steps(
             if current == "S5_ortho" and share is not None and not share["closed"] and ts is not None:
                 share["end"] = ts
             continue
+        gpu_target = _gpu_step_name(current, msg)
         step = _classify(current, msg, ts, ortho_open)
+        if step is not None and gpu_target and _gpu_hit(step["name"], gpu_target):
+            step["gpu"] = True
+            gpu_target = None
         if step is None:
+            # 平差的 GPU 行在「阶段 N」之前。上一阶段已经在列表末尾，不能记到它头上。
+            if gpu_target and (gpu_target == "平差阶段" or not _mark_gpu(buckets[current], gpu_target)):
+                pending_gpu = gpu_target
             parallel = _AT_PARALLEL.search(msg)
             if parallel:
                 at_workers = int(parallel.group(1))
@@ -215,6 +298,29 @@ def parse_stage_steps(
         if step["name"] in {"特征提取", "像对匹配"} and at_workers:
             extra = f"{at_workers} 个进程"
             step["detail"] = f"{step['detail']} · {extra}" if step["detail"] else extra
+        if (
+            step["name"] == "细格网"
+            and buckets[current]
+            and buckets[current][-1]["name"] == "细格网"
+            and buckets[current][-1].get("_open")
+        ):
+            prev_step = buckets[current][-1]
+            if step["detail"]:
+                prev_step["detail"] = (
+                    f"{prev_step['detail']} · {step['detail']}" if prev_step["detail"] else step["detail"]
+                )
+            if step.get("gpu"):
+                prev_step["gpu"] = True
+            continue
+        if pending_gpu and _gpu_hit(step["name"], pending_gpu):
+            step["gpu"] = True
+            pending_gpu = None
+        if (
+            buckets[current]
+            and buckets[current][-1]["name"] == step["name"]
+            and buckets[current][-1].get("gpu")
+        ):
+            step["gpu"] = True
         if step["name"] in {"粗格网", "细格网"} and pending_dense and "进程" not in step["detail"]:
             step["detail"] = f"{step['detail']} · {pending_dense} 个进程" if step["detail"] else f"{pending_dense} 个进程"
             pending_dense = None
@@ -242,6 +348,9 @@ def parse_stage_steps(
     for stage, steps in buckets.items():
         last_ts = steps[-1].get("_ts") if steps else None
         last_name = steps[-1]["name"] if steps else ""
+        alive_here = running and alive and stage == current_stage
+        end = now if alive_here else last_seen.get(stage)
+        _seal_open(steps, end, "running" if alive_here else "done")
         _finish_elapsed(steps)
         if running and alive and stage == current_stage and steps and steps[-1]["status"] == "done":
             nxt = _next_name(last_name)
@@ -312,7 +421,10 @@ def _classify(stage: str, msg: str, ts: datetime | None, ortho_open: dict[str, d
         if body.startswith("粗格网解出"):
             return _step("粗格网", _dot_join(body.removeprefix("粗格网")), elapsed, ts)
         if body.startswith("密集匹配：") and "块" not in body:
-            return _step("细格网", body.removeprefix("密集匹配：").strip(), elapsed, ts)
+            # 这行在扫格网之前打出。耗时收到本阶段最后一条，不能只算到下一行。
+            opened = _step("细格网", body.removeprefix("密集匹配：").strip(), None, ts)
+            opened["_open"] = True
+            return opened
         if body.startswith("复用 DSM"):
             return _step("复用 DSM", body, elapsed, ts)
         return None
@@ -424,22 +536,36 @@ def read_run_log(output_dir: str | None, log_dir: str | None) -> str:
     return ""
 
 
-def stage_run_seconds(text: str) -> dict[str, float]:
-    """每个节点按自己连续在跑的时段累加：这一段的第一条日志到最后一条。
+def _add_run_slice(
+    totals: dict[str, float],
+    stage: str | None,
+    start_ts: datetime | None,
+    end_ts: datetime | None,
+) -> None:
+    if stage in totals and start_ts is not None and end_ts is not None and end_ts >= start_ts:
+        totals[stage] += (end_ts - start_ts).total_seconds()
 
-    同一节点再次 start 时先收口上一段。两段之间是中断或死机，不计入。
+
+def stage_run_seconds(text: str, *, idle_gap_s: float = STAGE_RUN_IDLE_GAP_S) -> dict[str, float]:
+    """每个节点按连续在跑的时段累加；同一节点内日志空档（睡眠/死机）切开，只计活跃段。
+
+    同一节点再次 start 时先收口上一段。两段 start 之间是中断，不计入。
     """
     totals = {stage: 0.0 for stage in STAGES}
     current: str | None = None
     start_ts: datetime | None = None
     end_ts: datetime | None = None
 
-    def close() -> None:
+    def close_slice() -> None:
         nonlocal start_ts, end_ts
-        if current in totals and start_ts is not None and end_ts is not None and end_ts >= start_ts:
-            totals[current] += (end_ts - start_ts).total_seconds()
+        _add_run_slice(totals, current, start_ts, end_ts)
         start_ts = None
         end_ts = None
+
+    def close_stage() -> None:
+        close_slice()
+        nonlocal current
+        current = None
 
     for raw in text.splitlines():
         msg = _message(raw)
@@ -448,14 +574,15 @@ def stage_run_seconds(text: str) -> dict[str, float]:
         ts = _parse_ts(raw)
         # 新进程起来的第一行。它和上一条之间是死机或卡住，不能接到上一段后面。
         if msg.startswith("start input="):
-            close()
-            current = None
+            close_stage()
             continue
         started = _START.search(msg)
         if started and started.group(1) in totals:
             new = started.group(1)
-            if start_ts is not None:
-                close()
+            if current == new and start_ts is not None:
+                close_slice()
+            elif current != new:
+                close_stage()
             current = new
             if ts is not None:
                 start_ts = ts
@@ -463,9 +590,14 @@ def stage_run_seconds(text: str) -> dict[str, float]:
             continue
         if current in totals and ts is not None:
             if start_ts is None:
-                start_ts = ts
-            end_ts = ts
-    close()
+                start_ts = end_ts = ts
+                continue
+            if end_ts is not None and (ts - end_ts).total_seconds() > idle_gap_s:
+                close_slice()
+                start_ts = end_ts = ts
+            else:
+                end_ts = ts
+    close_slice()
     return totals
 
 

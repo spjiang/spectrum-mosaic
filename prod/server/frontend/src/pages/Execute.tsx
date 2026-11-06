@@ -27,6 +27,8 @@ import JobActions from "../components/JobActions";
 import JobStageFlow from "../components/JobStageFlow";
 import { TitleWithProgressHelp } from "../components/ProgressHelpTip";
 import LogConsole from "../components/LogConsole";
+import ResourcePlan from "../components/ResourcePlan";
+import { usableCores, type SceneFacts } from "../concurrencyPlan";
 import { formatNo } from "../ids";
 import { canExecute, canViewOps } from "../roles";
 import { displayStage, stageLabel } from "../stages";
@@ -63,8 +65,8 @@ function memorySliderMax(limitGb: number | null): number {
 }
 
 function pickMemoryGb(raw: unknown, max: number): number {
-  const n = typeof raw === "number" && raw > 0 ? raw : 36;
-  return Math.min(n, max);
+  if (typeof raw === "number" && raw > 0) return Math.min(raw, max);
+  return 0;
 }
 
 function cpuSliderMax(limit: number | null): number {
@@ -128,11 +130,13 @@ export default function ExecutePage() {
   const [profileId, setProfileId] = useState<number | undefined>();
   const [inputDir, setInputDir] = useState("");
   const [nativeGsd, setNativeGsd] = useState<number | null>(null);
+  const [scene, setScene] = useState<SceneFacts | null>(null);
+  const [sceneLoading, setSceneLoading] = useState(false);
   const [gsdSamples, setGsdSamples] = useState(0);
   const [gsdNote, setGsdNote] = useState("");
   const [orthoScale, setOrthoScale] = useState(1);
   const [outputDir, setOutputDir] = useState("");
-  const [memoryGb, setMemoryGb] = useState<number | null>(watchId ? 0 : 36);
+  const [memoryGb, setMemoryGb] = useState<number | null>(0);
   const [engineRamGb, setEngineRamGb] = useState<number | null>(null);
   const [cpus, setCpus] = useState<number>(0);
   const [engineCpu, setEngineCpu] = useState<number | null>(null);
@@ -161,7 +165,7 @@ export default function ExecutePage() {
           applyPaths(setInputDir, setOutputDir, { ...defaults, ...(preferred.values || {}) });
           if (!searchParams.get("job")) {
             const gb = preferred.values?.memory_gb ?? defaults.memory_gb;
-            setMemoryGb(typeof gb === "number" && gb > 0 ? gb : 36);
+            setMemoryGb(typeof gb === "number" && gb > 0 ? gb : 0);
             const n = preferred.values?.cpus ?? defaults.cpus;
             setCpus(typeof n === "number" && n > 0 ? n : 0);
             setGpu(pickGpu(preferred.values?.gpu ?? defaults.gpu));
@@ -271,12 +275,15 @@ export default function ExecutePage() {
     const dir = inputDir.trim();
     if (!dir.startsWith("/data")) {
       setNativeGsd(null);
+      setScene(null);
+      setSceneLoading(false);
       setGsdSamples(0);
       setGsdNote(dir ? "输入目录须位于 /data 下" : "");
       return;
     }
     let cancelled = false;
     const timer = window.setTimeout(() => {
+      setSceneLoading(true);
       api
         .nativeGsd(dir)
         .then((r) => {
@@ -284,12 +291,29 @@ export default function ExecutePage() {
           setNativeGsd(r.native_gsd_m);
           setGsdSamples(r.n_samples);
           setGsdNote("");
+          if (r.width && r.height && r.n_color) {
+            setScene({
+              width: r.width,
+              height: r.height,
+              nColor: r.n_color,
+              nMsBands: r.n_ms_bands ?? 0,
+              nativeGsdM: r.native_gsd_m,
+              spanXM: r.span_x_m ?? null,
+              spanYM: r.span_y_m ?? null,
+            });
+          } else {
+            setScene(null);
+          }
         })
         .catch((e: any) => {
           if (cancelled) return;
           setNativeGsd(null);
+          setScene(null);
           setGsdSamples(0);
           setGsdNote(e.message || "读不出原始分辨率");
+        })
+        .finally(() => {
+          if (!cancelled) setSceneLoading(false);
         });
     }, 400);
     return () => {
@@ -399,7 +423,7 @@ export default function ExecutePage() {
                     {nativeGsd ? (
                       <Typography.Text type="secondary">
                         {" "}
-                        影像原始分辨率 {nativeGsd.toFixed(4)} m（{gsdSamples} 张 Color）
+                        影像原始分辨率 {nativeGsd.toFixed(4)} m（航高取 {gsdSamples} 张 Color）
                       </Typography.Text>
                     ) : null}
                   </div>
@@ -424,7 +448,7 @@ export default function ExecutePage() {
                     <div style={{ marginTop: 4 }}>
                       <Typography.Text type="secondary">
                         {nativeGsd
-                          ? `原始分辨率 ${nativeGsd.toFixed(4)} m（${gsdSamples} 张 Color）。选 1/2、1/4 会把像元放大，正射更快。`
+                          ? `原始分辨率 ${nativeGsd.toFixed(4)} m（航高取 ${gsdSamples} 张 Color）。选 1/2、1/4 会把像元放大，正射更快。`
                           : gsdNote || "填写测区目录后自动读取原始分辨率"}
                       </Typography.Text>
                     </div>
@@ -459,10 +483,11 @@ export default function ExecutePage() {
                   tooltip={{ formatter: (v) => (v ? `${v} GB` : "自动") }}
                 />
               </div>
-              <Typography.Paragraph type="secondary" style={{ margin: "0 0 0", fontSize: 12, lineHeight: 1.55 }}>
+              <Typography.Paragraph type="secondary" style={{ margin: "0 0 0", fontSize: 12, lineHeight: 1.6 }}>
+                0 表示按节点可见内存自动封顶，配得再高也不会超过这个上限。
                 {showOpsHelp
-                  ? `上限为计算节点可见内存（当前 ${engineRamGb != null ? `${engineRamGb} GB` : "未知"}）。0 表示系统自动分配。Docker Desktop Memory Limit 决定上限。`
-                  : `为本任务预留的内存。0 表示系统自动分配。本测区建议 36 GB。`}
+                  ? `当前节点 ${engineRamGb != null ? `${engineRamGb} GB` : "内存未知"}。`
+                  : ""}
               </Typography.Paragraph>
             </div>
             <div>
@@ -482,12 +507,48 @@ export default function ExecutePage() {
                   tooltip={{ formatter: (v) => (v ? `${v} 核` : "自动") }}
                 />
               </div>
-              <Typography.Paragraph type="secondary" style={{ margin: "0 0 0", fontSize: 12, lineHeight: 1.55 }}>
-                {showOpsHelp
-                  ? `上限为计算节点可见 CPU（当前 ${engineCpu != null ? `${engineCpu} 核` : "未知"}）。0 表示系统自动分配。`
-                  : "为本任务预留的 CPU。0 表示系统自动分配。本测区建议 8 核。"}
+              <Typography.Paragraph type="secondary" style={{ margin: "0 0 0", fontSize: 12, lineHeight: 1.6 }}>
+                0 表示自动，留 2 核给系统和页面。核数是进程数的上限。
+                {showOpsHelp ? `当前节点 ${engineCpu != null ? `${engineCpu} 核` : "核数未知"}。` : ""}
+                {engineCpu != null && engineCpu > 4 ? `拉到 ${engineCpu} 会占满本机，系统和页面容易卡住。` : ""}
               </Typography.Paragraph>
             </div>
+            {sceneLoading ? (
+              <Typography.Paragraph type="secondary" style={{ margin: "8px 0 0", fontSize: 12 }}>
+                正在读取测区影像和航线范围。
+              </Typography.Paragraph>
+            ) : scene == null ? (
+              <Typography.Paragraph type="secondary" style={{ margin: "8px 0 0", fontSize: 12 }}>
+                选定测区后，按影像尺寸、波段和航线范围估算各阶段能开几路。
+              </Typography.Paragraph>
+            ) : (
+              (() => {
+                const planMemory = memoryGb && memoryGb > 0 ? memoryGb : engineRamGb;
+                const planCpu = cpus > 0 ? cpus : usableCores(engineCpu) ?? engineCpu;
+                if (planMemory == null || planCpu == null || planMemory <= 0 || planCpu <= 0) {
+                  return (
+                    <Typography.Paragraph type="secondary" style={{ margin: "8px 0 0", fontSize: 12 }}>
+                      测区已读到。等计算节点的内存和核数到齐后给出并发。
+                    </Typography.Paragraph>
+                  );
+                }
+                return (
+                  <ResourcePlan
+                    scene={scene}
+                    memoryGb={planMemory}
+                    cpus={planCpu}
+                    orthoScale={orthoScale}
+                    memoryCeilingGb={engineRamGb}
+                    cpuCeiling={engineCpu}
+                    disabled={!allowRun}
+                    onApply={(gb, n) => {
+                      setMemoryGb(Math.min(gb, memMax));
+                      setCpus(Math.min(n, cpuMax));
+                    }}
+                  />
+                );
+              })()
+            )}
             <div>
               <Typography.Text type="secondary">任务 GPU</Typography.Text>
               <Select
@@ -547,6 +608,7 @@ export default function ExecutePage() {
                       <Descriptions.Item label="reuse_dsm">{summary.reuse_dsm || "—"}</Descriptions.Item>
                       <Descriptions.Item label="cache_dir">{summary.cache_dir || "默认"}</Descriptions.Item>
                       <Descriptions.Item label="workers_at">{summary.workers_at ?? "—"}</Descriptions.Item>
+                      <Descriptions.Item label="特征点上限">{summary.max_features ?? 8192}</Descriptions.Item>
                       <Descriptions.Item label="memory_gb">{String(summary.memory_gb ?? 0)}</Descriptions.Item>
                       <Descriptions.Item label="cpus">{String(summary.cpus ?? 0)}</Descriptions.Item>
                       <Descriptions.Item label="gpu">{String(summary.gpu ?? "auto")}</Descriptions.Item>

@@ -67,6 +67,70 @@ def test_dense_and_ortho_skip_tile_progress():
     assert all("10/825" not in s["detail"] for s in ortho)
 
 
+def test_gpu_steps_are_marked_and_cpu_fallback_is_not():
+    text = """
+2026-11-05 01:00:00,000 INFO job abc start S2_at 空三 / 稀疏重建
+2026-11-05 01:00:01 特征提取：GPU 0 NVIDIA，显存上限 20.0 GB
+2026-11-05 01:00:20 特征提取 10 张，12.0s
+2026-11-05 01:00:21 匹配：CPU FLANN，8 进程
+2026-11-05 01:01:00 前方交会：GPU 0 NVIDIA，显存上限 20.0 GB
+2026-11-05 01:02:00 交会  物方点 10，观测 20
+2026-11-05 01:02:01 平差：GPU 1 NVIDIA，显存上限 10.0 GB
+2026-11-05 01:03:00 阶段1 自由内参=f RMS=0.4px 剔除观测 1 剩余点 9
+2026-11-05 01:03:01 平差：GPU 0 NVIDIA，显存上限 10.0 GB
+2026-11-05 01:04:00 阶段2 自由内参=f RMS=0.3px 剔除观测 0 剩余点 9
+2026-11-05 01:04:01 平差：没有卡，使用 CPU
+2026-11-05 01:04:30 阶段3 自由内参=f RMS=0.2px 剔除观测 0 剩余点 9
+2026-11-05 01:04:01,000 INFO job abc start S3_dense 密集匹配
+2026-11-05 01:04:02 粗格网密集匹配：半全局聚合 GPU 0、1。窗口相关仍在 CPU
+2026-11-05 01:05:00 粗格网解出 15.5%，细格网搜索 ±8.0 m × 2 轮
+2026-11-05 01:05:01 密集匹配：格网 10x10 @ 0.1 m
+2026-11-05 01:05:01 密集匹配：使用 CPU
+2026-11-05 01:06:00,000 INFO job abc start S5_ortho 正射波段 ('Color', '450nm')
+2026-11-05 01:06:01 正射 group0.tif (Color)：GPU 0 NVIDIA，显存上限 8.0 GB
+2026-11-05 01:07:00 已写出 a.tif（Color 完成）
+2026-11-05 01:07:01 正射 group1.tif (450nm)：32 进程超过 GPU 上下文上限 8，重采样用 CPU
+2026-11-05 01:08:00 已写出 b.tif（450nm 完成）
+"""
+    stages = parse_stage_steps(text)
+    at = {s["name"]: s for s in stages["S2_at"]}
+    assert at["特征提取"]["gpu"] is True
+    assert "gpu" not in at["像对匹配"]
+    assert at["前方交会"]["gpu"] is True
+    assert at["平差阶段1"]["gpu"] is True
+    assert at["平差阶段2"]["gpu"] is True
+    assert "gpu" not in at["平差阶段3"]
+    dense = {s["name"]: s for s in stages["S3_dense"]}
+    assert dense["粗格网"]["gpu"] is True
+    assert "gpu" not in dense["细格网"]
+    ortho = {s["name"]: s for s in stages["S5_ortho"]}
+    assert ortho["正射 Color"]["gpu"] is True
+    assert "gpu" not in ortho["正射 450nm"]
+
+
+def test_fine_grid_time_runs_until_the_stage_ends():
+    """细格网那一行在开扫前打出。真正扫完的时间要算到这一步，不能停在下一行。"""
+    text = """
+2026-10-31 01:00:00,000 INFO job abc start S3_dense 密集匹配
+2026-10-31 01:00:01 高程搜索半宽 8.0 m（由稀疏点起伏估计）
+2026-10-31 01:03:09 粗格网解出 15.5%，细格网搜索 ±8.0 m × 2 轮
+2026-10-31 01:03:10 密集匹配：格网 6280x6960 @ 0.0932 m，±8.0 m × 48 层
+2026-10-31 01:03:10 密集匹配：半全局聚合 GPU 0、1。窗口相关仍在 CPU
+2026-10-31 01:03:11 密集匹配：20 块 / 8 段 / 8 进程
+2026-10-31 01:14:10 密集匹配 100/323 块
+2026-10-31 01:14:11,000 INFO job abc start S4_dsm 写出 DSM
+"""
+    dense = parse_stage_steps(text)["S3_dense"]
+    assert [s["name"] for s in dense].count("细格网") == 1
+    fine = next(s for s in dense if s["name"] == "细格网")
+    assert fine["elapsed_s"] == 660.0
+    assert "6280x6960" in fine["detail"]
+    assert "GPU" in fine["detail"]
+    assert "8 个进程" in fine["detail"]
+    coarse = next(s for s in dense if s["name"] == "粗格网")
+    assert coarse["elapsed_s"] == 188.0
+
+
 def test_running_stage_appends_the_next_function():
     lines = [ln for ln in LOG.splitlines() if ln.strip()]
     text = "\n".join(lines[:5])
@@ -227,3 +291,16 @@ def test_stage_clock_skips_the_dead_gap():
     totals = stage_run_seconds(text)
     assert totals["S2_at"] < 20 * 60
     assert totals["S2_at"] > 15 * 60
+
+
+def test_stage_clock_skips_sleep_gap_within_one_stage():
+    """Maintenance Sleep 等：同一阶段两条日志之间超过 120s 的空档不计入。"""
+    text = """
+2026-11-04 10:00:00 INFO job abc start S5_ortho 正射波段 ('Color',)
+2026-11-04 10:20:00 正射 Orthomosaic (Color) 10/825 块
+2026-11-04 15:00:00 正射 Orthomosaic (Color) 20/825 块
+2026-11-04 15:10:00 已写出 Orthomosaic_pix_surf_group0.tif（Color 完成）
+"""
+    totals = stage_run_seconds(text)
+    assert totals["S5_ortho"] < 35 * 60
+    assert totals["S5_ortho"] > 25 * 60

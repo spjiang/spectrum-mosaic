@@ -93,6 +93,32 @@ def test_stale_reentry_does_not_keep_the_dead_gap(tmp_path):
     assert "_open" not in job.stage_timings
 
 
+def test_oom_retry_keeps_running_and_halves_next_pass():
+    job = _job(
+        status="running",
+        current_stage="S5_ortho",
+        completed_stage="S4_dsm",
+        params_snapshot={"output_dir": "/data/out", "memory_gb": 23.4},
+        run_attempt=1,
+        stage_timings={"_open": {"stage": "S5_ortho", "since": "2026-11-04T07:00:00+00:00"}},
+    )
+    apply_event(
+        _db(job),
+        {"job_id": str(job.id), "event": "oom_retry", "error": "exit -9"},
+    )
+    assert job.status == "running"
+    assert job.finished_at is None
+    assert job.error_summary is None
+    assert job.run_attempt == 2
+    assert job.params_snapshot["start_stage"] == "S5_ortho"
+    assert job.params_snapshot["oom_backoff"] == 1
+    assert "正射镶嵌" in job.message
+    assert "_open" not in job.stage_timings
+    apply_event(_db(job), {"job_id": str(job.id), "event": "oom_retry", "error": "exit -9"})
+    assert job.status == "failed"
+    assert "仍然失败" in job.message
+
+
 def test_stopped_gap_is_not_part_of_stage_clock():
     job = _job(status="running", current_stage="S5_ortho", completed_stage="S4_dsm", stage_timings={})
     apply_event(_db(job), {"job_id": str(job.id), "event": "running", "stage_id": "S5_ortho"})

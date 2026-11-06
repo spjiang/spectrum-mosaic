@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -183,12 +184,11 @@ def load_at_payload(path: Path) -> dict[str, Any]:
 
 
 def apply_payload(block: Block, payload: dict[str, Any]) -> SparseResult:
+    # block.cameras / block.poses 保持编目初值（Camera.initial、POS）。
+    # 平差结果只进 ATResult。写回 block 会让 transfer_band 把已平差的焦距再乘一次
+    # 主波段比例，续跑的多光谱正射和当次新跑对不上，几何共用也会被判成不一致。
     cameras = dict(payload.get("camera_objs") or {})
-    for key, cam in cameras.items():
-        block.cameras[key] = cam
     poses = dict(payload.get("poses") or {})
-    for idx, pose in poses.items():
-        block.poses[idx] = pose
     if payload.get("crs"):
         block.crs = str(payload["crs"])
     if payload.get("ground_z") is not None:
@@ -266,6 +266,7 @@ def resolve_sparse(
     max_frames: int | None = None,
     workers: int | None = None,
     memory_gb: float | None = None,
+    max_features: int | None = None,
     min_agl_m: float | None = None,
     max_tilt_deg: float | None = None,
     drop_white_panel: bool = True,
@@ -279,6 +280,7 @@ def resolve_sparse(
     log: Callable[[str], None] | None = print,
     run_sparse_fn=None,
     rebuild_fn: Callable[..., Block] | None = None,
+    on_catalog_done: Callable[[float], None] | None = None,
 ) -> SparseResult:
     from ms_mosaic.runner import run_sparse as default_run
 
@@ -291,6 +293,7 @@ def resolve_sparse(
         mi = max_index if max_index is not None else payload.get("max_index")
         mf = max_frames if max_frames is not None else payload.get("max_frames")
         builder = rebuild_fn or rebuild_block
+        t_cat = time.perf_counter()
         block = builder(
             input_dir,
             max_index=mi,
@@ -300,12 +303,15 @@ def resolve_sparse(
             drop_white_panel=drop_white_panel,
             require_pos=require_pos,
         )
+        if on_catalog_done is not None:
+            on_catalog_done(max(0.0, time.perf_counter() - t_cat))
         return apply_payload(block, payload)
     sparse_kw: dict[str, Any] = {
         "max_index": max_index,
         "max_frames": max_frames,
         "workers": workers or 10,
         "memory_gb": memory_gb,
+        "max_features": 8192 if max_features is None else int(max_features),
         "drop_white_panel": drop_white_panel,
         "require_pos": require_pos,
         "calibrate_intrinsics": calibrate_intrinsics,
@@ -324,6 +330,8 @@ def resolve_sparse(
         sparse_kw["sigma_attitude_deg"] = sigma_attitude_deg
     if outlier_threshold_px is not None:
         sparse_kw["outlier_threshold_px"] = outlier_threshold_px
+    if on_catalog_done is not None:
+        sparse_kw["on_catalog_done"] = on_catalog_done
     sparse = run_sparse_fn(input_dir, cache_dir, **sparse_kw)
     save_sparse(path, sparse, max_index=max_index, max_frames=max_frames)
     if log:

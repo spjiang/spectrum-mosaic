@@ -564,7 +564,75 @@ def test_refine_z_margin_does_not_collapse_to_one_step():
     assert wide == pytest.approx(max(4.0, 3.0 * (48.0 / 47)))
 
 
+def test_dense_gpu_caps_contexts_at_four_per_card(monkeypatch):
+    """有卡时半全局聚合仍走显卡，进程数收到每张卡 4 个，不整段退回 CPU。"""
+    from ms_mosaic.dense import _dense_gpu_devices
+    from ms_mosaic.gpu import GpuChoice
+
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_workers", lambda workers, per_worker_mb=None: 32)
+    monkeypatch.setattr(
+        "ms_mosaic.gpu.assign_devices",
+        lambda stage, n: (
+            GpuChoice(device=0, budget_bytes=1, name="Tesla T4", reason=""),
+            [i % 2 for i in range(n)],
+        ),
+    )
+    logs: list[str] = []
+    devices, n_workers = _dense_gpu_devices("密集匹配", 32, 1000, logs.append)
+    assert devices == [0, 1]
+    assert n_workers == 8
+    assert logs == [
+        "密集匹配：窗口相关在 CPU。半全局聚合在 GPU 0、GPU 1，每张卡最多 4 个进程，本次 8 个进程"
+    ]
+
+
+def test_dense_gpu_one_card_caps_at_four_processes(monkeypatch):
+    from ms_mosaic.dense import _dense_gpu_devices
+    from ms_mosaic.gpu import GpuChoice
+
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_workers", lambda workers, per_worker_mb=None: 32)
+    monkeypatch.setattr(
+        "ms_mosaic.gpu.assign_devices",
+        lambda stage, n: (
+            GpuChoice(device=0, budget_bytes=1, name="Tesla T4", reason=""),
+            [0] * n,
+        ),
+    )
+    devices, n_workers = _dense_gpu_devices("密集匹配", 32, 1000, None)
+    assert devices == [0]
+    assert n_workers == 4
+
+
+def test_dense_without_gpu_keeps_the_memory_worker_count(monkeypatch):
+    from ms_mosaic.dense import _dense_gpu_devices
+    from ms_mosaic.gpu import GpuChoice
+
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_workers", lambda workers, per_worker_mb=None: 32)
+    monkeypatch.setattr(
+        "ms_mosaic.gpu.assign_devices",
+        lambda stage, n: (
+            GpuChoice(device=None, budget_bytes=0, name="", reason=""),
+            [None] * n,
+        ),
+    )
+    logs: list[str] = []
+    devices, n_workers = _dense_gpu_devices("密集匹配", 32, 1000, logs.append)
+    assert devices == []
+    assert n_workers == 32
+    assert logs == ["密集匹配：使用 CPU"]
+
+
 def test_search_bound_hits_marks_first_and_last_layer():
     best = np.array([[0, 1], [23, 47]])
     hits = search_bound_hits(best, 48)
     assert hits.tolist() == [[True, False], [False, True]]
+
+
+def test_dense_progress_names_each_gpu_and_copy_time():
+    from ms_mosaic.dense import format_dense_gpu_progress
+
+    text = format_dense_gpu_progress({0: [1.25, 3.0, 0.4], 1: [0.8, 2.2, 0.3]})
+    assert text == (
+        "。半全局聚合 GPU 0 累计复制到显卡 1.2 秒，计算 3.0 秒，复制回内存 0.4 秒"
+        "；GPU 1 累计复制到显卡 0.8 秒，计算 2.2 秒，复制回内存 0.3 秒"
+    )

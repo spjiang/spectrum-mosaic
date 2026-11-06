@@ -54,13 +54,23 @@ def job_cpus() -> int | None:
     return _job_cpus
 
 
+def host_reserve(visible: int) -> int:
+    """留给系统和页面的核。4 核及以下留 1，再多留 2，避免占满后整机卡住。"""
+    n = max(0, int(visible))
+    if n <= 1:
+        return 0
+    if n <= 4:
+        return 1
+    return 2
+
+
 def cpu_cap(requested: int | None = None) -> int:
     visible = visible_cpu_count()
     budget = job_cpus()
     if budget is not None and budget > 0:
         cap = max(1, min(int(budget), visible))
     else:
-        cap = max(1, visible - 1 if visible > 1 else 1)
+        cap = max(1, visible - host_reserve(visible))
     if requested is None:
         return cap
     return max(1, min(int(requested), cap))

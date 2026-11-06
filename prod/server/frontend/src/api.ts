@@ -85,6 +85,11 @@ async function openAuthedFile(path: string, fallbackName: string) {
 export type InspectBand = {
   name: string;
   wavelength_nm?: number | null;
+  min?: number | null;
+  max?: number | null;
+  p2?: number | null;
+  p50?: number | null;
+  p98?: number | null;
 };
 
 export type InspectMeta = {
@@ -131,6 +136,8 @@ export type StageStep = {
   detail: string;
   elapsed_s: number | null;
   status: "done" | "running";
+  /** 这一步的日志写明用了显卡。退回 CPU 的不带这个字段。 */
+  gpu?: boolean;
 };
 
 export type IncrementalProject = {
@@ -342,6 +349,12 @@ export const api = {
     request<{
       native_gsd_m: number;
       n_samples: number;
+      n_color?: number;
+      width?: number;
+      height?: number;
+      n_ms_bands?: number;
+      span_x_m?: number | null;
+      span_y_m?: number | null;
       choices: { scale: number; ortho_gsd_m: number; dsm_gsd_m: number }[];
     }>(`/api/tools/native-gsd?input_dir=${encodeURIComponent(inputDir)}`),
   accuracyState: (id: string) => request<AccuracyState>(`/api/jobs/${id}/accuracy`),

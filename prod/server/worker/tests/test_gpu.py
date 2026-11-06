@@ -144,16 +144,26 @@ def test_parse_nvidia_smi():
     assert gpu.parse_nvidia_smi(text) == [T4, T4_BUSY]
 
 
+def test_usage_by_index_reads_utilization():
+    text = "0, Tesla T4, 15360, 14000, 7.5, 36, 1360\n"
+    assert gpu.parse_nvidia_smi(text) == [
+        GpuInfo(index=0, name="Tesla T4", total_mb=15360, free_mb=14000, capability=(7, 5))
+    ]
+    assert gpu._usage_by_index(text) == {0: {"utilization": 36, "used_mb": 1360}}
+
+
 def test_summary_caches_and_reports_missing_runtime(monkeypatch):
     calls = []
     monkeypatch.setattr(gpu, "_summary_cache", None)
-    monkeypatch.setattr(gpu, "_query_nvidia_smi", lambda: (calls.append(1), ([T4], None))[1])
+    monkeypatch.setattr(gpu, "_query_nvidia_smi", lambda: (calls.append(1), ([T4], None, {}))[1])
     monkeypatch.setattr(gpu, "_runtime_installed", lambda: False)
     first = gpu.summary(now=100.0)
     assert first["available"] is False
     assert first["reason"] == "未安装 GPU 运行库"
     assert first["devices"][0]["capability"] == "7.5"
-    gpu.summary(now=130.0)
+    assert first["devices"][0]["used_mb"] == 360
+    assert first["devices"][0]["utilization"] is None
+    gpu.summary(now=100.0 + gpu.SUMMARY_TTL_S - 0.1)
     assert len(calls) == 1
     gpu.summary(now=100.0 + gpu.SUMMARY_TTL_S + 1)
     assert len(calls) == 2
@@ -175,6 +185,39 @@ def test_trial_stages_env_opens_unvalidated_stage(monkeypatch):
         assert gpu.select("S5_ortho").device is None
     finally:
         gpu.set_job_gpu(None, None)
+
+
+def test_configured_gpu_is_used_for_features_only(monkeypatch):
+    monkeypatch.setattr(gpu, "probe", lambda: ([T4, T4_BUSY], None))
+    gpu.set_job_gpu("auto", None)
+    try:
+        assert gpu.select("S2_features").device == 0
+        assert gpu.select("S2_intersect").device is None
+        assert gpu.select("S2_ba").device == 0
+        assert gpu.select("S3_dense").device == 0
+        assert gpu.select("S5_ortho").device is None
+        assert gpu.select("S2_at").device is None
+        gpu.set_job_gpu("off", None)
+        assert gpu.select("S2_features").device is None
+        assert gpu.select("S2_intersect").device is None
+        assert gpu.select("S2_ba").device is None
+        assert gpu.select("S3_dense").device is None
+        gpu.set_job_gpu("1", None)
+        assert gpu.select("S2_features").device == 1
+    finally:
+        gpu.set_job_gpu(None, None)
+
+
+def test_dlt_null_matches_cpu_svd():
+    import numpy as np
+
+    from ms_mosaic.at import _dlt_null
+
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((30, 6, 4))
+    got = _dlt_null(a, None)
+    ref = np.linalg.svd(a)[2][:, -1]
+    np.testing.assert_allclose(got, ref)
 
 
 def test_ortho_trial_does_not_open_matching(monkeypatch):

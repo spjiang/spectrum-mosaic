@@ -571,6 +571,43 @@ def _snapshot_for_rerun(job: JobRun) -> dict[str, Any]:
     return snap
 
 
+def prepare_oom_resume(job: JobRun) -> dict[str, Any] | None:
+    """内存不足被杀掉：从已完成阶段续跑，并把并发预算减半。已经自动续跑过则返回 None。"""
+    snap = dict(job.params_snapshot or {})
+    try:
+        level = int(snap.get("oom_backoff") or 0)
+    except (TypeError, ValueError):
+        level = 0
+    if level >= OOM_AUTO_RETRY:
+        return None
+    snap = _snapshot_for_rerun(job)
+    snap["oom_backoff"] = level + 1
+    return snap
+
+
+def publish_oom_resume(db: Session, mq: MQPublisher, job: JobRun) -> None:
+    """把已经改好的参数重新投进队列。投递失败则把任务标成失败，避免停在运行中。"""
+    snap = dict(job.params_snapshot or {})
+    stage = str(snap.get("start_stage") or "")
+    name = _STAGE_NAME.get(stage, stage or "下一阶段")
+    level = int(snap.get("oom_backoff") or 1)
+    message = f"内存不足，已自动把并发降到预算的 1/{1 << level}，从{name}继续"
+    job.message = message
+    _publish_job_or_fail(
+        db,
+        mq,
+        job,
+        {
+            "schema_version": 1,
+            "job_id": str(job.id),
+            "run_attempt": job.run_attempt,
+            "params_snapshot": snap,
+            "action": "oom_retry",
+        },
+        message,
+    )
+
+
 def _publish_job_or_fail(db: Session, mq: MQPublisher, job: JobRun, payload: dict[str, Any], ok_log: str) -> None:
     try:
         mq.publish_job(payload)
@@ -1092,7 +1129,20 @@ def apply_progress(db: Session, payload: dict[str, Any]) -> JobRun | None:
     return job
 
 
-_CLOCK_STOP = {"failed", "paused", "cancelled", "succeeded", "awaiting_continue"}
+_CLOCK_STOP = {"failed", "paused", "cancelled", "succeeded", "awaiting_continue", "oom_retry"}
+
+# 与 worker_main.OOM_AUTO_RETRY 一致：内存不足只自动续跑一次，再被杀掉就停。
+OOM_AUTO_RETRY = 1
+
+_STAGE_NAME = {
+    "S0_io": "输入输出",
+    "S1_catalog": "影像编目",
+    "S2_at": "空三解算",
+    "S3_dense": "密集匹配",
+    "S4_dsm": "DSM 生成",
+    "S5_ortho": "正射镶嵌",
+    "S6_report": "质量报告",
+}
 
 
 def _add_open_slice(timings: dict, stage: str, since: str, now: datetime) -> None:
@@ -1194,7 +1244,8 @@ def apply_event(db: Session, payload: dict[str, Any]) -> JobRun | None:
         return None
     event = payload.get("event")
     stage = payload.get("stage_id")
-    if (job.params_snapshot or {}).get("seam_cancel_token") and event in {
+    snap_now = getattr(job, "params_snapshot", None) or {}
+    if snap_now.get("seam_cancel_token") and event in {
         "running",
         "paused",
         "cancelled",
@@ -1227,6 +1278,29 @@ def apply_event(db: Session, payload: dict[str, Any]) -> JobRun | None:
         job.global_percent = 100.0
         job.finished_at = _utcnow()
         job.message = payload.get("message") or "完成"
+    elif event == "oom_retry":
+        # 计算进程已被系统杀掉。已完成的阶段还在，降并发后从下一阶段自动继续。
+        if job.status not in {"paused", "cancelled", "succeeded"}:
+            snap = prepare_oom_resume(job)
+            if snap is None:
+                job.status = "failed"
+                job.error_summary = payload.get("error") or "内存不足，自动降低并发后仍然失败"
+                job.finished_at = _utcnow()
+                job.message = "内存不足，自动降低并发后仍然失败"
+            else:
+                job.params_snapshot = snap
+                job.memory_gb = parse_memory_gb(snap)
+                job.cpus = parse_cpus(snap)
+                job.gpu = parse_gpu(snap)
+                job.gpu_memory_gb = parse_gpu_memory_gb(snap)
+                job.status = "running"
+                job.finished_at = None
+                job.error_summary = None
+                job.run_attempt = int(job.run_attempt or 1) + 1
+                stage = str(snap.get("start_stage") or "")
+                name = _STAGE_NAME.get(stage, stage or "下一阶段")
+                level = int(snap.get("oom_backoff") or 1)
+                job.message = f"内存不足，已自动把并发降到预算的 1/{1 << level}，从{name}继续"
     elif event == "failed":
         # 立即停止已经把任务标成暂停。随后进程被杀掉时补报的失败不能把暂停盖掉。
         if job.status not in {"paused", "cancelled", "succeeded"}:

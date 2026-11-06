@@ -189,12 +189,14 @@ export type ComputeState = "live" | "orphan" | "stale" | "none";
 export function jobComputeState(job: { id?: string; status?: string }, inspect: any): ComputeState {
   if (!LIVE_JOB.includes(String(job?.status || ""))) return "none";
   const id = String(job.id || "");
-  const fromActive = (inspect?.active_jobs || []).find((j: any) => String(j.id) === id)?.compute_state;
-  if (fromActive === "live" || fromActive === "orphan" || fromActive === "stale") return fromActive;
   const current = inspect?.worker?.current_job;
   if (current && String(current.job_id) === id) {
     if (current.orphan_compute || !current.pid) return "orphan";
     return "live";
   }
+  const fromActive = (inspect?.active_jobs || []).find((j: any) => String(j.id) === id)?.compute_state;
+  if (fromActive === "live" || fromActive === "orphan") return fromActive;
+  if (id && attachJobProcesses({ id }, inspect).process_count > 0) return "live";
+  if (fromActive === "stale") return "stale";
   return "stale";
 }

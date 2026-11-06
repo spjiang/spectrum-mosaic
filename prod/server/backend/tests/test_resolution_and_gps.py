@@ -48,6 +48,36 @@ def test_gsd_is_height_over_scaled_focal():
     assert got == pytest.approx(80.0 / focal)
 
 
+def _color_jpeg(width: int, height: int, agl: float, lat: float, lon: float) -> bytes:
+    # FFD8 + SOF0。解析器在标记后第 5 字节读高、第 7 字节读宽。
+    sof = bytes.fromhex("ffd8ffc0000b08") + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+    xmp = (
+        f"<Camera:AboveGroundAltitude>{agl}</Camera:AboveGroundAltitude>"
+        f"<Camera:PositionLatitudeFused>{lat}</Camera:PositionLatitudeFused>"
+        f"<Camera:PositionLongitudeFused>{lon}</Camera:PositionLongitudeFused>"
+    ).encode("ascii")
+    return sof + xmp
+
+
+def test_scene_profile_uses_image_size_bands_and_track(tmp_path):
+    from app.services.resolution import measure_native_gsd
+
+    (tmp_path / "MAX_1_Color_D.jpg").write_bytes(_color_jpeg(2048, 1536, 80.0, 22.50, 114.00))
+    (tmp_path / "MAX_2_Color_D.jpg").write_bytes(_color_jpeg(2048, 1536, 80.0, 22.51, 114.01))
+    (tmp_path / "MAX_1_550nm_D.tif").write_bytes(b"")
+    (tmp_path / "MAX_1_850nm_D.tif").write_bytes(b"")
+    (tmp_path / "MAX_2_720nm_R.tif").write_bytes(b"")
+    (tmp_path / "MAX_1_Color_W.jpg").write_bytes(_color_jpeg(2048, 1536, 80.0, 0.0, 0.0))
+    info = measure_native_gsd(tmp_path)
+    assert info["width"] == 2048
+    assert info["height"] == 1536
+    assert info["n_color"] == 2
+    assert info["bands"] == ["Color", "550nm", "720nm", "850nm"]
+    assert info["n_ms_bands"] == 3
+    assert info["span_x_m"] > 2048 * info["native_gsd_m"]
+    assert info["span_y_m"] > 1536 * info["native_gsd_m"]
+
+
 def test_jpeg_size_reads_sof():
     # FFD8 + SOF0：长度 8，精度 8，高 1536，宽 2048
     data = bytes.fromhex("ffd8ffc000080806000800")

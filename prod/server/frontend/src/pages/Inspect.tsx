@@ -4,7 +4,6 @@ import {
   Card,
   Checkbox,
   Collapse,
-  Descriptions,
   Empty,
   Input,
   InputNumber,
@@ -117,70 +116,160 @@ function buildPoints(meta: InspectMeta, pixel: InspectPixel): ProbePoint[] {
     }));
 }
 
+function niceStep(span: number, count: number): number {
+  if (!(span > 0) || !Number.isFinite(span)) return 1;
+  const raw = span / Math.max(1, count);
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const err = raw / pow;
+  const nice = err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
+  return nice * pow;
+}
+
+function formatTick(v: number, step: number): string {
+  if (!Number.isFinite(v)) return "—";
+  const digits = step >= 1 ? 0 : Math.min(4, Math.max(0, Math.ceil(-Math.log10(step))));
+  return v.toFixed(digits);
+}
+
+function axisTicks(lo: number, hi: number, count: number): { v: number; step: number }[] {
+  const step = niceStep(hi - lo, count);
+  const start = Math.ceil((lo - step * 1e-9) / step) * step;
+  const ticks: { v: number; step: number }[] = [];
+  for (let v = start; v <= hi + step * 1e-6; v += step) {
+    const rounded = Number(v.toPrecision(12));
+    if (rounded < lo - step * 1e-6 || rounded > hi + step * 1e-6) continue;
+    ticks.push({ v: rounded, step });
+    if (ticks.length > 8) break;
+  }
+  return ticks;
+}
+
 function ProbeGraph({
   points,
   yMin,
   yMax,
+  spans,
 }: {
   points: ProbePoint[];
   yMin?: number | null;
   yMax?: number | null;
+  spans?: { min?: number | null; max?: number | null; p2?: number | null; p50?: number | null; p98?: number | null }[];
 }) {
   const nums = points
-    .map((p) => ({ ...p, n: asNumber(p.value) }))
-    .filter((p): p is ProbePoint & { n: number } => p.n != null);
+    .map((p, i) => ({ ...p, n: asNumber(p.value), span: spans?.[i] }))
+    .filter((p): p is ProbePoint & { n: number; span?: { min?: number | null; max?: number | null; p2?: number | null; p50?: number | null; p98?: number | null } } => p.n != null);
   if (!nums.length) {
     return <Empty description="当前坐标没有可绘制的数值" />;
   }
   const useWl = nums.every((p) => p.wavelength_nm != null);
-  const xs = nums.map((p, i) => (useWl ? Number(p.wavelength_nm) : p.index));
+  const xs = nums.map((p) => (useWl ? Number(p.wavelength_nm) : p.index));
   const ys = nums.map((p) => p.n);
-  const x0 = Math.min(...xs);
-  const x1 = Math.max(...xs);
-  const autoLo = Math.min(...ys);
-  const autoHi = Math.max(...ys);
-  const lo = yMin == null || !Number.isFinite(yMin) ? (autoLo === autoHi ? autoLo - 1 : autoLo) : yMin;
-  const hi = yMax == null || !Number.isFinite(yMax) ? (autoLo === autoHi ? autoHi + 1 : autoHi) : yMax;
-  const padL = 48;
+  let x0 = Math.min(...xs);
+  let x1 = Math.max(...xs);
+  if (!(x1 > x0)) {
+    x0 -= 1;
+    x1 += 1;
+  } else {
+    const pad = (x1 - x0) * 0.08;
+    x0 -= pad;
+    x1 += pad;
+  }
+  const dataLo = Math.min(...ys);
+  const dataHi = Math.max(...ys);
+  let lo = dataLo;
+  let hi = dataHi;
+  if (nums.length === 1) {
+    const span = nums[0].span;
+    const sceneLo = span?.p2 ?? span?.min;
+    const sceneHi = span?.p98 ?? span?.max;
+    if (sceneLo != null && sceneHi != null && sceneHi > sceneLo) {
+      lo = sceneLo;
+      hi = sceneHi;
+    }
+  }
+  if (yMin != null && Number.isFinite(yMin)) lo = yMin;
+  if (yMax != null && Number.isFinite(yMax)) hi = yMax;
+  if (nums.length === 1) {
+    lo = Math.min(lo, ys[0]);
+    hi = Math.max(hi, ys[0]);
+  }
+  if (!(hi > lo)) {
+    lo -= 1;
+    hi += 1;
+  } else if (nums.length > 1 && (yMin == null || yMax == null)) {
+    const pad = (hi - lo) * 0.12;
+    if (yMin == null) lo -= pad;
+    if (yMax == null) hi += pad;
+  } else if (nums.length === 1 && yMin == null && yMax == null) {
+    const pad = (hi - lo) * 0.08;
+    lo -= pad;
+    hi += pad;
+  }
+  const padL = 52;
   const padR = 16;
-  const padT = 16;
-  const padB = 36;
-  const w = 520;
-  const h = 280;
+  const padT = 8;
+  const padB = 22;
+  const w = 640;
+  const h = 132;
   const spanX = x1 - x0 || 1;
   const spanY = hi - lo || 1;
   const px = (x: number) => padL + ((x - x0) / spanX) * (w - padL - padR);
   const py = (y: number) => padT + ((hi - y) / spanY) * (h - padT - padB);
-  const path = nums
-    .map((p, i) => `${i === 0 ? "M" : "L"}${px(xs[i]).toFixed(1)} ${py(p.n).toFixed(1)}`)
-    .join(" ");
-  const yTicks = 5;
+  const yTicks = axisTicks(lo, hi, 3);
+  const xLabels =
+    nums.length <= 8
+      ? nums.map((p, i) => ({ i, text: useWl ? `${p.wavelength_nm} nm` : String(p.index) }))
+      : [0, Math.floor((nums.length - 1) / 2), nums.length - 1].map((i) => ({
+          i,
+          text: useWl ? `${nums[i].wavelength_nm} nm` : String(nums[i].index),
+        }));
+  const line = nums.map((p, i) => `${i === 0 ? "M" : "L"}${px(xs[i]).toFixed(1)} ${py(p.n).toFixed(1)}`).join(" ");
+  const baseY = py(lo);
+  const area = `${line} L${px(xs[xs.length - 1]).toFixed(1)} ${baseY.toFixed(1)} L${px(xs[0]).toFixed(1)} ${baseY.toFixed(1)} Z`;
+  const median = nums.length === 1 ? asNumber(nums[0].span?.p50) : null;
+  const lone = nums.length === 1 ? nums[0] : null;
   return (
-    <svg className="inspect-graph" viewBox={`0 0 ${w} ${h}`} width="100%" height={h}>
-      {Array.from({ length: yTicks + 1 }, (_, i) => {
-        const v = lo + (spanY * i) / yTicks;
-        const y = py(v);
-        return (
-          <g key={i}>
-            <line x1={padL} x2={w - padR} y1={y} y2={y} stroke="#e2e8f0" />
-            <text x={padL - 8} y={y + 4} textAnchor="end" fontSize="10" fill="#64748b">
-              {Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(v >= 100 ? 0 : 2)}
-            </text>
+    <div className="inspect-graph-wrap">
+      <svg className="inspect-graph" viewBox={`0 0 ${w} ${h}`} role="img" aria-label="像元曲线">
+        {yTicks.map((tick) => {
+          const y = py(tick.v);
+          return (
+            <g key={tick.v}>
+              <line x1={padL} x2={w - padR} y1={y} y2={y} stroke="#e2e8f0" />
+              <text x={padL - 8} y={y + 3} textAnchor="end" fontSize="11" fill="#64748b">
+                {formatTick(tick.v, tick.step)}
+              </text>
+            </g>
+          );
+        })}
+        <line x1={padL} x2={padL} y1={padT} y2={h - padB} stroke="#cbd5e1" />
+        <line x1={padL} x2={w - padR} y1={h - padB} y2={h - padB} stroke="#cbd5e1" />
+        {median != null && median >= lo && median <= hi ? (
+          <line x1={padL} x2={w - padR} y1={py(median)} y2={py(median)} stroke="#94a3b8" strokeDasharray="4 4" />
+        ) : null}
+        {nums.length > 1 ? <path d={area} fill="rgba(27, 107, 190, 0.12)" stroke="none" /> : null}
+        {nums.length > 1 ? <path d={line} fill="none" stroke="#1b6bbe" strokeWidth="2" strokeLinejoin="round" /> : null}
+        {nums.map((p, i) => (
+          <g key={p.key}>
+            <line x1={px(xs[i])} x2={px(xs[i])} y1={py(p.n)} y2={h - padB} stroke="#1b6bbe" strokeOpacity="0.35" />
+            <circle cx={px(xs[i])} cy={py(p.n)} r="4.5" fill="#1b6bbe" stroke="#fff" strokeWidth="1.5" />
           </g>
-        );
-      })}
-      <line x1={padL} x2={padL} y1={padT} y2={h - padB} stroke="#94a3b8" />
-      <line x1={padL} x2={w - padR} y1={h - padB} y2={h - padB} stroke="#94a3b8" />
-      {nums.length > 1 ? <path d={path} fill="none" stroke="#1e293b" strokeWidth="1.4" /> : null}
-      {nums.map((p, i) => (
-        <circle key={p.key} cx={px(xs[i])} cy={py(p.n)} r="4" fill="#2563eb" />
-      ))}
-      {nums.map((p, i) => (
-        <text key={`x${p.key}`} x={px(xs[i])} y={h - padB + 16} textAnchor="middle" fontSize="10" fill="#64748b">
-          {useWl ? `${p.wavelength_nm}nm` : p.index}
-        </text>
-      ))}
-    </svg>
+        ))}
+        {xLabels.map((label) => (
+          <text key={label.i} x={px(xs[label.i])} y={h - 6} textAnchor="middle" fontSize="11" fill="#64748b">
+            {label.text}
+          </text>
+        ))}
+      </svg>
+      {lone ? (
+        <p className="inspect-graph-note">
+          {lone.wavelength_nm != null ? `${lone.wavelength_nm} nm` : lone.band} 只有一个波段，纵轴用这张图的取值范围，点会随像元上下移动。
+          {median != null && median >= lo && median <= hi
+            ? ` 虚线是中位值 ${formatTick(median, niceStep(hi - lo, 4))}。`
+            : ""}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -443,8 +532,26 @@ function InspectBody() {
           </div>
 
           <div className="inspect-probe">
+            <div className="inspect-readout" aria-live="polite">
+              <div>
+                <span>列</span>
+                <strong>{pixel ? pixel.col : "—"}</strong>
+              </div>
+              <div>
+                <span>行</span>
+                <strong>{pixel ? pixel.row : "—"}</strong>
+              </div>
+              <div>
+                <span>像元坐标</span>
+                <strong>{footerXY || "—"}</strong>
+              </div>
+              <div>
+                <span>值</span>
+                <strong>{footerValue || "—"}</strong>
+              </div>
+            </div>
             <div className="inspect-probe-toolbar">
-              <div className="inspect-probe-row">
+              <div className="inspect-probe-row is-grow">
                 <label>坐标</label>
                 <Input
                   value={coordText}
@@ -465,15 +572,15 @@ function InspectBody() {
                   value={colText}
                   onChange={(e) => setColText(e.target.value)}
                   onPressEnter={submitRowCol}
-                  style={{ width: 96 }}
                 />
                 <label>行</label>
                 <Input
                   value={rowText}
                   onChange={(e) => setRowText(e.target.value)}
                   onPressEnter={submitRowCol}
-                  style={{ width: 96 }}
                 />
+              </div>
+              <div className="inspect-probe-row">
                 <Checkbox checked={decimalsOn} onChange={(e) => setDecimalsOn(e.target.checked)}>
                   小数
                 </Checkbox>
@@ -483,7 +590,6 @@ function InspectBody() {
                   value={decimals}
                   disabled={!decimalsOn}
                   onChange={(v) => setDecimals(Number(v ?? 10))}
-                  style={{ width: 72 }}
                 />
               </div>
             </div>
@@ -528,7 +634,7 @@ function InspectBody() {
                   label: "曲线",
                   children: (
                     <div>
-                      <Space style={{ marginBottom: 8 }}>
+                      <Space style={{ marginBottom: 4 }}>
                         <span>Y min</span>
                         <InputNumber
                           value={yMin ?? undefined}
@@ -542,7 +648,18 @@ function InspectBody() {
                           placeholder="自动"
                         />
                       </Space>
-                      <ProbeGraph points={points} yMin={yMin} yMax={yMax} />
+                      <ProbeGraph
+                        points={points}
+                        yMin={yMin}
+                        yMax={yMax}
+                        spans={meta.bands.map((band) => ({
+                          min: band.min,
+                          max: band.max,
+                          p2: band.p2,
+                          p50: band.p50,
+                          p98: band.p98,
+                        }))}
+                      />
                     </div>
                   ),
                 },
@@ -574,24 +691,46 @@ function InspectBody() {
                   key: "file",
                   label: "文件",
                   children: (
-                    <Descriptions size="small" column={2} bordered>
-                      <Descriptions.Item label="文件名">{meta.filename}</Descriptions.Item>
-                      <Descriptions.Item label="格式">{(meta.format || "").toUpperCase() || "—"}</Descriptions.Item>
-                      <Descriptions.Item label="波段">
-                        {meta.bands.map((b) => b.name).join(" / ")}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="数据类型">{meta.dtype}</Descriptions.Item>
-                      <Descriptions.Item label="大小">{bytes(meta.size_bytes)}</Descriptions.Item>
-                      <Descriptions.Item label="NoData">{fmt(meta.nodata)}</Descriptions.Item>
+                    <dl className="inspect-facts">
+                      <div>
+                        <dt>文件名</dt>
+                        <dd>{meta.filename}</dd>
+                      </div>
+                      <div>
+                        <dt>格式</dt>
+                        <dd>{(meta.format || "").toUpperCase() || "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>波段</dt>
+                        <dd>{meta.bands.map((b) => b.name).join(" / ") || "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>数据类型</dt>
+                        <dd>{meta.dtype}</dd>
+                      </div>
+                      <div>
+                        <dt>大小</dt>
+                        <dd>{bytes(meta.size_bytes)}</dd>
+                      </div>
+                      <div>
+                        <dt>NoData</dt>
+                        <dd>{fmt(meta.nodata)}</dd>
+                      </div>
                       {meta.tiff?.compression ? (
-                        <Descriptions.Item label="压缩">{String(meta.tiff.compression)}</Descriptions.Item>
+                        <div>
+                          <dt>压缩</dt>
+                          <dd>{String(meta.tiff.compression)}</dd>
+                        </div>
                       ) : null}
                       {meta.geotransform ? (
-                        <Descriptions.Item label="原点">
-                          {fmt(meta.geotransform.origin_x)}, {fmt(meta.geotransform.origin_y)}
-                        </Descriptions.Item>
+                        <div>
+                          <dt>原点</dt>
+                          <dd>
+                            {fmt(meta.geotransform.origin_x)}, {fmt(meta.geotransform.origin_y)}
+                          </dd>
+                        </div>
                       ) : null}
-                    </Descriptions>
+                    </dl>
                   ),
                 },
                 {

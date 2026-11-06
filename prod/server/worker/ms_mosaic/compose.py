@@ -209,6 +209,7 @@ def render_band(
     seam_cfg: SeamConfig | None = None,
     seam_edits: list | None = None,
     bands_order: Sequence[str] | None = None,
+    per_worker_mb: int | None = None,
 ) -> BandRaster:
     """整幅正射（浮点，落盘累加）+ 拼接线标号。标号是块内视角下标，views 是全局影像 id。
 
@@ -234,7 +235,10 @@ def render_band(
         "gains": {},
         "bands_order": tuple(bands_order) if bands_order is not None else None,
     }
-    per_worker_mb = tile_worker_mb(image_bytes)
+    if per_worker_mb is None:
+        per_worker_mb = tile_worker_mb(image_bytes)
+    else:
+        per_worker_mb = max(1, int(per_worker_mb))
     choice = select_gpu("S5_ortho")
     payload.update(_ortho_gpu_fields(choice, workers, per_worker_mb, log, f"正射 {group_name(band, bands_order)} ({band})"))
     try:

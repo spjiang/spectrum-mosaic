@@ -1,4 +1,4 @@
-from ms_mosaic.cpu import parse_cpu_max, resolve_cpu_budget, set_job_cpus, job_cpus, cpu_cap
+from ms_mosaic.cpu import parse_cpu_max, resolve_cpu_budget, set_job_cpus, job_cpus, cpu_cap, host_reserve
 
 
 def test_parse_cpu_max_unlimited():
@@ -29,6 +29,14 @@ def test_job_cpus_context():
     finally:
         set_job_cpus(None)
     assert job_cpus() is None
+
+
+def test_auto_cpu_leaves_cores_for_the_host(monkeypatch):
+    monkeypatch.setattr("ms_mosaic.cpu.visible_cpu_count", lambda: 15)
+    set_job_cpus(None)
+    assert host_reserve(15) == 2
+    assert host_reserve(4) == 1
+    assert cpu_cap() == 13
 
 
 def test_cpu_cap_uses_job_budget(monkeypatch):

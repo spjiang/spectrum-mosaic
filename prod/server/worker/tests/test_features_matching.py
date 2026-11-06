@@ -190,6 +190,122 @@ def test_extract_file_rebuilds_corrupt_npz(tmp_path):
     assert zipfile.is_zipfile(cache / "shot.npz")
 
 
+def test_extract_file_cache_follows_max_features(tmp_path, monkeypatch):
+    """同一上限复用缓存；上限变了就重提，并记下本次上限。"""
+    from ms_mosaic.features import Features, extract_file
+
+    img = tmp_path / "shot.jpg"
+    img.write_bytes(b"placeholder")
+    calls = {"n": 0}
+
+    def fake_extract(_gray, max_features=8192):
+        calls["n"] += 1
+        n = int(max_features)
+        return Features(np.zeros((n, 4), np.float32), np.zeros((n, 128), np.float32))
+
+    monkeypatch.setattr("ms_mosaic.features.extract", fake_extract)
+    monkeypatch.setattr("ms_mosaic.features.read_gray8", lambda _p: np.zeros((8, 8), np.uint8))
+    cache = tmp_path / "cache"
+    first = extract_file(img, cache_dir=cache, max_features=10)
+    assert first.keypoints.shape[0] == 10
+    assert calls["n"] == 1
+    again = extract_file(img, cache_dir=cache, max_features=10)
+    assert again.keypoints.shape[0] == 10
+    assert calls["n"] == 1
+    changed = extract_file(img, cache_dir=cache, max_features=4)
+    assert changed.keypoints.shape[0] == 4
+    assert calls["n"] == 2
+    with np.load(cache / "shot.npz") as data:
+        assert int(np.asarray(data["max_features"])) == 4
+
+
+def test_extract_file_legacy_cache_without_limit(tmp_path, monkeypatch):
+    """旧缓存没写上限。点数没顶满 8192 时，本次上限不低于已有点数就沿用。"""
+    from ms_mosaic.features import Features, extract_file
+
+    img = tmp_path / "shot.jpg"
+    img.write_bytes(b"placeholder")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    np.savez_compressed(
+        cache / "shot.npz",
+        keypoints=np.zeros((3, 4), np.float32),
+        descriptors=np.zeros((3, 128), np.float32),
+    )
+    calls = {"n": 0}
+
+    def fake_extract(_gray, max_features=8192):
+        calls["n"] += 1
+        n = int(max_features)
+        return Features(np.ones((n, 4), np.float32), np.ones((n, 128), np.float32))
+
+    monkeypatch.setattr("ms_mosaic.features.extract", fake_extract)
+    monkeypatch.setattr("ms_mosaic.features.read_gray8", lambda _p: np.zeros((8, 8), np.uint8))
+    kept = extract_file(img, cache_dir=cache, max_features=100)
+    assert kept.keypoints.shape[0] == 3
+    assert calls["n"] == 0
+    redone = extract_file(img, cache_dir=cache, max_features=2)
+    assert redone.keypoints.shape[0] == 2
+    assert calls["n"] == 1
+
+
+def test_extract_file_legacy_full_cap_only_matches_8192(tmp_path, monkeypatch):
+    from ms_mosaic.features import Features, extract_file
+
+    img = tmp_path / "full.jpg"
+    img.write_bytes(b"placeholder")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    np.savez_compressed(
+        cache / "full.npz",
+        keypoints=np.zeros((8192, 4), np.float32),
+        descriptors=np.zeros((8192, 128), np.float32),
+    )
+    calls = {"n": 0}
+
+    def fake_extract(_gray, max_features=8192):
+        calls["n"] += 1
+        return Features(np.ones((1, 4), np.float32), np.ones((1, 128), np.float32))
+
+    monkeypatch.setattr("ms_mosaic.features.extract", fake_extract)
+    monkeypatch.setattr("ms_mosaic.features.read_gray8", lambda _p: np.zeros((8, 8), np.uint8))
+    kept = extract_file(img, cache_dir=cache, max_features=8192)
+    assert kept.keypoints.shape[0] == 8192
+    assert calls["n"] == 0
+    extract_file(img, cache_dir=cache, max_features=9000)
+    assert calls["n"] == 1
+
+
+def test_extract_file_gpu_cache_is_separate_from_cpu(tmp_path, monkeypatch):
+    """显卡缓存不能被 CPU 提点复用，同一张卡、同一上限可以复用。"""
+    from ms_mosaic.features import Features, extract_file
+
+    img = tmp_path / "shot.tif"
+    img.write_bytes(b"placeholder")
+    cache = tmp_path / "cache"
+    calls = {"gpu": 0, "cpu": 0}
+
+    def fake_gpu(_gray, *, device, max_features):
+        calls["gpu"] += 1
+        return np.ones((3, 4), np.float32), np.ones((3, 128), np.float32)
+
+    def fake_cpu(_gray, max_features=8192):
+        calls["cpu"] += 1
+        return Features(np.zeros((2, 4), np.float32), np.zeros((2, 128), np.float32))
+
+    monkeypatch.setattr("ms_mosaic.sift_gpu.extract", fake_gpu)
+    monkeypatch.setattr("ms_mosaic.features.extract", fake_cpu)
+    monkeypatch.setattr("ms_mosaic.features.read_gray8", lambda _p: np.zeros((8, 8), np.uint8))
+    gpu_feats = extract_file(img, cache_dir=cache, max_features=8, device=0)
+    assert gpu_feats.keypoints.shape[0] == 3
+    assert calls == {"gpu": 1, "cpu": 0}
+    extract_file(img, cache_dir=cache, max_features=8, device=0)
+    assert calls["gpu"] == 1
+    cpu_feats = extract_file(img, cache_dir=cache, max_features=8)
+    assert cpu_feats.keypoints.shape[0] == 2
+    assert calls["cpu"] == 1
+
+
 def test_load_keypoints_skips_descriptors(tmp_path):
     """缓存里即使有描述子，load_keypoints 也只读关键点数组。"""
     from ms_mosaic.features import load_keypoints
@@ -204,4 +320,21 @@ def test_load_keypoints_skips_descriptors(tmp_path):
     got = load_keypoints(img, cache_dir=cache)
     assert np.allclose(got, kps)
     assert got.shape == (2, 4)
+
+
+def test_load_keypoints_rebuilds_with_the_same_limit(tmp_path, monkeypatch):
+    """缓存缺失时按调用方上限重提，不能退回默认 8192。"""
+    from ms_mosaic.features import Features, load_keypoints
+
+    seen = {}
+
+    def fake(path, cache_dir=None, max_features=8192, device=None):
+        seen["max_features"] = max_features
+        return Features(np.zeros((1, 4), np.float32), np.zeros((1, 128), np.float32))
+
+    monkeypatch.setattr("ms_mosaic.features.extract_file", fake)
+    img = tmp_path / "missing.jpg"
+    img.write_bytes(b"x")
+    load_keypoints(img, cache_dir=tmp_path / "empty", max_features=256)
+    assert seen["max_features"] == 256
 

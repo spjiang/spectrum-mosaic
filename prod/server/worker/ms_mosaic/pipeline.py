@@ -11,14 +11,33 @@ import numpy as np
 from ms_mosaic.compose import render_band, render_ms_bands, write_band_product
 from ms_mosaic.ortho import share_rectification
 from ms_mosaic.parallel import (
+    ORTHO_BAND_WORKER_FACTOR,
+    TILE_WORKER_MB,
+    fit_concurrent,
     growth_since_now,
+    headroom_mb,
+    plan_ortho_band_pools,
     reserve_memory,
     resolve_workers,
-    split_ortho_pools,
     tile_worker_mb,
 )
 
+# 写出临时量：两张整幅布尔掩膜、补洞和条带量化。不含磁盘累加器被整幅读入后的页。
 WRITE_BYTES_PER_CELL = 8
+
+
+def band_write_mb(width: int, height: int, n_bands: int) -> int:
+    """一个波段写出时会进常驻的估计（MB）。
+
+    BandRaster 是磁盘 memmap。写出要逐条带读完整幅，页会进常驻：
+    acc float32×通道 + wsum float32 + labels int16 + label_w float32，再加写出临时量。
+    只按临时量预约会把 7 个波段一起放进 24 GB 引擎，主进程被系统杀掉。
+    """
+    per_cell = int(n_bands) * 4 + 10 + WRITE_BYTES_PER_CELL
+    raw = max(1, int(width) * int(height) * per_cell >> 20)
+    return headroom_mb(raw)
+
+
 from ms_mosaic.dense import DenseConfig, compute_height_field
 from ms_mosaic.dsm import (
     Dsm,
@@ -187,6 +206,7 @@ def run_mosaic(
     dsm_gsd: float | None = None,
     workers: int | None = None,
     workers_at: int | None = None,
+    max_features: int | None = None,
     workers_dense: int | None = None,
     workers_ortho: int | None = None,
     memory_gb: float | None = None,
@@ -274,13 +294,24 @@ def run_mosaic(
         reporter.stage_start(stage_id, message)
 
     from ms_mosaic.checkpoint import checkpoint_path, resolve_sparse, should_reuse_at
+    from ms_mosaic.memory import oom_backoff
 
     reuse_at = should_reuse_at(start_stage, checkpoint_path(cache_dir))
-    # 编目节点在进入空三前结束。影像筛选发生在空三内部，这里只记交接耗时。
-    if stage_index(start_stage) <= stage_index("S1_catalog"):
-        reporter.stage_done("S1_catalog", max(0.0, time.time() - t0))
+    report_catalog = stage_index(start_stage) <= stage_index("S1_catalog")
+    catalog_elapsed = [0.0]
+    if report_catalog:
+        enter("S1_catalog", "影像编目与筛选")
+
+    def finish_catalog(elapsed_s: float) -> None:
+        catalog_elapsed[0] = max(0.0, elapsed_s)
+        if report_catalog:
+            reporter.stage_done("S1_catalog", catalog_elapsed[0])
+
     enter("S2_at", "复用空三检查点" if reuse_at else "空三 / 稀疏重建")
-    t = time.time()
+    backoff = oom_backoff()
+    if backoff:
+        log(f"上次计算因内存不足被系统结束，本次并发按内存预算的 1/{1 << backoff} 安排")
+    t = time.perf_counter()
     sparse = resolve_sparse(
         input_dir,
         cache_dir,
@@ -289,6 +320,7 @@ def run_mosaic(
         max_frames=max_frames,
         workers=at_workers,
         memory_gb=memory_gb,
+        max_features=max_features,
         min_agl_m=min_agl_m,
         max_tilt_deg=max_tilt_deg,
         drop_white_panel=drop_white_panel,
@@ -300,8 +332,12 @@ def run_mosaic(
         calibrate_intrinsics=calibrate_intrinsics,
         ba_stage3=ba_stage3,
         log=log,
+        on_catalog_done=finish_catalog if report_catalog else None,
     )
-    timings["at"] = 0.0 if reuse_at else time.time() - t
+    catalog_s = float(sparse.timings.get("catalog") or catalog_elapsed[0] or 0.0)
+    if report_catalog:
+        timings["catalog"] = catalog_s
+    timings["at"] = 0.0 if reuse_at else max(0.0, time.perf_counter() - t - catalog_s)
     reporter.progress("S2_at", 100, global_percent_for("S2_at", 100), "空三完成")
     reporter.stage_done("S2_at", timings["at"])
     if not reuse_at:
@@ -328,7 +364,7 @@ def run_mosaic(
         dense_poses = dict(sparse.poses)
         dense_paths = dict(sparse.image_paths)
 
-    t = time.time()
+    t = time.perf_counter()
     pts = sparse.points
     # 参考面取覆盖区按面积加权的稳健地形面：稀疏点密度在纹理强的地方高出几十倍，
     # 直接取中位数会被那一小块区域拉走，估出的航高偏大、GSD 偏粗。
@@ -445,7 +481,7 @@ def run_mosaic(
             log=log,
             workers=dense_workers,
         )
-        timings["dense"] = time.time() - t
+        timings["dense"] = time.perf_counter() - t
         reporter.stage_done("S3_dense", timings["dense"])
         early = _barrier(control, reporter, "S3_dense")
         if early:
@@ -469,10 +505,10 @@ def run_mosaic(
             dsm_kw["tolerance_m"] = float(spike_tolerance_m)
         dsm = build_dsm(field, **dsm_kw)
 
-    t = time.time()
+    t = time.perf_counter()
     enter("S4_dsm", "写出 DSM")
     dsm_path = write_geotiff(dsm, products_dir / "DSM.tif")
-    timings["dsm"] = time.time() - t
+    timings["dsm"] = time.perf_counter() - t
     reporter.stage_done("S4_dsm", timings["dsm"])
     early = _barrier(control, reporter, "S4_dsm")
     if early:
@@ -495,7 +531,7 @@ def run_mosaic(
     enter("S5_ortho", f"正射波段 {wanted}")
     files: dict[str, Any] = {"bands": {}, "dsm": str(dsm_path), "mosaic_dir": str(products_dir)}
     rgb_raster = None
-    t_ortho = time.time()
+    t_ortho = time.perf_counter()
     # 贴边采样面只跟 DSM 有关，各波段相同。算一次，避免每个波段各滤一遍同一张高程。
     ortho_z = flatten_edge_z(
         dsm.z,
@@ -517,7 +553,7 @@ def run_mosaic(
         shot_to_image = {im.shot_index: im.index for im in block.by_band(band)}
         return translate_edits(seam_edits, color_to_shot, shot_to_image)
 
-    def _run_band(band: str, band_workers: int | None):
+    def _run_band(band: str, band_workers: int | None, per_worker_mb: int | None = None):
         cameras, poses, paths = transfer_band(block, at.cameras, at.poses, band)
         if not poses:
             log(f"跳过 {band}：没有对应的空三外方位")
@@ -537,6 +573,7 @@ def run_mosaic(
             seam_cfg=seam_cfg,
             seam_edits=_edits_for(band),
             bands_order=discovered,
+            per_worker_mb=per_worker_mb,
         )
         if band == RGB_BAND and ref_dir is not None and (radiometric_normalize or match_reference_color):
             # 全局仿射辐射归一化：只改档位，不动纹理与局部对比。自研输出忠实于
@@ -556,8 +593,9 @@ def run_mosaic(
         import rasterio
 
         out_path = products_dir / group_name(band, discovered)
-        # 写出要整幅掩膜、连通域标号与补洞临时量，约每格 8 B；预约让并发波段别在这时扩池
-        write_mb = ortho_grid.width * ortho_grid.height * WRITE_BYTES_PER_CELL >> 20
+        # 整幅读累加器会把页打进常驻，预约按这个量，避免别的池在写出时再扩
+        n_ch = int(raster.n_bands) if raster is not None and hasattr(raster, "n_bands") else 1
+        write_mb = band_write_mb(ortho_grid.width, ortho_grid.height, n_ch)
         with reserve_memory(write_mb, growth_since_now()):
             # 每个文件一个 GDAL 数据集。Env 把错误栈留在本线程，不和别的波段串。
             with rasterio.Env():
@@ -637,12 +675,30 @@ def run_mosaic(
                 for band, raster in pending:
                     _commit_band(band, raster, None)
             else:
-                # 七个波段各写各的文件。LZW 在 GDAL 里，线程可以重叠；
-                # 像元与逐个写出相同。登记文件名仍在主线程，避免字典和主波段指针竞态。
-                log(f"多光谱 {len(pending)} 个波段同时写出")
-                with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+                # 七个波段各写各的文件。像元与逐个写出相同。
+                # 同时写几个由剩余内存决定：每个写出都会把该波段的整幅累加器读进常驻。
+                # 登记文件名仍在主线程，避免字典和主波段指针竞态。
+                n_ch = max(int(raster.n_bands) for _, raster in pending)
+                per_mb = band_write_mb(ortho_grid.width, ortho_grid.height, n_ch)
+                n_write = fit_concurrent(len(pending), per_mb)
+                if n_write >= len(pending):
+                    log(f"多光谱 {len(pending)} 个波段同时写出")
+                else:
+                    log(
+                        f"多光谱 {len(pending)} 个波段分批写出，同时 {n_write} 个"
+                        f"（每个约 {per_mb} MB）"
+                    )
+
+                def _write_ms(band, raster):
+                    # 在线程领下一件之前关掉累加器，避免已写完的页还占着，和下一批叠在一起
+                    try:
+                        return _write_band(band, raster, None)
+                    finally:
+                        raster.close()
+
+                with ThreadPoolExecutor(max_workers=n_write) as pool:
                     futs = {
-                        pool.submit(_write_band, band, raster, None): (band, raster)
+                        pool.submit(_write_ms, band, raster): (band, raster)
                         for band, raster in pending
                     }
                     for fut in as_completed(futs):
@@ -655,21 +711,41 @@ def run_mosaic(
     else:
         if len(ms_specs) > 1:
             log("多光谱内参或外方位不一致，分波段正射")
-        n_par, per = split_ortho_pools(len(ms_specs), tile_n)
-        if len(ms_specs) > 1 and n_par > 1:
-            log(f"多光谱正射并发 {n_par} 波段 × {per} 进程（块进程合计 ≤ {tile_n}）")
-            with ThreadPoolExecutor(max_workers=n_par) as pool:
-                futs = [pool.submit(_run_band, band, per) for band, *_ in ms_specs]
-                for fut in as_completed(futs):
-                    got = fut.result()
-                    if got:
-                        _commit_band(*got)
+            # 单进程估计放大，并留出一个波段写出整幅的内存。几个波段一起按缓存估计开工时，
+            # 剩余会被占满，算完一个波段再写出就会把别的波段的进程收掉。
+            base_mb = (
+                tile_worker_mb(ms_cam.width * ms_cam.height * 2)
+                if ms_cam is not None
+                else TILE_WORKER_MB
+            )
+            inflated = base_mb * ORTHO_BAND_WORKER_FACTOR
+            write_mb = band_write_mb(ortho_grid.width, ortho_grid.height, 1)
+            with reserve_memory(write_mb, growth_since_now()):
+                n_par, per = plan_ortho_band_pools(len(ms_specs), tile_n, base_mb)
+                if n_par > 1:
+                    log(
+                        f"多光谱正射并发 {n_par} 波段 × {per} 进程"
+                        f"（单进程按 {inflated} MB 估计，并留出写出 {write_mb} MB）"
+                    )
+                    with ThreadPoolExecutor(max_workers=n_par) as pool:
+                        futs = [
+                            pool.submit(_run_band, band, per, inflated) for band, *_ in ms_specs
+                        ]
+                        for fut in as_completed(futs):
+                            got = fut.result()
+                            if got:
+                                _commit_band(*got)
+                else:
+                    for band, *_ in ms_specs:
+                        got = _run_band(band, per, inflated)
+                        if got:
+                            _commit_band(*got)
         else:
             for band, *_ in ms_specs:
                 got = _run_band(band, ortho_workers)
                 if got:
                     _commit_band(*got)
-    timings["ortho"] = time.time() - t_ortho
+    timings["ortho"] = time.perf_counter() - t_ortho
     reporter.stage_done("S5_ortho", timings["ortho"])
     early = _barrier(control, reporter, "S5_ortho")
     if early:
@@ -688,7 +764,7 @@ def run_mosaic(
             rgb_raster.close()
         return early
 
-    t_report = time.time()
+    t_report = time.perf_counter()
     enter("S6_report", "质量报告")
     pc_path = write_pseudocolor(dsm.z, dsm.grid, extras_dir / "DSM_pseudocolor.tif")
     kml_path = write_kml(ortho_grid, extras_dir / "area.kml", image=Path(files.get("rgb", "DSM.tif")).name)
@@ -709,13 +785,16 @@ def run_mosaic(
     # 复用检查点时 keypoint_counts 可能为空：从特征缓存补齐，保证全波段统计
     kp_counts = dict(sparse.keypoint_counts or {})
     if len(kp_counts) < len(sparse.image_paths):
-        from ms_mosaic.features import load_keypoints
+        from ms_mosaic.features import MAX_FEATURES, load_keypoints
 
+        feature_limit = MAX_FEATURES if max_features is None else int(max_features)
         for idx, path in sparse.image_paths.items():
             if idx in kp_counts:
                 continue
             try:
-                kp_counts[idx] = len(load_keypoints(Path(path), cache_dir=cache_dir))
+                kp_counts[idx] = len(
+                    load_keypoints(Path(path), cache_dir=cache_dir, max_features=feature_limit)
+                )
             except Exception:
                 kp_counts[idx] = 0
     reg_ids = registered_image_ids(at, sparse.tracks)
@@ -780,7 +859,7 @@ def run_mosaic(
                 log("比对未达标，见 比对报告.md")
         except Exception as exc:
             log(f"比对失败（成果已写出）：{exc}")
-    reporter.stage_done("S6_report", time.time() - t_report)
+    reporter.stage_done("S6_report", time.perf_counter() - t_report)
     payload["status"] = "succeeded"
     payload["completed_stage"] = "S6_report"
     return payload

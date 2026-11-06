@@ -35,6 +35,14 @@ def test_path_must_be_under_data():
     assert any("/data" in e for e in errs)
 
 
+def test_max_features_must_be_positive_int():
+    defs = [_d(key="max_features", value_type="int")]
+    assert validate_param_values(defs, {}) == []
+    assert validate_param_values(defs, {"max_features": 8192}) == []
+    assert validate_param_values(defs, {"max_features": 0}) == ["特征点上限须为正整数"]
+    assert validate_param_values(defs, {"max_features": -1}) == ["特征点上限须为正整数"]
+
+
 def test_assert_raises_http():
     defs = [_d(key="input_dir", required=True, value_type="path")]
     with pytest.raises(HTTPException):

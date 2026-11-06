@@ -31,12 +31,14 @@ export default function JobActions({
   computeState,
   onChanged,
   size = "small",
+  nowrap = false,
 }: {
   job: JobLike;
   inspect?: any;
   computeState?: ComputeState;
   onChanged?: (next?: any) => void | Promise<void>;
   size?: "small" | "middle";
+  nowrap?: boolean;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const { roles } = useAuth();
@@ -69,7 +71,7 @@ export default function JobActions({
   const canDelete = job.status !== "running";
 
   return (
-    <Space wrap size={4}>
+    <Space wrap={!nowrap} size={4}>
       {running && (
         <Popconfirm
           title="暂停该任务？"

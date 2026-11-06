@@ -17,6 +17,7 @@ def test_cli_flags_match_web_keys():
         "cache_dir",
         "dsm_gsd",
         "workers_at",
+        "max_features",
         "ba_stage3",
         "workers_dense",
         "workers_ortho",

@@ -25,6 +25,8 @@ LiMapper 报告写明「密集点云 类型 2.5D」，成品也确实是高程�
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -325,20 +327,21 @@ def _windowed_ncc(ref: np.ndarray, other: np.ndarray, window: int) -> np.ndarray
     return np.where(valid, ncc, np.nan)
 
 
-def _sgm_aggregate(cost: np.ndarray, p1: float, p2: float) -> np.ndarray:
+def _sgm_aggregate(cost: np.ndarray, p1: float, p2: float, xp=np) -> np.ndarray:
     """沿 4 个方向做半全局动态规划聚合。cost 形如 (n_layers, h, w)。
 
     惩罚项沿用 Hirschmüller 的两级形式：相邻一层罚 p1，跳跃更多层罚 p2。
+    xp 为 cupy 时是同一递推，只换执行的库。
     """
     n_z = cost.shape[0]
-    acc = np.zeros_like(cost)
+    acc = xp.zeros_like(cost)
     # (轴, 步进)：沿行的正反两遍 + 沿列的正反两遍。
     # 注意这里是 (axis, step) 而不是 (dy, dx)：写成 (1, 0) 会让 step=0，
     # 动态规划就变成原地读自己，该方向失效并把惩罚项稀释掉。
     shifts = ((0, 1), (0, -1), (1, 1), (1, -1))
-    layer_idx = np.arange(n_z)
-    jump = np.abs(layer_idx[:, None] - layer_idx[None, :])
-    penalty = np.where(jump == 0, 0.0, np.where(jump == 1, p1, p2))
+    layer_idx = xp.arange(n_z)
+    jump = xp.abs(layer_idx[:, None] - layer_idx[None, :])
+    penalty = xp.where(jump == 0, 0.0, xp.where(jump == 1, p1, p2))
 
     for axis, step in shifts:
         agg = cost.copy()
@@ -351,7 +354,7 @@ def _sgm_aggregate(cost: np.ndarray, p1: float, p2: float) -> np.ndarray:
             else:
                 prior = agg[:, :, prev]
             # min_j (prior_j + penalty_ij)，减去 prior 最小值防止数值累积
-            best = np.min(prior[None, :, :] + penalty[:, :, None], axis=1)
+            best = xp.min(prior[None, :, :] + penalty[:, :, None], axis=1)
             best = best - prior.min(axis=0, keepdims=True)
             if axis == 0:
                 agg[:, k, :] = cost[:, k, :] + best
@@ -359,6 +362,120 @@ def _sgm_aggregate(cost: np.ndarray, p1: float, p2: float) -> np.ndarray:
                 agg[:, :, k] = cost[:, :, k] + best
         acc += agg
     return acc / len(shifts)
+
+
+# 8 个进程分到两张 T4 上，墙钟 4.46 秒，同规模 CPU 8.49 秒。
+# 每张卡再堆十几个 CUDA 上下文会把卡排队。进程数收到每张卡 4 个，
+# 这些进程里的半全局聚合仍走显卡。窗口相关仍在 CPU。
+GPU_DENSE_PROCS_PER_CARD = 4
+_gpu_aggregate_failed = False
+
+
+def _dense_gpu_devices(label: str, workers, gray_bytes: int, log) -> tuple[list[int], int]:
+    """返回 (显卡列表, 实际进程数)。有卡时进程数不超过每张卡 4 个。"""
+    from ms_mosaic.gpu import assign_devices
+    from ms_mosaic.gpu import describe as describe_gpu
+    from ms_mosaic.parallel import resolve_workers
+    from ms_mosaic.parallel import tile_worker_mb
+
+    procs = resolve_workers(workers, per_worker_mb=tile_worker_mb(gray_bytes))
+    choice, plan = assign_devices("S3_dense", procs)
+    devices = list(dict.fromkeys(d for d in plan if d is not None))
+    if not devices:
+        if log is not None:
+            log(describe_gpu(label, choice))
+        return [], procs
+    used = min(procs, GPU_DENSE_PROCS_PER_CARD * len(devices))
+    if log is not None:
+        names = "、".join(f"GPU {d}" for d in devices)
+        log(
+            f"{label}：窗口相关在 CPU。半全局聚合在 {names}，"
+            f"每张卡最多 {GPU_DENSE_PROCS_PER_CARD} 个进程，本次 {used} 个进程"
+        )
+    return devices, used
+
+
+def _pick_dense_device(devices: list[int] | None) -> int | None:
+    if not devices:
+        return None
+    return devices[os.getpid() % len(devices)]
+
+
+# 本进程最近一块的耗时。子进程把这块带回主进程，进度行才知道是哪张卡。
+_last_agg = {"gpu": None, "copy_to": 0.0, "calc": 0.0, "copy_back": 0.0}
+
+
+def _stamp_agg(gpu: int | None, copy_to: float, calc: float, copy_back: float) -> None:
+    _last_agg["gpu"] = gpu
+    _last_agg["copy_to"] = copy_to
+    _last_agg["calc"] = calc
+    _last_agg["copy_back"] = copy_back
+
+
+def format_dense_gpu_progress(totals: dict) -> str:
+    """进度行后缀。totals 的键是显卡号或 None（CPU）。"""
+    parts = []
+    for key in sorted(totals, key=lambda item: -1 if item is None else int(item)):
+        copy_to, calc, copy_back = totals[key]
+        if key is None:
+            parts.append(f"CPU 累计计算 {calc:.1f} 秒")
+        else:
+            parts.append(
+                f"GPU {key} 累计复制到显卡 {copy_to:.1f} 秒，计算 {calc:.1f} 秒，复制回内存 {copy_back:.1f} 秒"
+            )
+    if not parts:
+        return ""
+    return "。半全局聚合 " + "；".join(parts)
+
+
+def _dense_progress_note():
+    """主进程累计各卡耗时。每块都记，进度行每 10 块打一次累计。"""
+    totals: dict = {}
+
+    def note(result):
+        info = result[3]
+        key = info.get("gpu")
+        slot = totals.setdefault(key, [0.0, 0.0, 0.0])
+        slot[0] += float(info.get("copy_to") or 0.0)
+        slot[1] += float(info.get("calc") or 0.0)
+        slot[2] += float(info.get("copy_back") or 0.0)
+        return format_dense_gpu_progress(totals)
+
+    return note
+
+
+def _aggregate_cost(cost: np.ndarray, p1: float, p2: float, device: int | None) -> np.ndarray:
+    """半全局聚合。显卡走同一套递推；失败则退回 CPU，选层结果不变。"""
+    global _gpu_aggregate_failed
+    if device is None or _gpu_aggregate_failed:
+        started = time.perf_counter()
+        out = _sgm_aggregate(cost, p1, p2)
+        _stamp_agg(None, 0.0, time.perf_counter() - started, 0.0)
+        return out
+    try:
+        import cupy as cp
+
+        with cp.cuda.Device(int(device)):
+            started = time.perf_counter()
+            uploaded = cp.asarray(cost)
+            cp.cuda.Stream.null.synchronize()
+            copy_to = time.perf_counter() - started
+            started = time.perf_counter()
+            acc = _sgm_aggregate(uploaded, p1, p2, cp)
+            cp.cuda.Stream.null.synchronize()
+            calc = time.perf_counter() - started
+            started = time.perf_counter()
+            out = cp.asnumpy(acc)
+            cp.cuda.Stream.null.synchronize()
+            copy_back = time.perf_counter() - started
+        _stamp_agg(int(device), copy_to, calc, copy_back)
+        return out
+    except Exception:
+        _gpu_aggregate_failed = True
+        started = time.perf_counter()
+        out = _sgm_aggregate(cost, p1, p2)
+        _stamp_agg(None, 0.0, time.perf_counter() - started, 0.0)
+        return out
 
 
 def _subpixel_z(cost: np.ndarray, best: np.ndarray, z_values: np.ndarray) -> np.ndarray:
@@ -428,6 +545,7 @@ def _sweep_once(
     cfg: DenseConfig,
     z_margin: float,
     n_layers: int,
+    device: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """在先验面附近扫一遍给定的高程区间。返回 (z, 置信度, 参与视图数)。"""
     from ms_mosaic.camera import project
@@ -489,7 +607,7 @@ def _sweep_once(
         return nan, nan.copy(), np.zeros((rows, cols), np.uint8)
     # SGM 需要完整代价体，无效处填一个大值
     filled_cost = np.where(finite, cost, 2.0).astype(np.float32)
-    agg = _sgm_aggregate(filled_cost, cfg.sgm_p1, cfg.sgm_p2)
+    agg = _aggregate_cost(filled_cost, cfg.sgm_p1, cfg.sgm_p2, device)
 
     best = np.argmin(agg, axis=0)
     rows_i, cols_i = np.indices(best.shape)
@@ -555,6 +673,7 @@ def sweep_tile(
     poses: dict[int, Pose],
     images: ImageCache,
     cfg: DenseConfig,
+    device: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """对一个格网块做由粗到细的多层平面扫描。返回 (z, 置信度, 参与视图数)。
 
@@ -575,7 +694,7 @@ def sweep_tile(
     count = np.zeros((rows, cols), np.uint8)
     for level in range(max(1, cfg.pyramid_levels)):
         z, conf, count = _sweep_once(
-            grid, window, prior, views, cameras, poses, images, cfg, margin, layers
+            grid, window, prior, views, cameras, poses, images, cfg, margin, layers, device
         )
         if level + 1 >= max(1, cfg.pyramid_levels):
             break
@@ -631,6 +750,10 @@ def _match_on_grid(
 
     # 先验面落盘后子进程 mmap 只读，避免整幅先验随 payload 给每个进程各 pickle 一份。
     prior_path = _share_array(np.asarray(prior, np.float32))
+    any_cam = next(iter(cameras.values()))
+    gray_bytes = (any_cam.width >> level) * (any_cam.height >> level) * 4
+    n_limit = workers if workers is not None else cfg.workers
+    gpu_devices, n_workers = _dense_gpu_devices(label, n_limit, gray_bytes, log)
     payload = {
         "grid": grid,
         "prior_path": str(prior_path),
@@ -640,13 +763,11 @@ def _match_on_grid(
         "cfg": cfg,
         "sigma": sigma,
         "level": level,
+        "gpu_devices": gpu_devices,
     }
-    any_cam = next(iter(cameras.values()))
-    gray_bytes = (any_cam.width >> level) * (any_cam.height >> level) * 4
-    n_workers = workers if workers is not None else cfg.workers
     done = 0
     try:
-        for _, window, (tile_z, tile_conf, tile_views) in map_tiles(
+        for _, window, (tile_z, tile_conf, tile_views, _timing) in map_tiles(
             windows,
             partial(_dense_setup, payload),
             _dense_fn,
@@ -654,6 +775,7 @@ def _match_on_grid(
             log=log,
             label=label,
             per_worker_mb=tile_worker_mb(gray_bytes),
+            annotate=_dense_progress_note(),
         ):
             paste_tile(z, tile_z, window, overlap, grid)
             paste_tile(conf, tile_conf, window, overlap, grid)
@@ -813,6 +935,7 @@ def _dense_setup(payload: dict):
         "cameras": payload["cameras"],
         "poses": payload["poses"],
         "cfg": payload["cfg"],
+        "gpu_devices": payload.get("gpu_devices") or [],
         "images": ImageCache(
             payload["paths"],
             sigma=payload["sigma"],
@@ -824,7 +947,8 @@ def _dense_setup(payload: dict):
 
 def _dense_fn(ctx: dict, window: tuple[int, int, int, int]):
     row0, col0, rows, cols = window
-    return sweep_tile(
+    _stamp_agg(None, 0.0, 0.0, 0.0)
+    tile_z, tile_conf, tile_views = sweep_tile(
         ctx["grid"],
         window,
         ctx["prior"][row0 : row0 + rows, col0 : col0 + cols],
@@ -832,4 +956,6 @@ def _dense_fn(ctx: dict, window: tuple[int, int, int, int]):
         ctx["poses"],
         ctx["images"],
         ctx["cfg"],
+        _pick_dense_device(ctx.get("gpu_devices")),
     )
+    return tile_z, tile_conf, tile_views, dict(_last_agg)

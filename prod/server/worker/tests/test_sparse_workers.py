@@ -1,6 +1,9 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
+from ms_mosaic.features import Features
 from ms_mosaic.runner import cap_at_workers
 
 
@@ -51,3 +54,35 @@ def test_match_init_does_not_preload_all_features(tmp_path: Path, monkeypatch):
     assert calls == []
     assert "feats" not in runner._SHARED
     assert runner._SHARED["cache_dir"] == str(tmp_path)
+
+
+def test_match_worker_reads_cache_at_the_job_limit(tmp_path: Path, monkeypatch):
+    """匹配进程必须带上任务的特征上限，否则会按默认 8192 重提并改写缓存。"""
+    from ms_mosaic import runner
+
+    seen = []
+
+    def fake_extract(path, cache_dir=None, max_features=8192, device=None):
+        seen.append(max_features)
+        return Features(np.zeros((1, 4), np.float32), np.zeros((1, 128), np.float32))
+
+    monkeypatch.setattr(runner, "extract_file", fake_extract)
+    monkeypatch.setattr(runner, "match_pair", lambda *_a, **_k: None)
+    runner._SHARED.clear()
+    runner._match_init(str(tmp_path), {"Color": object()}, None, 512)
+    runner._match_worker((0, 1, str(tmp_path / "a.tif"), str(tmp_path / "b.tif"), "Color"))
+    assert seen == [512, 512]
+
+
+def test_match_all_forwards_feature_limit(monkeypatch, tmp_path: Path):
+    from ms_mosaic import runner
+
+    seen = {}
+
+    def fake(*_a, max_features=8192, **_k):
+        seen["max_features"] = max_features
+        return []
+
+    monkeypatch.setattr(runner, "_match_all_cpu", fake)
+    runner._match_all([], 4, tmp_path, {}, max_features=512, log=lambda *_: None)
+    assert seen["max_features"] == 512

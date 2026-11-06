@@ -59,6 +59,10 @@ export function validateValues(defs: ParamDef[], values: Record<string, any>): {
       errors.push({ key: d.key, message: `${d.key} 须为有效数字` });
       continue;
     }
+    if (d.key === "max_features" && typeof raw === "number" && (!Number.isInteger(raw) || raw < 1)) {
+      errors.push({ key: d.key, message: "特征点上限须为正整数" });
+      continue;
+    }
     if (
       d.value_type === "path" &&
       typeof raw === "string" &&

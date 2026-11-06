@@ -69,10 +69,35 @@ def _run(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(runner, "_match_all", lambda *_a, **_k: list(matches))
     kp = {"Color_0": 7, "Color_1": 9, "550nm_0": 3, "550nm_1": 5}
     monkeypatch.setattr(
-        runner, "load_keypoints", lambda path, cache_dir: np.zeros((kp[Path(path).stem], 2))
+        runner, "load_keypoints", lambda path, cache_dir, max_features=8192: np.zeros((kp[Path(path).stem], 2))
     )
     monkeypatch.setattr(runner, "run_at", _fake_at)
     return runner.run_sparse(tmp_path / "in", tmp_path / "cache" / "features", workers=1)
+
+
+def test_run_sparse_forwards_feature_limit(monkeypatch, tmp_path: Path):
+    """特征上限要从空三入口传到匹配和关键点读取，不能在半路丢成默认 8192。"""
+    block = _block()
+    monkeypatch.setattr(runner, "scan_directory", lambda *_a, **_k: [object()] * 2)
+    monkeypatch.setattr(runner, "usable_shots", lambda shots, **_k: ({0: None, 1: None}, {}))
+    monkeypatch.setattr(runner, "build_block", lambda _keep: block)
+    monkeypatch.setattr(runner, "_extract_features", lambda jobs, workers, log=None: None)
+    seen = {}
+
+    def capture_match(*_a, **k):
+        seen["match"] = k.get("max_features")
+        return []
+
+    def capture_kp(_path, *, cache_dir, max_features=8192):
+        seen["keypoints"] = max_features
+        return np.zeros((2, 2))
+
+    monkeypatch.setattr(runner, "_match_all", capture_match)
+    monkeypatch.setattr(runner, "load_keypoints", capture_kp)
+    monkeypatch.setattr(runner, "run_at", _fake_at)
+    runner.run_sparse(tmp_path / "in", tmp_path / "cache" / "features", workers=1, max_features=512)
+    assert seen["match"] == 512
+    assert seen["keypoints"] == 512
 
 
 def test_run_sparse_returns_after_at(monkeypatch, tmp_path: Path):

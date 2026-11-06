@@ -52,6 +52,31 @@ def job_memory_gb() -> float | None:
     return _job_memory_gb
 
 
+# 本进程被系统杀掉后自动续跑的次数。每升一级，内存预算减半，并发跟着降。
+_oom_backoff = 0
+
+
+def set_oom_backoff(level: int | None) -> None:
+    """记下这次是第几次因内存不足被系统杀掉后续跑。0 表示没有降过。"""
+    global _oom_backoff
+    try:
+        n = int(level or 0)
+    except (TypeError, ValueError):
+        n = 0
+    _oom_backoff = max(0, n)
+
+
+def oom_backoff() -> int:
+    return _oom_backoff
+
+
+def _apply_oom_backoff(budget: int) -> int:
+    level = min(_oom_backoff, 3)
+    if level <= 0:
+        return budget
+    return max(1, int(budget) >> level)
+
+
 def resolve_memory_budget(memory_gb: float | None) -> int | None:
     """把任务 memory_gb 收成字节预算。
 
@@ -67,11 +92,11 @@ def resolve_memory_budget(memory_gb: float | None) -> int | None:
     if gb <= 0:
         if limit is None:
             return None
-        return int(limit * AUTO_LIMIT_FRACTION)
+        return _apply_oom_backoff(int(limit * AUTO_LIMIT_FRACTION))
     requested = int(gb * 1024**3)
     if limit is not None and requested > limit:
-        return limit
-    return requested
+        requested = limit
+    return _apply_oom_backoff(requested)
 
 
 def available_bytes() -> int | None:

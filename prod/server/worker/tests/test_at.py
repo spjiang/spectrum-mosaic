@@ -17,6 +17,7 @@ from ms_mosaic.at import (
     _assemble_band,
     _damp_solve_band,
     _separable_bands,
+    _stack_observations,
     ba_parallel_workers,
     band_worker_bytes,
     bundle_adjust,
@@ -221,6 +222,42 @@ def test_triangulate_tracks_vectorized_matches_loop():
     assert all(np.array_equal(a.uv, b.uv) for a, b in zip(obs, ref_obs))
 
 
+def test_run_at_triangulates_on_cpu(monkeypatch):
+    """小矩阵拷上显卡再拷回更慢，交会分解留在主进程 CPU。"""
+    from ms_mosaic.camera import Camera, Pose
+    from ms_mosaic.gpu import GpuChoice
+    from ms_mosaic.tracks import Tracks
+
+    seen: dict = {}
+
+    def fake_tri(*_args, **kwargs):
+        seen["device"] = kwargs.get("device")
+        return np.zeros((0, 3)), []
+
+    monkeypatch.setattr("ms_mosaic.at.triangulate_tracks", fake_tri)
+    monkeypatch.setattr(
+        "ms_mosaic.gpu.select",
+        lambda stage: GpuChoice(device=0, budget_bytes=1, name="Tesla T4", reason=""),
+    )
+    cam = Camera.initial("Color", 64, 48, kind="rgb")
+    pose = Pose.from_ypr(np.array([0.0, 0.0, 100.0]), 0.0, -90.0, 0.0)
+    logs: list[str] = []
+    with pytest.raises(ValueError, match="前方交会"):
+        run_at(
+            {"Color": cam},
+            {0: pose},
+            Tracks(observations=[]),
+            {},
+            {0: "Color"},
+            {},
+            {},
+            stages=((),),
+            log=logs.append,
+        )
+    assert seen["device"] is None
+    assert logs[0] == "前方交会：主进程 CPU 分解"
+
+
 def test_run_at_clears_features_after_triangulation():
     """交会后清空关键点字典，给平差腾峰值内存。"""
     cam_true, poses_true, points_true = _scene(seed=3, n_points=30, grid=(2, 2))
@@ -293,6 +330,34 @@ def test_drop_outliers_removes_bad_observations_and_orphan_points():
     assert {o.point for o in keep} == {0, 1}
     np.testing.assert_allclose(pts[0], points[0])
     np.testing.assert_allclose(pts[1], points[2])
+
+
+def test_ba_problem_obs_arrays_match_observation_list():
+    cameras, poses, points, observations, image_camera, gps, att = _two_band_inputs()
+    free = ("f", "cx", "cy")
+    from_list = BAProblem(
+        cameras, poses, points, observations, image_camera, gps, att, free_names=free
+    )
+    img, pt, uv = _stack_observations(observations)
+    from_arr = BAProblem(
+        cameras,
+        poses,
+        points,
+        None,
+        image_camera,
+        gps,
+        att,
+        free_names=free,
+        obs_image_ids=img,
+        obs_point_ids=pt,
+        obs_uv=uv,
+    )
+    np.testing.assert_allclose(from_list.x0, from_arr.x0)
+    np.testing.assert_allclose(
+        from_list.reprojection_px(from_list.x0),
+        from_arr.reprojection_px(from_arr.x0),
+        atol=1e-12,
+    )
 
 
 def test_bundle_adjust_per_camera_matches_joint():
@@ -411,6 +476,20 @@ def test_bundle_adjust_process_pool_matches_sequential(monkeypatch):
         np.testing.assert_allclose(par[1][i].rotation, seq[1][i].rotation, atol=1e-9)
     np.testing.assert_allclose(par[2], seq[2], atol=1e-9)
     np.testing.assert_allclose(par[3], seq[3], atol=1e-9)
+
+
+def test_bundle_adjust_process_pool_logs_rounds(monkeypatch):
+    """多波段平差时，每一轮都要打到任务日志，避免页面长时间空白。"""
+    inputs = _two_band_inputs()
+    cameras, poses, points, observations, image_camera, gps, att = inputs
+    monkeypatch.setattr("ms_mosaic.at.ba_parallel_workers", lambda *a, **k: 2)
+    logs: list[str] = []
+    bundle_adjust(
+        cameras, poses, points, observations, image_camera, gps, att,
+        free_names=("f", "cx", "cy"), max_iterations=3, log=logs.append,
+    )
+    assert any("第 1/3 轮" in line for line in logs)
+    assert any("已收敛" in line or "轮上限" in line or "停止" in line for line in logs)
 
 
 def test_chunked_band_assembly_matches_single_pass():
@@ -657,3 +736,17 @@ def test_bundle_adjustment_recovers_intrinsics_and_poses():
     assert float(np.median(err)) < 1.0
     assert result.stats["n_points"] > 300
     assert result.stats["gps_rmse_m"] < 3.0
+
+
+def test_ba_gpu_time_line_names_the_card():
+    from ms_mosaic.at import format_ba_gpu_time
+    from ms_mosaic.at import take_ba_gpu_time
+    from ms_mosaic.at import _ba_gpu_add
+
+    take_ba_gpu_time()
+    _ba_gpu_add(1.26, 4.04, 0.81)
+    snap = take_ba_gpu_time()
+    assert format_ba_gpu_time(1, snap) == (
+        "GPU 1 复制到显卡 1.3 秒，显卡计算 4.0 秒，复制回内存 0.8 秒"
+    )
+    assert take_ba_gpu_time() == {"copy_to": 0.0, "calc": 0.0, "copy_back": 0.0}

@@ -45,6 +45,7 @@ _INT_KEYS = (
     "max_index",
     "max_frames",
     "workers_at",
+    "max_features",
     "workers_dense",
     "workers_ortho",
     "n_layers",
@@ -134,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="主波段（Web: primary_band）。当前管线固定 Color，非 Color 将报错",
     )
     parser.add_argument(_flag("workers_at"), type=int, default=None, help="空三并行度（Web: workers_at）")
+    parser.add_argument(
+        _flag("max_features"),
+        type=int,
+        default=None,
+        help="每张影像特征点上限（Web: max_features），默认 8192",
+    )
     parser.add_argument(_flag("sigma_xy_m"), type=float, default=None, help="GNSS 平面先验米（Web: sigma_xy_m）")
     parser.add_argument(_flag("sigma_z_m"), type=float, default=None, help="GNSS 高程先验米（Web: sigma_z_m）")
     parser.add_argument(

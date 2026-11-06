@@ -41,6 +41,9 @@ TILE_RESERVE_MB = 1536
 # 一个 480² 块的多视角栈、图割与金字塔融合（12 视角 RGB ≤280 MB）。
 # S810 #18 实测 VmHWM：Color 1039 MB（缓存 432 MB）、多光谱 771～804 MB（缓存 288 MB）。
 TILE_WORK_MB = 640
+# 2026-11-05 细格网估 784 MB、实测 887 MB。按估满开进程会把余量吃光，估计再留四分之一。
+MEMORY_HEADROOM_NUM = 5
+MEMORY_HEADROOM_DEN = 4
 
 Window = tuple[int, int, int, int]
 
@@ -53,9 +56,15 @@ JOB_SEGMENTS_PER_WORKER = 16
 MAX_BROKEN_AT_ONE = 3
 
 
+def headroom_mb(mb: int) -> int:
+    """单进程估计再留四分之一，避免按估满把内存撑死。"""
+    return max(1, (int(mb) * MEMORY_HEADROOM_NUM + MEMORY_HEADROOM_DEN - 1) // MEMORY_HEADROOM_DEN)
+
+
 def tile_worker_mb(image_bytes: int, *, cache: int = CACHE_PER_WORKER, work_mb: int = TILE_WORK_MB) -> int:
-    """单进程内存估计：缓存满时的影像字节 + 单块工作内存。"""
-    return int(-(-int(cache) * int(image_bytes) // 2**20) + int(work_mb))
+    """单进程内存估计：缓存满时的影像字节 + 单块工作内存，再留四分之一。"""
+    raw = int(-(-int(cache) * int(image_bytes) // 2**20) + int(work_mb))
+    return headroom_mb(raw)
 
 
 def default_workers() -> int:
@@ -164,6 +173,34 @@ def resolve_workers(requested: int | None, *, per_worker_mb: int | None = None) 
     )
 
 
+def fit_concurrent(n: int, per_mb: int) -> int:
+    """同时做几件每件约 per_mb 的事。用于主进程里的写出线程，不按 CPU 核数封顶。
+
+    读不到预算和剩余内存时不限制（宿主机 CLI 没有 cgroup）。
+    剩余不够一件时仍返回 1，让写出串行进行，而不是把 7 个整幅累加器一起读进内存。
+    """
+    n = max(1, int(n))
+    if n == 1:
+        return 1
+    pending = pending_mb() << 20
+    gb = job_memory_gb()
+    budget = resolve_memory_budget(gb if gb is not None and gb > 0 else 0)
+    if budget is not None:
+        budget = max(0, budget - (process_rss_bytes() or 0) - pending)
+    available = _memory.available_bytes()
+    if available is not None:
+        available = max(0, available - pending)
+    if budget is None and available is None:
+        return n
+    return cap_workers(
+        n,
+        per_worker_mb=max(1, int(per_mb)),
+        reserve_mb=TILE_RESERVE_MB,
+        budget_bytes=budget,
+        available=available,
+    )
+
+
 def prefer_oom_kill() -> None:
     """让内核在内存不足时优先杀计算子进程，而不是持有整个任务状态的主进程。
 
@@ -221,6 +258,23 @@ def split_ortho_pools(n_bands: int, tile_workers: int) -> tuple[int, int]:
     per = max(1, w // n_par)
     n_par = min(n, max(1, w // per))
     return n_par, per
+
+
+# 分波段正射几个波段同时算，单进程估计按这个倍数放大。
+# 任务 #32 按影像缓存 + 640 MB 得到 928 MB，剩余刚够 8 个进程（4 波段 × 2），
+# 子进程被系统回收。两倍后同样剩余只放一半进程。几何共用的那条路径不乘这个倍数。
+ORTHO_BAND_WORKER_FACTOR = 2
+
+
+def plan_ortho_band_pools(n_bands: int, tile_workers: int, per_worker_mb: int) -> tuple[int, int]:
+    """分波段正射的进程划分。单进程估计先放大，再按剩余内存封顶。
+
+    调用方用 reserve_memory 记下「有一个波段要写出整幅」时，这段待占用会从预算里扣掉，
+    避免块进程把剩余占满后，写出和别的波段叠在一起被系统回收。
+    """
+    inflated = max(1, int(per_worker_mb)) * ORTHO_BAND_WORKER_FACTOR
+    n = resolve_workers(max(1, int(tile_workers)), per_worker_mb=inflated)
+    return split_ortho_pools(n_bands, n)
 
 
 def spatial_chunks(windows: Sequence[Window], n_chunks: int) -> list[list[int]]:
@@ -313,6 +367,7 @@ def map_tiles(
     log: Callable[[str], None] | None = None,
     label: str = "分块计算",
     per_worker_mb: int | None = None,
+    annotate: Callable[[Any], str] | None = None,
 ) -> Iterable[tuple[int, Window, Any]]:
     """并行遍历格网块，按完成顺序产出 (块下标, 窗口, 结果)。
 
@@ -335,9 +390,12 @@ def map_tiles(
     if workers is not None and int(workers) <= 1:
         ctx = setup()
         for k, w in enumerate(windows):
-            yield k, w, fn(ctx, w)
-            if log is not None and (k + 1) % 10 == 0:
-                log(f"{label} {k + 1}/{total} 块")
+            result = fn(ctx, w)
+            extra = annotate(result) if annotate is not None else ""
+            yield k, w, result
+            done_n = k + 1
+            if log is not None and (done_n == total or done_n % 10 == 0):
+                log(f"{label} {done_n}/{total} 块{extra}")
         return
 
     import multiprocessing
@@ -373,10 +431,11 @@ def map_tiles(
                     results, job_peak = fut.result()
                     peak_mb = max(peak_mb, job_peak)
                     for k, result in results:
+                        extra = annotate(result) if annotate is not None else ""
                         yield k, windows[k], result
                         done += 1
                         if log is not None and (done == total or done % 10 == 0):
-                            log(f"{label} {done}/{total} 块")
+                            log(f"{label} {done}/{total} 块{extra}")
                     finished.append(idx)
             if log is not None and peak_mb > 0:
                 log(f"{label} 子进程实测峰值 {peak_mb:.0f} MB")

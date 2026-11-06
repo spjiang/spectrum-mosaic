@@ -71,6 +71,10 @@ def validate_param_values(defs: Sequence[Any], values: dict[str, Any]) -> list[s
         err = _type_error(defn, raw)
         if err:
             errors.append(err)
+            continue
+        if defn.key == "max_features" and isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            if raw < 1 or not float(raw).is_integer():
+                errors.append("特征点上限须为正整数")
     return errors
 
 

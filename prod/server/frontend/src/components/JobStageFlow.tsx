@@ -3,7 +3,7 @@ import { CaretRightOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import { Popover, Tooltip } from "antd";
 import { api, type StageStep } from "../api";
 import { formatStageSeconds, stageElapsedSeconds } from "../jobTime";
-import { nestStageSteps, type StepNode } from "../stageStepTree";
+import { nestStageSteps, stageUsedGpu, type StepNode } from "../stageStepTree";
 import { stepHelp } from "../stepHelp";
 import {
   STAGE_META,
@@ -73,34 +73,18 @@ function stepFacts(detail: string): string[] {
     .filter(Boolean);
 }
 
-function StageDetail({ job, stage }: { job: JobStageLike; stage: StageId }) {
-  const [steps, setSteps] = useState<StageStep[] | null>(null);
-  const [error, setError] = useState("");
+function StageDetail({
+  job,
+  stage,
+  steps,
+  error,
+}: {
+  job: JobStageLike;
+  stage: StageId;
+  steps: StageStep[] | null;
+  error: string;
+}) {
   const [closed, setClosed] = useState<Record<string, boolean>>({});
-  const live = job.status === "running";
-  useEffect(() => {
-    if (!job.id) return;
-    let stop = false;
-    const load = () => {
-      api.stageSteps(job.id as string)
-        .then((res) => {
-          if (!stop) {
-            setSteps(res.stages?.[stage] || []);
-            setError("");
-          }
-        })
-        .catch(() => {
-          if (!stop) setError("暂时读不到这一步的明细");
-        });
-    };
-    load();
-    if (!live) return;
-    const id = window.setInterval(load, 5000);
-    return () => {
-      stop = true;
-      window.clearInterval(id);
-    };
-  }, [job.id, stage, live]);
   const meta = STAGE_META[stage];
   if (!job.id) return <div className="job-stage-detail-empty">没有任务编号，读不到明细。</div>;
   if (error) return <div className="job-stage-detail-empty">{error}</div>;
@@ -187,6 +171,7 @@ function StepRow({ step, open, onToggle }: { step: StepNode; open: boolean; onTo
           </button>
         ) : null}
         <span className="job-stage-step-name">{step.name}</span>
+        {step.gpu ? <span className="job-stage-gpu" title="这一步用了显卡">GPU</span> : null}
         <StepHelpButton name={step.name} />
       </span>
       {running ? <span className="job-stage-step-badge">进行中</span> : null}
@@ -195,9 +180,40 @@ function StepRow({ step, open, onToggle }: { step: StepNode; open: boolean; onTo
   );
 }
 
+function useStageSteps(job: JobStageLike) {
+  const [stages, setStages] = useState<Record<string, StageStep[]> | null>(null);
+  const [error, setError] = useState("");
+  const live = job.status === "running";
+  useEffect(() => {
+    if (!job.id) return;
+    let stop = false;
+    const load = () => {
+      api.stageSteps(job.id as string)
+        .then((res) => {
+          if (!stop) {
+            setStages(res.stages || {});
+            setError("");
+          }
+        })
+        .catch(() => {
+          if (!stop) setError("暂时读不到这一步的明细");
+        });
+    };
+    load();
+    if (!live) return () => { stop = true; };
+    const id = window.setInterval(load, 5000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [job.id, live]);
+  return { stages, error };
+}
+
 function StageNodes({ job, variant }: { job: JobStageLike; variant: "full" | "compact" }) {
   const live = job.status === "running";
   const now = useNow(variant === "full" && live);
+  const { stages, error } = useStageSteps(job);
   return (
     <div className={`job-stage-flow is-${variant}`} role="list" aria-label="流程节点">
       {STAGES.map((stage, i) => {
@@ -205,6 +221,7 @@ function StageNodes({ job, variant }: { job: JobStageLike; variant: "full" | "co
         const tone = toneForStage(job, stage as StageId);
         const elapsed = variant === "full" ? stageElapsedSeconds(job, stage as StageId, now) : null;
         const timeText = variant !== "full" || tone === "wait" ? "" : formatStageSeconds(elapsed);
+        const usedGpu = stageUsedGpu(stages?.[stage] || []);
         return (
           <div key={stage} className="job-stage-item" role="listitem">
             {i > 0 && <div className={`job-stage-line is-${tone}`} />}
@@ -215,7 +232,7 @@ function StageNodes({ job, variant }: { job: JobStageLike; variant: "full" | "co
               overlayClassName="job-stage-popover"
               destroyTooltipOnHide
               getPopupContainer={() => document.body}
-              content={<StageDetail job={job} stage={stage as StageId} />}
+              content={<StageDetail job={job} stage={stage as StageId} steps={stages ? stages[stage] || [] : null} error={error} />}
             >
               <button
                 type="button"
@@ -225,6 +242,7 @@ function StageNodes({ job, variant }: { job: JobStageLike; variant: "full" | "co
               >
                 <span className="job-stage-index">{i}</span>
                 <span className="job-stage-name">{variant === "compact" ? meta.short : meta.label}</span>
+                {usedGpu ? <span className="job-stage-gpu" title="这一步用了显卡">GPU</span> : null}
                 {variant === "full" && <span className="job-stage-time">{timeText || "\u00a0"}</span>}
               </button>
             </Popover>
