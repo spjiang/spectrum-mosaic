@@ -321,6 +321,7 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "022_incremental_index.sql")
     _ensure_sql_named(db, "023_ba_stage3.sql")
     _ensure_sql_named(db, "024_max_features.sql")
+    _ensure_sql_named(db, "025_job_title.sql")
     _migrate_legacy_source_paths(db)
     user = db.scalar(select(User).where(User.username == settings.bootstrap_admin_user))
     if user is None:

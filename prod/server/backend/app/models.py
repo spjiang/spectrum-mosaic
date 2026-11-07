@@ -69,6 +69,7 @@ class JobRun(Base):
     __tablename__ = "job_runs"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     seq: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, server_default=text("nextval('job_runs_seq')"))
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     profile_id: Mapped[int | None] = mapped_column(ForeignKey("param_profiles.id"), nullable=True)
     profile_version: Mapped[int | None] = mapped_column(Integer, nullable=True)

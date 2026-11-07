@@ -78,7 +78,7 @@ export default function JobDetailModal({
       title={
         job ? (
           <Space size={10} wrap>
-            <span>任务 {formatNo(job.seq)}</span>
+            <span>任务 {formatNo(job.seq)}{job.title ? ` · ${job.title}` : ""}</span>
             <JobStatusTag status={job.status} />
             <Progress
               percent={percent}

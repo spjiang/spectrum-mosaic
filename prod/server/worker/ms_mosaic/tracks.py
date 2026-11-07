@@ -87,6 +87,10 @@ class Tracks:
     def total_observations(self) -> int:
         return int(sum(len(o) for o in self.observations))
 
+    def release(self) -> None:
+        """交会之后平差只读观测列表，丢掉轨迹把内存还给主进程。"""
+        self.observations = []
+
 
 def build_tracks(
     matches: Iterable[PairMatches],

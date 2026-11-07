@@ -8,8 +8,9 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ms_mosaic.compose import render_band, render_ms_bands, write_band_product
+from ms_mosaic.compose import ms_worker_mb, render_band, render_ms_bands, write_band_product
 from ms_mosaic.ortho import share_rectification
+from ms_mosaic.memory import release_heap
 from ms_mosaic.parallel import (
     ORTHO_BAND_WORKER_FACTOR,
     TILE_WORKER_MB,
@@ -504,6 +505,11 @@ def run_mosaic(
         if spike_tolerance_m is not None:
             dsm_kw["tolerance_m"] = float(spike_tolerance_m)
         dsm = build_dsm(field, **dsm_kw)
+        # 高程场已抄进 DSM。格网数组留到正射会占住常驻，计算进程就被系统回收。
+        field.z = np.empty(0, np.float32)
+        field.confidence = np.empty(0, np.float32)
+        field.view_count = np.empty(0, np.int32)
+        release_heap()
 
     t = time.perf_counter()
     enter("S4_dsm", "写出 DSM")
@@ -637,6 +643,10 @@ def run_mosaic(
         got = _run_band(band, ortho_workers)
         if got:
             _commit_band(*got)
+    if rgb_raster is not None:
+        rgb_raster.evict()
+        release_heap()
+        log("彩色正射累加器页已退回，留给多光谱计算")
     ms_specs = []
     for band in ms_bands:
         cameras, poses, paths = transfer_band(block, at.cameras, at.poses, band)
@@ -651,24 +661,33 @@ def run_mosaic(
     share = len(ms_specs) > 1 and share_rectification(groups)
     if share:
         names = [name for name, *_ in ms_specs]
+        share_n = resolve_workers(
+            ortho_workers,
+            per_worker_mb=(
+                ms_worker_mb(ms_cam.width * ms_cam.height * 2, len(ms_specs))
+                if ms_cam is not None
+                else None
+            ),
+        )
         log(
-            f"多光谱正射几何共用 {'/'.join(names)}，{tile_n} 进程。"
+            f"多光谱正射几何共用 {'/'.join(names)}，{share_n} 进程。"
             f"拼接线在参考波段上图割一次，其余波段按同一曝光沿用"
         )
-        t_share = time.perf_counter()
+        # 与日志时间戳同一只钟。perf_counter 在 Docker 虚拟机里会偏慢，界面按起止入账。
+        t_share = time.time()
         rasters = render_ms_bands(
             ortho_grid,
             ortho_z,
             dsm.grid,
             ms_specs,
-            workers=tile_n,
+            workers=share_n,
             log=log,
             seam_cfg=seam_cfg,
             seam_edits_by_band={name: _edits_for(name) for name in names},
         )
         # 这些波段在同一轮块循环里算完。先记下计算耗时，再逐波段写出，
         # 避免界面把整段计算记到第一个写出的波段上。
-        log(f"多光谱正射计算完成，{time.perf_counter() - t_share:.1f}s")
+        log(f"多光谱正射计算完成，{time.time() - t_share:.1f}s")
         pending = list(rasters.items())
         try:
             if len(pending) <= 1:

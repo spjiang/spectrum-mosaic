@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from ms_mosaic.catalog import FileRecord, Pos, Shot
-from ms_mosaic.compose import ms_cache_per_band
+from ms_mosaic.compose import ms_cache_per_band, ms_worker_mb
 from ms_mosaic.scene import BAND_ORDER, build_block, ordered_bands, resolve_wanted
 
 
@@ -63,8 +63,14 @@ def test_build_block_keeps_wavelengths_outside_s810(monkeypatch):
     assert set(block.cameras) == {"Color", "510nm", "850nm", "1200nm"}
 
 
-def test_ms_image_cache_stays_bounded_for_dozens_of_bands():
-    assert ms_cache_per_band(7) == 24
-    assert ms_cache_per_band(8) == 24
-    assert ms_cache_per_band(30) == 6
-    assert ms_cache_per_band(30) * 30 <= 24 * 8
+def test_ms_image_cache_covers_one_tile_and_stays_bounded():
+    """一块最多 12 个视角，再留 4 张给下一块。波段一多，总张数仍按 8 个波段封顶。"""
+    assert ms_cache_per_band(7) == 16
+    assert ms_cache_per_band(8) == 16
+    assert ms_cache_per_band(30) == 4
+    assert ms_cache_per_band(30) * 30 <= 16 * 8
+
+
+def test_ms_worker_estimate_counts_every_band_cache():
+    """2048×1536 的 uint16，7 个波段各 16 张是 672 MB，加 640 MB 工作内存后再留四分之一。"""
+    assert ms_worker_mb(2048 * 1536 * 2, 7) == 1640

@@ -12,6 +12,7 @@ import JobRowMenu from "../components/JobRowMenu";
 import JobStageFlow from "../components/JobStageFlow";
 import JobProcessTable from "../components/JobProcessTable";
 import JobDetailModal from "../components/JobDetailModal";
+import JobRgbThumbnail from "../components/JobRgbThumbnail";
 import { ResizableHeader, useColumnWidths } from "../components/ResizableHeader";
 import { attachJobProcesses, fmtMb, jobComputeState } from "../processTree";
 import { downloadJson, jobParamsFilename, serializeJobParams } from "../profileExport";
@@ -36,6 +37,8 @@ const LIVE = ["queued", "running", "paused", "awaiting_continue"];
 
 const COL_W = {
   seq: 92,
+  preview: 88,
+  title: 200,
   status: 110,
   progress: 96,
   stages: 220,
@@ -65,7 +68,7 @@ export default function JobsPage() {
   const [expanded, setExpanded] = useState<string[]>([]);
   const [detailId, setDetailId] = useState<string | undefined>();
   const nav = useNavigate();
-  const { widths, setWidth, total } = useColumnWidths("jobs-table-v8", COL_W);
+  const { widths, setWidth, total } = useColumnWidths("jobs-table-v11", COL_W);
 
   async function reload() {
     await refresh();
@@ -136,7 +139,7 @@ export default function JobsPage() {
       }
       if (keyword) {
         const k = keyword.toLowerCase();
-        const blob = `${r.seq ?? ""} ${r.id} ${r.input_dir} ${r.output_dir} ${r.message || ""} ${r.current_stage || ""}`.toLowerCase();
+        const blob = `${r.seq ?? ""} ${r.title || ""} ${r.id} ${r.input_dir} ${r.output_dir} ${r.message || ""} ${r.current_stage || ""}`.toLowerCase();
         if (!blob.includes(k)) return false;
       }
       return true;
@@ -258,6 +261,19 @@ export default function JobsPage() {
               title: "任务号",
               dataIndex: "seq",
               render: (v: number) => <Typography.Text strong>{formatNo(v)}</Typography.Text>,
+            }),
+            col("preview", {
+              title: "RGB",
+              onCell: () => ({ className: "jobs-preview-cell" }),
+              render: (_: unknown, r: any) => (
+                <JobRgbThumbnail jobId={r.id} hasRgb={Boolean(r.has_rgb)} title={r.title || undefined} />
+              ),
+            }),
+            col("title", {
+              title: "标题",
+              dataIndex: "title",
+              ellipsis: true,
+              render: (v: string) => v || "—",
             }),
             col("status", {
               title: "状态",

@@ -471,6 +471,30 @@ export const api = {
     request<{ width: number; height: number; features: { image_id: number; points: number[][] }[] }>(
       `/api/jobs/${id}/seam-map${version ? `?version=${encodeURIComponent(version)}` : ""}`,
     ),
+  rgbThumb: async (id: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(`/api/jobs/${id}/rgb-thumb.jpg`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<Blob>(() => {});
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "RGB 缩略图读取失败"));
+    return res.blob();
+  },
+  rgbHd: async (id: string) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(`/api/jobs/${id}/rgb-hd.jpg`, { headers });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<Blob>(() => {});
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "高清图读取失败"));
+    return res.blob();
+  },
   rgbPreview: async (id: string) => {
     const headers = new Headers();
     const token = getToken();

@@ -24,6 +24,19 @@ from app.services.stage_steps import persist_stage_steps
 from app.services.worker_env import apply_worker_env
 from app.services.worker_inspect import heartbeat_holds_job
 
+def default_job_title(seq: int, when: datetime) -> str:
+    """空标题：任务号 + 创建时间。钟面与列表「创建时间」一致（UTC）。"""
+    stamp = when.astimezone(timezone.utc) if when.tzinfo else when
+    return f"#{seq} {stamp.strftime('%Y-%m-%d %H:%M')}"
+
+
+def _clean_title(title: str | None) -> str:
+    text = (title or "").strip()
+    if len(text) > 80:
+        raise HTTPException(400, "标题不超过 80 个字")
+    return text
+
+
 STAGES = ["S0_io", "S1_catalog", "S2_at", "S3_dense", "S4_dsm", "S5_ortho", "S6_report"]
 ACTIVE = {"queued", "running", "paused"}
 LIVE = ACTIVE | {"awaiting_continue"}
@@ -274,6 +287,7 @@ def create_job(
     params: dict[str, Any],
     input_dir: str,
     output_dir: str,
+    title: str = "",
 ) -> JobRun:
     settings = apply_worker_env(db, settings)
     original_out = output_dir
@@ -313,10 +327,15 @@ def create_job(
         native_gsd_m=_optional_float(snap.get("native_gsd_m")),
         ortho_gsd_m=_optional_float(snap.get("ortho_gsd_m")),
         message="已入库",
+        title=_clean_title(title),
     )
     db.add(job)
     db.commit()
     db.refresh(job)
+    if not job.title:
+        job.title = default_job_title(job.seq, job.created_at)
+        db.commit()
+        db.refresh(job)
     append_run_log(db, job.id, f"任务已创建 id={job.id} status=queued")
     append_run_log(
         db,
@@ -503,8 +522,12 @@ def create_seam_task(db: Session, *, user_id: int | None, source_id: uuid.UUID) 
         updated_at=now,
         started_at=now,
         finished_at=now,
+        title="",
     )
     db.add(job)
+    db.commit()
+    db.refresh(job)
+    job.title = default_job_title(job.seq, job.created_at)
     db.commit()
     db.refresh(job)
     append_run_log(db, job.id, f"拼接线处理已建立，来源任务 #{source.seq}，成果已复制，来源文件未改动")

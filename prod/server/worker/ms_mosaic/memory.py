@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 
@@ -101,6 +102,21 @@ def resolve_memory_budget(memory_gb: float | None) -> int | None:
 
 def available_bytes() -> int | None:
     return _meminfo_bytes("MemAvailable")
+
+
+def release_heap() -> None:
+    """把已经没用的对象收掉，并尽量把空闲堆还给操作系统。
+
+    平差和正射按此刻剩余内存决定进程数。只 del 掉对象时，分配器经常把页留在
+    进程里，MemAvailable 不涨，后面就只能开 1 路。
+    """
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        return
 
 
 def process_rss_bytes() -> int | None:

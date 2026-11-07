@@ -136,6 +136,7 @@ export default function ExecutePage() {
   const [gsdNote, setGsdNote] = useState("");
   const [orthoScale, setOrthoScale] = useState(1);
   const [outputDir, setOutputDir] = useState("");
+  const [jobTitle, setJobTitle] = useState("");
   const [memoryGb, setMemoryGb] = useState<number | null>(0);
   const [engineRamGb, setEngineRamGb] = useState<number | null>(null);
   const [cpus, setCpus] = useState<number>(0);
@@ -165,7 +166,7 @@ export default function ExecutePage() {
           applyPaths(setInputDir, setOutputDir, { ...defaults, ...(preferred.values || {}) });
           if (!searchParams.get("job")) {
             const gb = preferred.values?.memory_gb ?? defaults.memory_gb;
-            setMemoryGb(typeof gb === "number" && gb > 0 ? gb : 0);
+            setMemoryGb(typeof gb === "number" && gb > 0 ? gb : 36);
             const n = preferred.values?.cpus ?? defaults.cpus;
             setCpus(typeof n === "number" && n > 0 ? n : 0);
             setGpu(pickGpu(preferred.values?.gpu ?? defaults.gpu));
@@ -370,6 +371,17 @@ export default function ExecutePage() {
                 当前账号无任务提交权限，仅可查看进行中的任务。
               </Typography.Paragraph>
             )}
+            <div>
+              <Typography.Text type="secondary">标题</Typography.Text>
+              <Input
+                style={{ marginTop: 6 }}
+                disabled={!allowRun}
+                maxLength={80}
+                placeholder="留空则用任务号和时间，例如 #36 2026-11-06 16:57"
+                value={jobTitle}
+                onChange={(e) => setJobTitle(e.target.value)}
+              />
+            </div>
             <div>
               <Typography.Text type="secondary">处理方案</Typography.Text>
               <Select
@@ -657,6 +669,7 @@ export default function ExecutePage() {
                 try {
                   const j = await api.createJob({
                     profile_id: profileId,
+                    title: jobTitle.trim(),
                     input_dir: inputDir,
                     output_dir: outputDir,
                     params: {

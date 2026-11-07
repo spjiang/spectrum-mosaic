@@ -39,6 +39,7 @@ from ms_mosaic.memory import (
     cap_workers,
     job_memory_gb,
     process_rss_bytes,
+    release_heap,
     resolve_memory_budget,
 )
 from ms_mosaic.tracks import Tracks
@@ -1692,9 +1693,63 @@ def bundle_adjust(
     并行。共用一个 λ 时任一波段步长被拒就要 8 个波段一起重组装重试，阶段 2
     实测因此从 23 min 拖到 2 h 12 min。
     """
+    obs_img, obs_pt, obs_uv = _stack_observations(observations)
+    # 观测对象在压成数组后不再参与求解。先清空再决定并行路数，否则主进程占着
+    # 这一份，剩余内存只够开 1 路。求解结束后按原顺序装回，剔粗差仍读这个列表。
+    observations.clear()
+    if int(obs_img.size):
+        release_heap()
+        if log is not None:
+            log("平差前已释放观测对象，计算使用连续数组")
+    try:
+        return _bundle_adjust_stacked(
+            cameras,
+            poses,
+            points,
+            image_camera,
+            gps,
+            attitude_rotation,
+            obs_img,
+            obs_pt,
+            obs_uv,
+            sigma_xyz=sigma_xyz,
+            sigma_attitude_rad=sigma_attitude_rad,
+            free_names=free_names,
+            intrinsic_prior=intrinsic_prior,
+            max_iterations=max_iterations,
+            verbose=verbose,
+            log=log,
+            gpu=gpu,
+        )
+    finally:
+        if not observations:
+            observations.extend(
+                Observation(int(obs_img[i]), int(obs_pt[i]), obs_uv[i]) for i in range(int(obs_img.size))
+            )
+
+
+def _bundle_adjust_stacked(
+    cameras,
+    poses,
+    points,
+    image_camera,
+    gps,
+    attitude_rotation,
+    obs_img,
+    obs_pt,
+    obs_uv,
+    *,
+    sigma_xyz,
+    sigma_attitude_rad,
+    free_names,
+    intrinsic_prior,
+    max_iterations,
+    verbose,
+    log,
+    gpu,
+):
     from ms_mosaic.gpu import assign_devices, describe
 
-    obs_img, obs_pt, obs_uv = _stack_observations(observations)
     groups = _camera_groups(
         points, image_camera, poses, obs_image_ids=obs_img, obs_point_ids=obs_pt
     )
@@ -1708,7 +1763,6 @@ def bundle_adjust(
             cameras,
             poses,
             points,
-            observations,
             image_camera,
             gps,
             attitude_rotation,
@@ -1728,7 +1782,7 @@ def bundle_adjust(
         cameras,
         poses,
         points,
-        observations,
+        None,
         image_camera,
         gps,
         attitude_rotation,
@@ -1736,6 +1790,9 @@ def bundle_adjust(
         sigma_attitude_rad=sigma_attitude_rad,
         free_names=free_names,
         intrinsic_prior=intrinsic_prior,
+        obs_image_ids=obs_img,
+        obs_point_ids=obs_pt,
+        obs_uv=obs_uv,
     )
     x = solve_lm(
         problem,
@@ -1871,7 +1928,6 @@ def _bundle_adjust_by_camera(
     cameras: dict[str, Camera],
     poses: dict[int, Pose],
     points: np.ndarray,
-    observations: list[Observation],
     image_camera: dict[int, str],
     gps: dict[int, np.ndarray],
     attitude_rotation: dict[int, np.ndarray],
@@ -1975,7 +2031,7 @@ def _bundle_adjust_by_camera(
     out_cameras = dict(cameras)
     out_poses = dict(poses)
     out_points = np.array(points, copy=True)
-    residual = np.zeros(len(observations))
+    residual = np.zeros(int(obs_uv.shape[0]))
     for g, cams, sub_out, pts, res in results:
         out_cameras.update(cams)
         out_poses.update(sub_out)
@@ -2053,8 +2109,8 @@ def run_at(
 ) -> ATResult:
     """完整空三：交会 → 分阶段自标定平差 → 剔粗差 → 收敛。
 
-    ``features`` 交会后即不再需要；调用方应只传入关键点并在返回前释放，
-    避免描述子与法方程同时驻留把 24 GB 引擎打满。
+    ``features`` 交会后即不再需要；调用方应只传入关键点。本函数在交会后清空
+    关键点，并释放轨迹里的「影像、特征」对，避免它们和平差法方程同时驻留。
     """
 
     def _say(msg: str) -> None:
@@ -2072,10 +2128,16 @@ def run_at(
     points, observations = triangulate_tracks(
         tracks, per_image_cameras, poses, features, device=None, log=_say
     )
-    # 交会完毕关键点不再参与 BA；清空调用方字典，给法方程腾出峰值。
+    # 交会完毕关键点和轨迹都不再参与 BA。就地清空，调用方仍握着的引用也放掉内存。
     if isinstance(features, dict):
         features.clear()
+    n_tracks = len(tracks) if isinstance(tracks, Tracks) else 0
+    if n_tracks:
+        tracks.release()
+        release_heap()
     _say(f"交会  物方点 {len(points)}，观测 {len(observations)}")
+    if n_tracks:
+        _say("连接点已释放")
     if len(points) == 0:
         raise ValueError("前方交会没有得到任何物方点，检查 POS 与匹配")
 

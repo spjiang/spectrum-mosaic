@@ -27,8 +27,20 @@ from ms_mosaic.dsm import resample_height
 from ms_mosaic.gpu import describe as describe_gpu
 from ms_mosaic.gpu import select as select_gpu
 from ms_mosaic.grid import Grid, erode_coverage, refine_coverage_mask
-from ms_mosaic.ortho import NativeImageCache, OrthoConfig, orthorectify_tile, share_rectification
-from ms_mosaic.parallel import CACHE_PER_WORKER, map_tiles, resolve_workers, tile_worker_mb
+from ms_mosaic.ortho import (
+    MAX_VIEWS_PER_TILE,
+    NativeImageCache,
+    OrthoConfig,
+    orthorectify_tile,
+    share_rectification,
+)
+from ms_mosaic.parallel import (
+    CACHE_PER_WORKER,
+    map_tiles,
+    reserve_memory,
+    resolve_workers,
+    tile_worker_mb,
+)
 from ms_mosaic.products import (
     RGB_BAND,
     RasterWriter,
@@ -68,17 +80,95 @@ def _ortho_gpu_fields(choice, workers, per_worker_mb, log, label: str) -> dict:
     }
 
 
-# 每个多光谱波段自己留一份影像缓存。一块最多 12 个视角，24 张够相邻块复用。
-# 七个波段若挤在同一个 48 张的缓存里，换波段就会把上一波段的影像挤掉，每块都重新读盘。
-MS_IMAGES_PER_BAND = 24
+# 一块最多 12 个视角，再留 4 张给同一段里的下一块。单张多光谱约 6 MB，
+# 少留几张、多读一次盘，比把页换出再换进便宜。
+# 7 个波段 × 16 张 × 10 进程大约 6.7 GB。以前每波段 24 张，光缓存就要大约 10 GB，
+# 再叠 7 幅正射的脏页，31 GB 的虚拟机就满了。
+# 波段仍各留各的缓存：挤进同一份会在换波段时把上一波段的影像挤掉。
+MS_CACHE_EXTRA = 4
 
 
 def ms_cache_per_band(n_bands: int) -> int:
-    """单进程每波段缓存张数。8 个及以内仍是 24；再多就按总张数分摊，至少留 4 张。"""
+    """单进程每波段缓存张数。8 个及以内是一块的视角再加几张复用；再多就按总张数分摊。"""
     n = max(1, int(n_bands))
+    per = MAX_VIEWS_PER_TILE + MS_CACHE_EXTRA
     if n <= 8:
-        return MS_IMAGES_PER_BAND
-    return max(4, (MS_IMAGES_PER_BAND * 8) // n)
+        return per
+    return max(4, (per * 8) // n)
+
+
+def ms_worker_mb(image_bytes: int, n_bands: int) -> int:
+    """一个多光谱正射进程的内存估计：各波段缓存张数之和，再加单块工作内存。"""
+    n = max(1, int(n_bands))
+    return tile_worker_mb(image_bytes, cache=ms_cache_per_band(n) * n)
+
+
+# 一个波段的累加器：acc + wsum + label_w 各 4 字节，标号 2 字节。
+_RASTER_CELL_BYTES = 14
+
+
+def _pages_can_be_dropped() -> bool:
+    import mmap
+
+    return getattr(mmap, "MADV_DONTNEED", None) is not None
+
+
+def ms_parent_reserve_mb(
+    grid: Grid, n_bands: int, *, tile: int | None = None, overlap: int | None = None
+) -> int:
+    """规划进程时留给主进程累加器的内存。
+
+    页能退回时只留当前块和相邻重叠块。退不回时按整幅计，
+    避免脏页和子进程叠在一起把虚拟机撑满。
+    """
+    if tile is None:
+        tile = ORTHO_TILE
+    if overlap is None:
+        overlap = ORTHO_OVERLAP
+    n = max(1, int(n_bands))
+    height, width = int(grid.height), int(grid.width)
+    if not _pages_can_be_dropped():
+        return max(1, -(-(height * width * _RASTER_CELL_BYTES * n) // 2**20))
+    rows = min(height, int(tile) + 2 * int(overlap))
+    cols = min(width, int(tile) + 2 * int(overlap))
+    return max(1, -(-(rows * cols * _RASTER_CELL_BYTES * n * 2) // 2**20))
+
+
+def _drop_memmap_rows(arr, row0: int, row1: int) -> None:
+    """把 [row0, row1) 这些整行写回文件，再从常驻退回。只同步这一段，不扫整幅。"""
+    import mmap as mmap_mod
+
+    mm = getattr(arr, "_mmap", None)
+    if mm is None or not hasattr(mm, "madvise"):
+        arr.flush()
+        return
+    if arr.ndim == 2:
+        leads, lead_stride = 1, 0
+    elif arr.ndim == 3:
+        leads, lead_stride = int(arr.shape[0]), int(arr.strides[0])
+    else:
+        return
+    page = mmap_mod.PAGESIZE or 4096
+    base = int(getattr(arr, "offset", 0))
+    row_stride = int(arr.strides[-2])
+    limit = len(mm)
+    advice = mmap_mod.MADV_DONTNEED
+    for lead in range(leads):
+        start = base + lead * lead_stride + row0 * row_stride
+        length = (row1 - row0) * row_stride
+        if length <= 0:
+            continue
+        start_a = start - (start % page)
+        end_a = min(limit, (start + length + page - 1) // page * page)
+        if end_a <= start_a:
+            continue
+        try:
+            mm.flush(start_a, end_a - start_a)
+            mm.madvise(advice, start_a, end_a - start_a)
+        except (OSError, ValueError, BufferError, SystemError):
+            continue
+
+
 # 块与块之间必须有足够重叠，并且按权重融合。旧写法 overlap=16 再硬裁内芯，
 # 每块独立解增益、独立选拼接线，相邻 384 格亮度可差 70，图上就是左侧那些方块。
 ORTHO_OVERLAP = 48
@@ -491,10 +581,8 @@ def render_ms_bands(
     windows = list(grid.tiles(tile, overlap=overlap))
     any_cam = next(iter(bands[0][1].values()))
     image_bytes = any_cam.width * any_cam.height * 2
-    # 影像缓存总张数按 8 个波段×24 张封顶。波长几十个时每波段少留几张、多读几次盘。
     # 拼接线在参考波段上求一次，其余波段按曝光号沿用。
     cache_per_band = ms_cache_per_band(len(bands))
-    cache_slots = cache_per_band * len(bands)
     shared = _share_array(np.asarray(dsm_z))
     payload = {
         "grid": grid,
@@ -511,23 +599,29 @@ def render_ms_bands(
         "cache_per_band": cache_per_band,
     }
     rasters = {name: BandRaster(grid, 1, scratch_root=scratch_root) for name in names}
+    # 进程数要给主进程留出正在写的那一块。整幅大约 16 GB，按块退回后不用按整幅留。
+    parent_mb = ms_parent_reserve_mb(grid, len(names), tile=tile, overlap=overlap)
     try:
-        for _, window, tiles in map_tiles(
-            windows,
-            partial(_ms_setup, payload),
-            _ms_fn,
-            workers=workers,
-            log=log,
-            label=f"正射多光谱（几何共用 {'/'.join(names)}）",
-            per_worker_mb=tile_worker_mb(image_bytes, cache=cache_slots),
-        ):
-            weight = _feather_weight(window, overlap, grid)
-            for band, mosaic, labels, views in tiles:
-                if mosaic.size == 0 or not views:
-                    continue
-                rasters[band].add_tile(window, mosaic, labels, views, weight)
-        for raster in rasters.values():
-            raster.flush()
+        with reserve_memory(parent_mb):
+            if log is not None:
+                log(f"多光谱累加器按块退回常驻，主进程留 {parent_mb} MB")
+            for _, window, tiles in map_tiles(
+                windows,
+                partial(_ms_setup, payload),
+                _ms_fn,
+                workers=workers,
+                log=log,
+                label=f"正射多光谱（几何共用 {'/'.join(names)}）",
+                per_worker_mb=ms_worker_mb(image_bytes, len(bands)),
+            ):
+                weight = _feather_weight(window, overlap, grid)
+                for band, mosaic, labels, views in tiles:
+                    if mosaic.size == 0 or not views:
+                        continue
+                    rasters[band].add_tile(window, mosaic, labels, views, weight)
+                    rasters[band].release_window(window)
+            for raster in rasters.values():
+                raster.evict()
         return rasters
     except BaseException:
         for raster in rasters.values():
@@ -634,6 +728,41 @@ class BandRaster:
     def flush(self) -> None:
         for arr in (self.acc, self.wsum, self._labels1, self.label_w):
             arr.flush()
+
+    def release_window(self, window: tuple[int, int, int, int]) -> None:
+        """这块已经累加完。先写回磁盘，再把这些行从常驻退回。
+
+        下一块重叠到同一行时从磁盘读回，数值与一直留在内存里相同。
+        不退的话，7 个波段的整幅脏页大约 16 GB，会和子进程一起把内存用满。
+        """
+        row0, _col0, rows, _cols = (int(v) for v in window)
+        if rows <= 0:
+            return
+        if not _pages_can_be_dropped():
+            self.flush()
+            return
+        row1 = min(int(self.grid.height), row0 + rows)
+        if row1 <= row0:
+            return
+        for arr in (self.acc, self.wsum, self._labels1, self.label_w):
+            _drop_memmap_rows(arr, row0, row1)
+
+    def evict(self) -> None:
+        """成果已写出后，把累加器页从常驻内存退回。下次读拼接线时再从磁盘调入。"""
+        import mmap as mmap_mod
+
+        self.flush()
+        advice = getattr(mmap_mod, "MADV_DONTNEED", None)
+        if advice is None:
+            return
+        for arr in (self.acc, self.wsum, self._labels1, self.label_w):
+            mm = getattr(arr, "_mmap", None)
+            if mm is None or not hasattr(mm, "madvise"):
+                continue
+            try:
+                mm.madvise(advice)
+            except (OSError, ValueError, BufferError):
+                pass
 
     def close(self) -> None:
         import shutil

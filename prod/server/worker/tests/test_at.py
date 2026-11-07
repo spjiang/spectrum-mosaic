@@ -278,6 +278,7 @@ def test_run_at_clears_features_after_triangulation():
         verbose=0,
     )
     assert len(keypoints) == 0
+    assert len(tracks) == 0
     assert len(result.points) > 0
 
 

@@ -162,8 +162,8 @@ def test_shared_ms_ortho_is_not_billed_to_the_first_band():
     assert by["正射 650nm"]["elapsed_s"] == 77.0
 
 
-def test_shared_ms_ortho_uses_explicit_compute_seconds():
-    """新日志写明计算秒数时，用这个数，写出从这一行再往下计。"""
+def test_shared_ms_ortho_uses_log_span_not_printed_seconds():
+    """共同计算按几何共用到计算完成的日志起止。自报秒数偏短时不以它入账，写出仍从完成行往下计。"""
     text = """
 2026-10-25 21:04:36,363 INFO job abc start S5_ortho 正射波段 ('Color', '450nm')
 2026-10-25 21:04:47 === 正射 Orthomosaic_pix_surf_group0.tif (Color)  249 张 ===
@@ -175,11 +175,30 @@ def test_shared_ms_ortho_uses_explicit_compute_seconds():
 2026-10-25 22:07:32 已写出 group2.tif（550nm 完成）
 """
     by = {s["name"]: s for s in parse_stage_steps(text)["S5_ortho"]}
-    assert by["多光谱正射"]["elapsed_s"] == 3233.4
+    assert by["多光谱正射"]["elapsed_s"] == 3233.0
     assert "450nm/550nm" in by["多光谱正射"]["detail"]
     assert by["正射 450nm"]["elapsed_s"] == 75.0
     assert by["正射 550nm"]["elapsed_s"] == 76.0
     assert sum(1 for s in parse_stage_steps(text)["S5_ortho"] if s["name"] == "多光谱正射") == 1
+
+
+def test_shared_ms_ortho_ignores_short_printed_seconds():
+    """虚拟机单调钟偏慢时，日志里的自报秒数会远小于起止间隔，仍按起止入账。"""
+    text = """
+2026-11-06 11:58:38,000 INFO job abc start S5_ortho 正射波段 ('Color', '550nm')
+2026-11-06 11:58:40 === 正射 color.tif (Color)  668 张 ===
+2026-11-06 12:04:56 已写出 color.tif（Color 完成）
+2026-11-06 12:04:57 多光谱正射几何共用 450nm/550nm，10 进程。拼接线在参考波段上图割一次
+2026-11-06 12:05:00 正射多光谱（几何共用 450nm/550nm） 10/1224 块
+2026-11-06 17:27:03 正射多光谱（几何共用 450nm/550nm） 1224/1224 块
+2026-11-06 17:27:04 多光谱正射计算完成，1867.4s
+2026-11-06 17:43:14 已写出 b550.tif（550nm 完成）
+2026-11-06 17:43:15 已写出 b450.tif（450nm 完成）
+"""
+    by = {s["name"]: s for s in parse_stage_steps(text)["S5_ortho"]}
+    assert by["多光谱正射"]["elapsed_s"] == 19327.0
+    assert by["正射 550nm"]["elapsed_s"] == 970.0
+    assert by["正射 450nm"]["elapsed_s"] == 1.0
 
 
 def test_ortho_retry_gap_is_not_a_step():

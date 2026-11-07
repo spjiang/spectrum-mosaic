@@ -358,7 +358,7 @@ def _band_stats(
     return rows
 
 
-def _preview_png(hwc: np.ndarray, nodata: float | None) -> tuple[bytes, int, int, float]:
+def _preview_png(hwc: np.ndarray, nodata: float | None, max_side: int | None = None) -> tuple[bytes, int, int, float]:
     from PIL import Image
 
     if hwc.ndim == 2:
@@ -367,8 +367,9 @@ def _preview_png(hwc: np.ndarray, nodata: float | None) -> tuple[bytes, int, int
         planes = [hwc[..., i] for i in range(min(3, hwc.shape[-1]))]
     h, w = planes[0].shape
     scale = 1.0
-    if max(h, w) > PREVIEW_MAX:
-        scale = PREVIEW_MAX / float(max(h, w))
+    limit = PREVIEW_MAX if max_side is None else max(1, int(max_side))
+    if max(h, w) > limit:
+        scale = limit / float(max(h, w))
         nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
         ys = np.linspace(0, h - 1, nh).astype(np.int64)
         xs = np.linspace(0, w - 1, nw).astype(np.int64)

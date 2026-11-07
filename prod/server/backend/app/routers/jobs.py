@@ -36,7 +36,9 @@ from app.services.seam_map import (
     list_product_versions,
     preview_png,
     rgb_ortho_path,
+    rgb_hd_jpeg,
     rgb_preview_png,
+    rgb_thumb_jpeg,
     source_image_jpeg,
 )
 from app.services.stage_steps import persist_stage_steps
@@ -64,6 +66,7 @@ def create_job(
         params=body.params,
         input_dir=body.input_dir,
         output_dir=body.output_dir,
+        title=body.title,
     )
     record_audit(
         db,
@@ -77,6 +80,7 @@ def create_job(
 _JOB_LIST_COLS = (
     JobRun.id,
     JobRun.seq,
+    JobRun.title,
     JobRun.status,
     JobRun.run_attempt,
     JobRun.profile_id,
@@ -212,6 +216,38 @@ def seam_map(
     payload = build_seam_map(job, version)
     payload.pop("stamp", None)
     return payload
+
+
+@router.get("/{job_id}/rgb-thumb.jpg")
+def rgb_thumb(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+) -> RawResponse:
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    return RawResponse(
+        content=rgb_thumb_jpeg(job),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.get("/{job_id}/rgb-hd.jpg")
+def rgb_hd(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+) -> RawResponse:
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    return RawResponse(
+        content=rgb_hd_jpeg(job),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @router.get("/{job_id}/rgb-preview.png")

@@ -258,10 +258,20 @@ def parse_stage_steps(
             share = {"start": ts, "end": ts, "detail": _ms_share_detail(msg), "closed": False}
             continue
         if current == "S5_ortho" and msg.startswith("多光谱正射计算完成"):
-            if share is not None:
+            # 耗时取日志起止。自报的 perf_counter 在虚拟机里会比墙上时间短一截，不能拿来入账。
+            if share is not None and ts is not None:
+                share["end"] = ts
                 share["closed"] = True
+            elapsed = None
+            if share is not None:
+                start = share.get("start")
+                end = share.get("end")
+                if isinstance(start, datetime) and isinstance(end, datetime) and end >= start:
+                    elapsed = (end - start).total_seconds()
+            if elapsed is None:
+                elapsed = _explicit_seconds(msg)
             detail = share.get("detail") if share else ""
-            buckets[current].append(_step("多光谱正射", detail or "", _explicit_seconds(msg), ts))
+            buckets[current].append(_step("多光谱正射", detail or "", elapsed, ts))
             continue
         if _PROGRESS.search(msg):
             if current == "S5_ortho" and share is not None and not share["closed"] and ts is not None:

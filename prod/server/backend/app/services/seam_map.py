@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,12 @@ from app.services.geodesy import utm_to_wgs84, utm_zone_from_epsg, wgs84_to_utm
 from app.services.inspect_media import _load_tiff_overview, _preview_png
 
 ORTHO_NAME = "Orthomosaic_pix_surf_group0.tif"
+THUMB_NAME = "rgb_thumb.jpg"
+THUMB_SIDE = 360
+HD_NAME = "rgb_hd.jpg"
+HD_SIDE = 4096
+_thumb_build = threading.Lock()
+_hd_build = threading.Lock()
 SEAM_NAME = "seamlines.geojson"
 EDIT_NAME = "seam_edit.geojson"
 DSM_NAME = "DSM.tif"
@@ -515,6 +522,110 @@ def _rgb_from_overview(ortho: Path) -> bytes:
         overview = rgb
     png, _width, _height, _scale = _preview_png(overview, None)
     return png
+
+
+def _jpeg_thumb(image, side: int = THUMB_SIDE) -> bytes:
+    from PIL import Image
+
+    rgb = image.convert("RGB")
+    resample = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+    rgb.thumbnail((side, side), resample)
+    buf = io.BytesIO()
+    rgb.save(buf, format="JPEG", quality=70, optimize=True)
+    return buf.getvalue()
+
+
+def _jpeg_thumb_file(path: Path) -> bytes:
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return _jpeg_thumb(image)
+
+
+def _cache_thumb(ortho: Path, data: bytes) -> bytes:
+    cache = ortho.parent / THUMB_NAME
+    try:
+        cache.write_bytes(data)
+    except OSError:
+        pass
+    return data
+
+
+def rgb_thumb_jpeg(job: JobRun) -> bytes:
+    """列表用的小图。有预览图就缩小，没有才读一次正射并落成 rgb_thumb.jpg。"""
+    ortho = rgb_ortho_path(job)
+    if ortho is None:
+        raise HTTPException(404, "还没有 RGB 拼图影像")
+    cache = ortho.parent / THUMB_NAME
+    try:
+        if cache.is_file() and cache.stat().st_size > 0:
+            return cache.read_bytes()
+    except OSError:
+        pass
+    ready = [
+        ortho.parent / "rgb_preview.png",
+        ortho.parent / "seam_preview.png",
+    ]
+    if ortho.parent.name == "拼图结果":
+        ready.append(ortho.parent.parent / "附件" / "seam_preview.png")
+    for path in ready:
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return _cache_thumb(ortho, _jpeg_thumb_file(path))
+        except OSError:
+            continue
+    with _thumb_build:
+        try:
+            if cache.is_file() and cache.stat().st_size > 0:
+                return cache.read_bytes()
+        except OSError:
+            pass
+        overview, _height, _width, _samples, _dtype = _load_tiff_overview(ortho, max_side=480)
+        if overview.ndim == 3 and overview.shape[-1] >= 4:
+            rgb = np.array(overview[..., :3])
+            rgb[overview[..., 3] == 0] = 236
+            overview = rgb
+        png, _w, _h, _scale = _preview_png(overview, None)
+        from PIL import Image
+
+        with Image.open(io.BytesIO(png)) as image:
+            return _cache_thumb(ortho, _jpeg_thumb(image))
+
+
+def rgb_hd_jpeg(job: JobRun) -> bytes:
+    """放大用。按正射本身采样到长边 4096，不使用列表小图或拼接线预览。"""
+    from PIL import Image
+
+    ortho = rgb_ortho_path(job)
+    if ortho is None:
+        raise HTTPException(404, "还没有 RGB 拼图影像")
+    cache = ortho.parent / HD_NAME
+    try:
+        if cache.is_file() and cache.stat().st_size > 0:
+            return cache.read_bytes()
+    except OSError:
+        pass
+    with _hd_build:
+        try:
+            if cache.is_file() and cache.stat().st_size > 0:
+                return cache.read_bytes()
+        except OSError:
+            pass
+        overview, _height, _width, _samples, _dtype = _load_tiff_overview(ortho, max_side=HD_SIDE)
+        if overview.ndim == 3 and overview.shape[-1] >= 4:
+            rgb = np.array(overview[..., :3])
+            rgb[overview[..., 3] == 0] = 236
+            overview = rgb
+        png, _w, _h, _scale = _preview_png(overview, None, max_side=HD_SIDE)
+        with Image.open(io.BytesIO(png)) as image:
+            buf = io.BytesIO()
+            image.convert("RGB").save(buf, format="JPEG", quality=88)
+            data = buf.getvalue()
+        try:
+            cache.write_bytes(data)
+        except OSError:
+            pass
+        return data
 
 
 def rgb_preview_png(job: JobRun) -> bytes:

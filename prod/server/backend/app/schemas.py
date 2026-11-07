@@ -86,6 +86,7 @@ class JobCreate(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     input_dir: str
     output_dir: str
+    title: str = Field(default="", max_length=80)
 
 
 class JobContinue(BaseModel):
@@ -202,6 +203,7 @@ class JobListOut(BaseModel):
 
     id: UUID
     seq: int
+    title: str = ""
     status: str
     run_attempt: int
     profile_id: int | None = None

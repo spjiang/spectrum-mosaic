@@ -10,7 +10,7 @@ import numpy as np
 import rasterio
 from scipy.ndimage import distance_transform_edt
 
-from ms_mosaic.compose import BandRaster, _sweep_stale_scratch, write_band_product
+from ms_mosaic.compose import BandRaster, _sweep_stale_scratch, ms_parent_reserve_mb, write_band_product
 from ms_mosaic.dense import _sample_bilinear
 from ms_mosaic.grid import Grid
 from ms_mosaic.products import RGB_BAND, apply_coverage_mask, group_name, quantize, rgb_with_alpha
@@ -98,6 +98,42 @@ def test_band_raster_matches_in_memory_accumulation(tmp_path: Path):
     np.testing.assert_allclose(raster.strip(10, 20), want[:, 10:20], rtol=1e-6, equal_nan=True)
     assert raster.views == [7, 9]
     assert raster.labels.min() == -1 and raster.labels.max() == 0
+
+
+def test_release_window_keeps_overlap_and_labels(tmp_path: Path):
+    """退回已写的页之后，下一块重叠区仍按权重累加，标号也不丢。"""
+    grid = _grid(48, 40)
+    kept = BandRaster(grid, 1, scratch_root=tmp_path)
+    dropped = BandRaster(grid, 1, scratch_root=tmp_path)
+    rng = np.random.default_rng(5)
+    windows = [(0, 0, 30, 24), (18, 12, 30, 24), (0, 16, 20, 24)]
+    try:
+        for i, window in enumerate(windows):
+            _r0, _c0, rows, cols = window
+            tile = rng.uniform(1, 200, (1, rows, cols)).astype(np.float32)
+            labels = np.full((rows, cols), i, np.int16)
+            weight = rng.uniform(0.2, 1.0, (rows, cols)).astype(np.float32)
+            views = [10 + i, 30 + i]
+            kept.add_tile(window, tile, labels, views, weight)
+            dropped.add_tile(window, tile, labels, views, weight)
+            dropped.release_window(window)
+        np.testing.assert_allclose(dropped.to_array(), kept.to_array(), rtol=1e-6, equal_nan=True)
+        assert np.array_equal(dropped.labels, kept.labels)
+        assert dropped.views == kept.views
+    finally:
+        kept.close()
+        dropped.close()
+
+
+def test_parent_reserve_is_one_tile_when_pages_drop(monkeypatch):
+    """能退页时不为 7 幅整图预留；退不了页时按整幅计，进程数才会降下来。"""
+    grid = _grid(8000, 8000)
+    monkeypatch.setattr("ms_mosaic.compose._pages_can_be_dropped", lambda: True)
+    hot = ms_parent_reserve_mb(grid, 7)
+    assert hot < 100
+    monkeypatch.setattr("ms_mosaic.compose._pages_can_be_dropped", lambda: False)
+    whole = ms_parent_reserve_mb(grid, 7)
+    assert whole > 5000
 
 
 def test_tile_labels_are_global_view_indices(tmp_path: Path):

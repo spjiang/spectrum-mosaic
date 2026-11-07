@@ -2593,6 +2593,82 @@ body.is-col-resizing {
   color: var(--mosaic-muted);
 }
 
+.jobs-table .jobs-preview-cell {
+  padding: 6px 8px !important;
+  overflow: visible;
+}
+
+.job-seq-with-thumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.job-seq-with-thumb-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.job-seq-dataset {
+  font-size: 12px;
+  max-width: 88px;
+}
+
+.job-rgb-thumb-wrap {
+  display: inline-block;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.job-rgb-thumb-wrap .ant-image {
+  display: block;
+  width: 72px;
+  height: 54px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.job-rgb-thumb-wrap .ant-image-mask {
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.job-rgb-thumb,
+.job-rgb-thumb--empty,
+.job-rgb-thumb--loading,
+.job-rgb-thumb--err {
+  display: block;
+  width: 72px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.job-rgb-thumb--loading {
+  background: linear-gradient(90deg, rgba(15, 23, 42, 0.06) 25%, rgba(15, 23, 42, 0.1) 50%, rgba(15, 23, 42, 0.06) 75%);
+  background-size: 200% 100%;
+  animation: job-rgb-shimmer 1.2s ease-in-out infinite;
+}
+
+.job-rgb-thumb--err {
+  background: rgba(255, 77, 79, 0.08);
+  border-color: rgba(255, 77, 79, 0.25);
+}
+
+@keyframes job-rgb-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
 .worker-job-table .worker-actions-cell,
 .jobs-table .jobs-actions-cell {
   min-width: 128px;

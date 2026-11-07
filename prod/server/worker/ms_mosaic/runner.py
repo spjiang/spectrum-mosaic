@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import gc
 import multiprocessing
 import os
 import time
@@ -23,7 +22,7 @@ from ms_mosaic.catalog import scan_directory
 from ms_mosaic.features import extract_file, load_keypoints
 from ms_mosaic.matching import MIN_INLIERS, PairMatches, geometric_verify, match_pair
 from ms_mosaic.cpu import cpu_cap, host_reserve, job_cpus
-from ms_mosaic.memory import resolve_memory_budget, visible_limit_bytes
+from ms_mosaic.memory import release_heap, resolve_memory_budget, visible_limit_bytes
 from ms_mosaic.pairs import select_pairs
 from ms_mosaic.at import calibration_stages
 from ms_mosaic.scene import (
@@ -386,7 +385,7 @@ def run_sparse(
     # 内点下标数组交完轨即可丢；报告只要每对的 (i, j, 内点数)。
     match_stats = summarize_matches(matches)
     del matches
-    gc.collect()
+    release_heap()
     log(
         f"连接点 {len(tracks)} 条，观测 {tracks.total_observations()}，"
         f"平均轨迹长 {tracks.lengths.mean():.2f}"
@@ -403,6 +402,8 @@ def run_sparse(
     gps = {im.index: block.gps[im.index] for im in images}
     att = {im.index: block.poses[im.index].rotation for im in images}
 
+    # 轨迹条数和每张影像的连接点数要在 run_at 释放轨迹之前记下。
+    track_stats = TrackSummary(tracks.per_image_counts(), len(tracks))
     t = time.time()
     if calibrate_intrinsics and not ba_stage3:
         log("平差阶段3已关闭，停在阶段2（焦距、主点、k1、k2）")
@@ -422,11 +423,10 @@ def run_sparse(
         log=log,
     )
     del keypoints
-    # 逐条观测和完整轨迹后面只用于报告计数，约 2~3 GB。压成每影像摘要再进加密/正射。
+    # 逐条观测后面只用于报告计数。轨迹已在交会后释放，这里再丢掉空壳。
     at.summarize_observations(drop=True)
-    track_stats = TrackSummary(tracks.per_image_counts(), len(tracks))
     del tracks
-    gc.collect()
+    release_heap()
     timings["at"] = time.time() - t
     timings["total"] = time.time() - t0
     log(f"空三 {timings['at']:.1f}s，稀疏重建合计 {timings['total']:.1f}s")
