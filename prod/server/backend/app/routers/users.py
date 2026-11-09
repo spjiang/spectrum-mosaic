@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -15,6 +17,14 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 ALLOWED = ("admin", "configurator", "executor", "viewer")
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _out(user: User) -> UserOut:
     return UserOut(
         id=user.id,
@@ -22,6 +32,7 @@ def _out(user: User) -> UserOut:
         is_active=user.is_active,
         roles=[r.name for r in user.roles],
         created_at=user.created_at,
+        expires_at=user.expires_at,
     )
 
 
@@ -53,13 +64,23 @@ def create_user(
     exists = db.scalar(select(User).where(User.username == name))
     if exists is not None:
         raise HTTPException(409, "用户名已存在")
-    user = User(username=name, password_hash=hash_password(body.password), is_active=True)
+    user = User(
+        username=name,
+        password_hash=hash_password(body.password),
+        is_active=True,
+        expires_at=_as_utc(body.expires_at),
+    )
     _set_roles(db, user, body.roles)
     db.add(user)
     db.commit()
     db.refresh(user)
     user = db.scalar(select(User).options(selectinload(User.roles)).where(User.id == user.id))
-    record_audit(db, actor.id, "user.create", {"id": user.id, "username": user.username, "roles": [r.name for r in user.roles]})
+    record_audit(db, actor.id, "user.create", {
+        "id": user.id,
+        "username": user.username,
+        "roles": [r.name for r in user.roles],
+        "expires_at": None if user.expires_at is None else user.expires_at.isoformat(),
+    })
     return _out(user)
 
 
@@ -83,6 +104,8 @@ def update_user(
         if user.id == actor.id and "admin" not in body.roles:
             raise HTTPException(400, "无法取消当前账号的系统管理员角色")
         _set_roles(db, user, body.roles)
+    if "expires_at" in body.model_fields_set:
+        user.expires_at = _as_utc(body.expires_at)
     db.commit()
     user = db.scalar(select(User).options(selectinload(User.roles)).where(User.id == user_id))
     record_audit(
@@ -94,6 +117,7 @@ def update_user(
             "username": user.username,
             "roles": [r.name for r in user.roles],
             "is_active": user.is_active,
+            "expires_at": None if user.expires_at is None else user.expires_at.isoformat(),
             "password_changed": bool(body.password),
         },
     )

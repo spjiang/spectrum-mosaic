@@ -6,6 +6,7 @@ type Props = {
   jobId: string;
   hasRgb: boolean;
   title?: string;
+  rev?: string | null;
 };
 
 const MAX_PARALLEL = 2;
@@ -29,7 +30,7 @@ function runLimited<T>(task: () => Promise<T>): Promise<T> {
   });
 }
 
-export default function JobRgbThumbnail({ jobId, hasRgb, title }: Props) {
+export default function JobRgbThumbnail({ jobId, hasRgb, title, rev }: Props) {
   const [url, setUrl] = useState<string | null>(null);
   const [full, setFull] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -48,7 +49,7 @@ export default function JobRgbThumbnail({ jobId, hasRgb, title }: Props) {
     setFailed(false);
     setFull(null);
     setOpen(false);
-    runLimited(() => api.rgbThumb(jobId))
+    runLimited(() => api.rgbThumb(jobId, rev))
       .then((blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
@@ -61,7 +62,7 @@ export default function JobRgbThumbnail({ jobId, hasRgb, title }: Props) {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [jobId, hasRgb]);
+  }, [jobId, hasRgb, rev]);
 
   function openLarge(visible: boolean) {
     if (!visible) {
@@ -75,7 +76,7 @@ export default function JobRgbThumbnail({ jobId, hasRgb, title }: Props) {
     if (loadingHd) return;
     setLoadingHd(true);
     api
-      .rgbHd(jobId)
+      .rgbHd(jobId, rev)
       .then((blob) => {
         setFull(URL.createObjectURL(blob));
         setOpen(true);

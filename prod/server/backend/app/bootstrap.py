@@ -257,6 +257,12 @@ def _to_container_data_path(key: str, value: object) -> object:
     return value
 
 
+def _ensure_user_expires_at(db: Session) -> None:
+    """试用账号的使用期限。空值表示不限期，已有账号不受影响。"""
+    db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"))
+    db.commit()
+
+
 def _migrate_legacy_source_paths(db: Session) -> None:
     """旧路径迁到 server/worker，再收成 /data 约定。"""
     n = 0
@@ -321,7 +327,9 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "022_incremental_index.sql")
     _ensure_sql_named(db, "023_ba_stage3.sql")
     _ensure_sql_named(db, "024_max_features.sql")
+    _ensure_sql_named(db, "027_at_bands.sql")
     _ensure_sql_named(db, "025_job_title.sql")
+    _ensure_user_expires_at(db)
     _migrate_legacy_source_paths(db)
     user = db.scalar(select(User).where(User.username == settings.bootstrap_admin_user))
     if user is None:

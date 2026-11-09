@@ -1027,9 +1027,14 @@ def delete_job(db: Session, mq: MQPublisher, job_id: uuid.UUID) -> None:
     db.commit()
 
 
-def delete_all_jobs(db: Session, mq: MQPublisher) -> int:
-    """一键清空：立刻杀掉 worker 任务进程，清队列，再删记录。输出目录保留。"""
+def delete_all_jobs(db: Session, mq: MQPublisher, *, owner_id: int | None = None) -> int:
+    """一键清空：立刻杀掉 worker 任务进程，再删记录。输出目录保留。
+
+    owner_id 有值时只删这个人的任务，不清共享队列。管理员不传 owner_id，才清全部并清空队列。
+    """
     jobs = list(db.scalars(select(JobRun)))
+    if owner_id is not None:
+        jobs = [job for job in jobs if getattr(job, "created_by", None) == owner_id]
     n = len(jobs)
     for job in jobs:
         if job.status not in TERMINAL:
@@ -1038,21 +1043,27 @@ def delete_all_jobs(db: Session, mq: MQPublisher) -> int:
             except Exception:  # noqa: BLE001
                 _write_control(job, pause=True, cancel=True)
         db.delete(job)
-    try:
-        mq.publish_control({"schema_version": 1, "action": "kill_all"})
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        mq.purge_jobs()
-    except Exception:  # noqa: BLE001
-        pass
+    if owner_id is None:
+        try:
+            mq.publish_control({"schema_version": 1, "action": "kill_all"})
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            mq.purge_jobs()
+        except Exception:  # noqa: BLE001
+            pass
     db.commit()
     return n
 
 
-def kill_all_active(db: Session, mq: MQPublisher) -> int:
-    """Worker 监控：立刻杀掉计算进程，取消排队/运行/暂停/等待中的任务，历史记录保留。"""
+def kill_all_active(db: Session, mq: MQPublisher, *, owner_id: int | None = None) -> int:
+    """Worker 监控：立刻杀掉计算进程，取消排队/运行/暂停/等待中的任务，历史记录保留。
+
+    owner_id 有值时只取消这个人的任务，不向 Worker 发全局杀死，也不清共享队列。
+    """
     jobs = list(db.scalars(select(JobRun).where(JobRun.status.in_(tuple(LIVE)))))
+    if owner_id is not None:
+        jobs = [job for job in jobs if getattr(job, "created_by", None) == owner_id]
     n = 0
     for job in jobs:
         try:
@@ -1065,14 +1076,15 @@ def kill_all_active(db: Session, mq: MQPublisher) -> int:
         job.message = "已从 Worker 监控杀死全部任务"
         append_run_log(db, job.id, "Worker 监控：杀死全部任务", level="warning", commit=False)
         n += 1
-    try:
-        mq.publish_control({"schema_version": 1, "action": "kill_all"})
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        mq.purge_jobs()
-    except Exception:  # noqa: BLE001
-        pass
+    if owner_id is None:
+        try:
+            mq.publish_control({"schema_version": 1, "action": "kill_all"})
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            mq.purge_jobs()
+        except Exception:  # noqa: BLE001
+            pass
     db.commit()
     return n
 

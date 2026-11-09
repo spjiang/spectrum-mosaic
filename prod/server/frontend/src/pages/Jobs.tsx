@@ -266,7 +266,12 @@ export default function JobsPage() {
               title: "RGB",
               onCell: () => ({ className: "jobs-preview-cell" }),
               render: (_: unknown, r: any) => (
-                <JobRgbThumbnail jobId={r.id} hasRgb={Boolean(r.has_rgb)} title={r.title || undefined} />
+                <JobRgbThumbnail
+                  jobId={r.id}
+                  hasRgb={Boolean(r.has_rgb)}
+                  title={r.title || undefined}
+                  rev={r.finished_at || r.updated_at || r.id}
+                />
               ),
             }),
             col("title", {

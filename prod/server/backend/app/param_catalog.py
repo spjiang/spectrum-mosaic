@@ -20,6 +20,7 @@ PARAM_LABELS: dict[str, str] = {
     "drop_white_panel": "丢弃白板帧",
     "require_pos": "必须有 POS",
     "primary_band": "主波段",
+    "at_bands": "空三波段",
     "workers_at": "空三并行度",
     "ba_stage3": "平差阶段3",
     "max_features": "特征点上限",

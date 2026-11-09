@@ -12,6 +12,28 @@ function redirectToLogin() {
   }
 }
 
+const SESSION_NOTICES = new Set(["试用已到期", "账号已停用"]);
+
+async function loginError(res: Response): Promise<string> {
+  try {
+    const j = JSON.parse(await res.text());
+    if (typeof j.detail === "string" && j.detail) return j.detail;
+  } catch {
+    /* 保持下面的通用文案 */
+  }
+  return "登录失败";
+}
+
+async function rememberSessionNotice(res: Response) {
+  try {
+    const j = JSON.parse(await res.clone().text());
+    if (typeof j.detail === "string" && SESSION_NOTICES.has(j.detail)) {
+      sessionStorage.setItem("mosaic_login_notice", j.detail);
+    }
+  } catch {
+    /* 凭证无效时不额外提示 */
+  }
+}
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -30,6 +52,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   const res = await fetch(path, { ...init, headers });
   if (res.status === 401) {
+    await rememberSessionNotice(res);
     redirectToLogin();
     return new Promise(() => {});
   }
@@ -293,7 +316,7 @@ export const api = {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
-    if (!res.ok) throw new Error("登录失败");
+    if (!res.ok) throw new Error(await loginError(res));
     return res.json() as Promise<{ access_token: string; roles: string[] }>;
   },
   health: () => request<{ status: string }>("/api/health"),
@@ -471,11 +494,12 @@ export const api = {
     request<{ width: number; height: number; features: { image_id: number; points: number[][] }[] }>(
       `/api/jobs/${id}/seam-map${version ? `?version=${encodeURIComponent(version)}` : ""}`,
     ),
-  rgbThumb: async (id: string) => {
+  rgbThumb: async (id: string, rev?: string | null) => {
     const headers = new Headers();
     const token = getToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
-    const res = await fetch(`/api/jobs/${id}/rgb-thumb.jpg`, { headers });
+    const q = rev ? `?v=${encodeURIComponent(rev)}` : "";
+    const res = await fetch(`/api/jobs/${id}/rgb-thumb.jpg${q}`, { headers, cache: "no-store" });
     if (res.status === 401) {
       redirectToLogin();
       return new Promise<Blob>(() => {});
@@ -483,11 +507,12 @@ export const api = {
     if (!res.ok) throw new Error(readError(await res.text(), "RGB 缩略图读取失败"));
     return res.blob();
   },
-  rgbHd: async (id: string) => {
+  rgbHd: async (id: string, rev?: string | null) => {
     const headers = new Headers();
     const token = getToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
-    const res = await fetch(`/api/jobs/${id}/rgb-hd.jpg`, { headers });
+    const q = rev ? `?v=${encodeURIComponent(rev)}` : "";
+    const res = await fetch(`/api/jobs/${id}/rgb-hd.jpg${q}`, { headers, cache: "no-store" });
     if (res.status === 401) {
       redirectToLogin();
       return new Promise<Blob>(() => {});
@@ -650,9 +675,9 @@ export const api = {
     request<{ id: number; username: string | null; action: string; detail: Record<string, unknown>; created_at: string | null }[]>(
       "/api/audit",
     ),
-  createUser: (body: { username: string; password: string; roles: string[] }) =>
+  createUser: (body: { username: string; password: string; roles: string[]; expires_at?: string | null }) =>
     request("/api/users", { method: "POST", body: JSON.stringify(body) }),
-  updateUser: (id: number, body: { password?: string; roles?: string[]; is_active?: boolean }) =>
+  updateUser: (id: number, body: { password?: string; roles?: string[]; is_active?: boolean; expires_at?: string | null }) =>
     request(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   incrementalProjects: (page = 1, pageSize = 10) =>
     request<{ items: IncrementalProject[]; total: number; page: number; page_size: number }>(

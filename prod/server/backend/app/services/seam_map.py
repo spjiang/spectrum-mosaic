@@ -542,54 +542,121 @@ def _jpeg_thumb_file(path: Path) -> bytes:
         return _jpeg_thumb(image)
 
 
-def _cache_thumb(ortho: Path, data: bytes) -> bytes:
-    cache = ortho.parent / THUMB_NAME
+def _stamp_path(cache: Path) -> Path:
+    return cache.with_name(cache.name + ".src")
+
+
+def _write_stamp(cache: Path, mtime_ns: int, size: int) -> None:
+    _stamp_path(cache).write_text(f"{mtime_ns} {size}\n", encoding="ascii")
+
+
+def _jpeg_bytes_are_placeholder(data: bytes) -> bool:
+    """整张都是空区填的灰，说明读到的是还没写完的正射。"""
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            colors = image.convert("RGB").getcolors(maxcolors=2)
+    except OSError:
+        return False
+    return bool(colors) and len(colors) == 1 and colors[0][1] == (236, 236, 236)
+
+
+def _jpeg_is_placeholder(path: Path) -> bool:
+    try:
+        return _jpeg_bytes_are_placeholder(path.read_bytes())
+    except OSError:
+        return False
+
+
+def _cache_is_current(cache: Path, source: Path) -> bool:
+    """缓存必须对应当前正射。写到一半生成的全灰图不能继续用。"""
+    try:
+        if not cache.is_file() or cache.stat().st_size <= 0 or not source.is_file():
+            return False
+        src = source.stat()
+        stamp = _stamp_path(cache)
+        if stamp.is_file():
+            mtime_ns, size = stamp.read_text(encoding="ascii").split()[:2]
+            return int(mtime_ns) == src.st_mtime_ns and int(size) == src.st_size
+        if cache.stat().st_mtime <= src.st_mtime:
+            return False
+        return not _jpeg_is_placeholder(cache)
+    except (OSError, ValueError):
+        return False
+
+
+def _paint_empty(overview: np.ndarray) -> np.ndarray:
+    if overview.ndim == 3 and overview.shape[-1] >= 4:
+        rgb = np.array(overview[..., :3])
+        rgb[overview[..., 3] == 0] = 236
+        return rgb
+    return overview
+
+
+def _has_visible_color(overview: np.ndarray) -> bool:
+    painted = _paint_empty(overview)
+    return bool(painted.size) and bool(np.any(painted != 236))
+
+
+def _store_jpeg(cache: Path, source: Path, data: bytes, *, store: bool) -> bytes:
+    if not store:
+        return data
     try:
         cache.write_bytes(data)
+        src = source.stat()
+        _write_stamp(cache, src.st_mtime_ns, src.st_size)
     except OSError:
         pass
     return data
 
 
+def _ortho_settled(source: Path, before: os.stat_result) -> bool:
+    try:
+        after = source.stat()
+    except OSError:
+        return False
+    return after.st_mtime_ns == before.st_mtime_ns and after.st_size == before.st_size
+
+
 def rgb_thumb_jpeg(job: JobRun) -> bytes:
-    """列表用的小图。有预览图就缩小，没有才读一次正射并落成 rgb_thumb.jpg。"""
+    """列表用的小图。正射写完才落成 rgb_thumb.jpg，写到一半的全灰图不缓存。"""
     ortho = rgb_ortho_path(job)
     if ortho is None:
         raise HTTPException(404, "还没有 RGB 拼图影像")
     cache = ortho.parent / THUMB_NAME
-    try:
-        if cache.is_file() and cache.stat().st_size > 0:
-            return cache.read_bytes()
-    except OSError:
-        pass
+    if _cache_is_current(cache, ortho):
+        return cache.read_bytes()
     ready = [
         ortho.parent / "rgb_preview.png",
         ortho.parent / "seam_preview.png",
     ]
     if ortho.parent.name == "拼图结果":
         ready.append(ortho.parent.parent / "附件" / "seam_preview.png")
+    ortho_mtime = ortho.stat().st_mtime
     for path in ready:
         try:
-            if path.is_file() and path.stat().st_size > 0:
-                return _cache_thumb(ortho, _jpeg_thumb_file(path))
+            if not path.is_file() or path.stat().st_size <= 0 or path.stat().st_mtime < ortho_mtime:
+                continue
+            data = _jpeg_thumb_file(path)
+            if _jpeg_bytes_are_placeholder(data):
+                continue
+            return _store_jpeg(cache, ortho, data, store=True)
         except OSError:
             continue
     with _thumb_build:
-        try:
-            if cache.is_file() and cache.stat().st_size > 0:
-                return cache.read_bytes()
-        except OSError:
-            pass
+        if _cache_is_current(cache, ortho):
+            return cache.read_bytes()
+        before = ortho.stat()
         overview, _height, _width, _samples, _dtype = _load_tiff_overview(ortho, max_side=480)
-        if overview.ndim == 3 and overview.shape[-1] >= 4:
-            rgb = np.array(overview[..., :3])
-            rgb[overview[..., 3] == 0] = 236
-            overview = rgb
-        png, _w, _h, _scale = _preview_png(overview, None)
+        png, _w, _h, _scale = _preview_png(_paint_empty(overview), None)
         from PIL import Image
 
         with Image.open(io.BytesIO(png)) as image:
-            return _cache_thumb(ortho, _jpeg_thumb(image))
+            data = _jpeg_thumb(image)
+        finished = getattr(job, "status", None) in {"succeeded", "failed", "cancelled"}
+        store = _ortho_settled(ortho, before) and (_has_visible_color(overview) or finished)
+        return _store_jpeg(cache, ortho, data, store=store)
 
 
 def rgb_hd_jpeg(job: JobRun) -> bytes:
@@ -600,32 +667,21 @@ def rgb_hd_jpeg(job: JobRun) -> bytes:
     if ortho is None:
         raise HTTPException(404, "还没有 RGB 拼图影像")
     cache = ortho.parent / HD_NAME
-    try:
-        if cache.is_file() and cache.stat().st_size > 0:
-            return cache.read_bytes()
-    except OSError:
-        pass
+    if _cache_is_current(cache, ortho):
+        return cache.read_bytes()
     with _hd_build:
-        try:
-            if cache.is_file() and cache.stat().st_size > 0:
-                return cache.read_bytes()
-        except OSError:
-            pass
+        if _cache_is_current(cache, ortho):
+            return cache.read_bytes()
+        before = ortho.stat()
         overview, _height, _width, _samples, _dtype = _load_tiff_overview(ortho, max_side=HD_SIDE)
-        if overview.ndim == 3 and overview.shape[-1] >= 4:
-            rgb = np.array(overview[..., :3])
-            rgb[overview[..., 3] == 0] = 236
-            overview = rgb
-        png, _w, _h, _scale = _preview_png(overview, None, max_side=HD_SIDE)
+        png, _w, _h, _scale = _preview_png(_paint_empty(overview), None, max_side=HD_SIDE)
         with Image.open(io.BytesIO(png)) as image:
             buf = io.BytesIO()
             image.convert("RGB").save(buf, format="JPEG", quality=88)
             data = buf.getvalue()
-        try:
-            cache.write_bytes(data)
-        except OSError:
-            pass
-        return data
+        finished = getattr(job, "status", None) in {"succeeded", "failed", "cancelled"}
+        store = _ortho_settled(ortho, before) and (_has_visible_color(overview) or finished)
+        return _store_jpeg(cache, ortho, data, store=store)
 
 
 def rgb_preview_png(job: JobRun) -> bytes:

@@ -212,6 +212,7 @@ def run_mosaic(
     workers_ortho: int | None = None,
     memory_gb: float | None = None,
     bands: Sequence[str] | None = None,
+    at_bands: Sequence[str] | None = None,
     cache_dir: Path | None = None,
     reuse_dsm: Path | None = None,
     benchmark_dir: Path | None = None,
@@ -332,6 +333,7 @@ def run_mosaic(
         outlier_threshold_px=outlier_threshold_px,
         calibrate_intrinsics=calibrate_intrinsics,
         ba_stage3=ba_stage3,
+        at_bands=at_bands,
         log=log,
         on_catalog_done=finish_catalog if report_catalog else None,
     )

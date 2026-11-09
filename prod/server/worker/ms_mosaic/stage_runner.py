@@ -118,11 +118,15 @@ def _run_stages_body(
     if run_mode == "full":
         stop = "S6_report"
 
-    bands = params.get("bands")
-    if isinstance(bands, str):
-        bands = tuple(s.strip() for s in bands.split(",") if s.strip())
-    elif isinstance(bands, list):
-        bands = tuple(bands)
+    def _band_tuple(raw):
+        if isinstance(raw, str):
+            return tuple(s.strip() for s in raw.split(",") if s.strip())
+        if isinstance(raw, list):
+            return tuple(str(s).strip() for s in raw if str(s).strip())
+        return None
+
+    bands = _band_tuple(params.get("bands"))
+    at_bands = _band_tuple(params.get("at_bands"))
 
     if _should_run("S0_io", start, stop):
         t0 = time.time()
@@ -160,6 +164,7 @@ def _run_stages_body(
             workers_ortho=_as_int(params.get("workers_ortho")),
             memory_gb=_as_float(params.get("memory_gb")),
             bands=bands,
+            at_bands=at_bands,
             cache_dir=_as_path(params.get("cache_dir")),
             reuse_dsm=_as_path(params.get("reuse_dsm")),
             benchmark_dir=_as_path(params.get("benchmark_dir")),

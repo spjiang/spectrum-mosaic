@@ -103,12 +103,16 @@ function FieldEditor({
           ]}
           onChange={(v) => setValues({ ...values, [d.key]: v })}
         />
-      ) : d.key === "bands" ? (
+      ) : d.key === "bands" || d.key === "at_bands" ? (
         <Select
           mode="tags"
           style={{ width: "100%" }}
           value={values[d.key] || []}
-          placeholder="可手填波长，如 510nm；留空或默认 8 项则按数据里的波段"
+          placeholder={
+            d.key === "at_bands"
+              ? "留空或默认 8 项则每个波段都做空三。例：Color、800nm。必须包含 Color"
+              : "可手填波长，如 510nm；留空或默认 8 项则按数据里的波段"
+          }
           onChange={(v) => setValues({ ...values, [d.key]: v })}
         />
       ) : (
@@ -140,7 +144,7 @@ function FieldEditor({
 }
 
 function fieldSpan(d: ParamDef): number {
-  if (d.value_type === "path" || d.key === "bands" || d.key === "input_dir" || d.key === "output_dir") {
+  if (d.value_type === "path" || d.key === "bands" || d.key === "at_bands" || d.key === "input_dir" || d.key === "output_dir") {
     return 24;
   }
   return 12;
@@ -303,6 +307,7 @@ export default function ProfileEditPage() {
                   ...v,
                   preset: "rgb_preview",
                   bands: ["Color"],
+                  at_bands: ["Color"],
                   run_mode: "full",
                 }));
                 message.success("已应用 RGB 快速预览预设");

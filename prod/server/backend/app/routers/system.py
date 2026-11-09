@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth import require_roles
+from app.auth import is_admin, require_roles
 from app.bootstrap import system_status_payload, worker_env_payload
 from app.config import Settings, get_settings
 from app.db import get_db
@@ -53,10 +53,11 @@ def system_status(
 def worker_inspect(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> dict:
-    """Worker 心跳、队列消费者、当前任务和进程树。"""
-    return inspect_worker(db, settings)
+    """Worker 心跳、队列消费者、当前任务和进程树。非管理员只看自己的任务。"""
+    owner_id = None if is_admin(user) else user.id
+    return inspect_worker(db, settings, owner_id=owner_id)
 
 
 @router.post("/worker/kill-all", response_model=WorkerKillOut)
@@ -65,8 +66,9 @@ def worker_kill_all(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> WorkerKillOut:
-    """立刻杀掉 Worker 计算进程，并取消所有未结束任务。"""
-    killed = jobsvc.kill_all_active(db, mq)
+    """立刻杀掉 Worker 计算进程，并取消未结束任务。非管理员只取消自己的任务。"""
+    owner_id = None if is_admin(user) else user.id
+    killed = jobsvc.kill_all_active(db, mq, owner_id=owner_id)
     record_audit(db, user.id, "job.kill_all", {"killed": killed})
     return WorkerKillOut(killed=killed)
 

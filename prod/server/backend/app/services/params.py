@@ -75,6 +75,11 @@ def validate_param_values(defs: Sequence[Any], values: dict[str, Any]) -> list[s
         if defn.key == "max_features" and isinstance(raw, (int, float)) and not isinstance(raw, bool):
             if raw < 1 or not float(raw).is_integer():
                 errors.append("特征点上限须为正整数")
+        if defn.key == "at_bands" and isinstance(raw, list) and raw:
+            names = {str(item) for item in raw}
+            default = {"Color", "450nm", "550nm", "650nm", "720nm", "750nm", "800nm", "850nm"}
+            if names != default and "Color" not in names:
+                errors.append("空三波段必须包含 Color")
     return errors
 
 

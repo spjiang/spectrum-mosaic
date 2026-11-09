@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth import require_roles
+from app.auth import is_admin, owns_record, require_roles
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import User
@@ -50,14 +50,22 @@ def _summary(row) -> dict:
     }
 
 
+def _owned_project(db: Session, project_id: uuid.UUID, user: User):
+    row = svc.get_project(db, project_id)
+    if not owns_record(user, row.created_by):
+        raise HTTPException(404, "增量测区不存在")
+    return row
+
+
 @router.get("/projects")
 def list_projects(
     page: int = 1,
     page_size: int = 10,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "admin")),
+    user: User = Depends(require_roles("executor", "admin")),
 ) -> dict:
-    rows, total = svc.page_projects(db, page, page_size)
+    owner_id = None if is_admin(user) else user.id
+    rows, total = svc.page_projects(db, page, page_size, owner_id=owner_id)
     return {"items": [_summary(row) for row in rows], "total": total, "page": page, "page_size": page_size}
 
 
@@ -97,9 +105,9 @@ def create_project(
 def project_detail(
     project_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "admin")),
+    user: User = Depends(require_roles("executor", "admin")),
 ) -> dict:
-    return svc.project_detail(db, svc.get_project(db, project_id))
+    return svc.project_detail(db, _owned_project(db, project_id, user))
 
 
 @router.patch("/projects/{project_id}")
@@ -111,7 +119,7 @@ def patch_project(
 ) -> dict:
     row = svc.update_project(
         db,
-        svc.get_project(db, project_id),
+        _owned_project(db, project_id, user),
         name=body.name,
         auto_run=body.auto_run,
         scan_interval_minutes=body.scan_interval_minutes,
@@ -126,7 +134,7 @@ def delete_project(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> None:
-    row = svc.get_project(db, project_id)
+    row = _owned_project(db, project_id, user)
     name = row.name
     svc.delete_project(db, row)
     record_audit(db, user.id, "incremental.delete", {"id": str(project_id), "name": name})
@@ -140,7 +148,7 @@ def scan_project(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict:
-    row = svc.get_project(db, project_id)
+    row = _owned_project(db, project_id, user)
     stats = svc.sweep(db, row)
     job = None
     if row.auto_run:
@@ -162,7 +170,7 @@ def run_project(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict:
-    row = svc.get_project(db, project_id)
+    row = _owned_project(db, project_id, user)
     stats = svc.sweep(db, row)
     job = svc.launch_mosaic(db, settings, mq, row, user_id=user.id, manual=True)
     record_audit(db, user.id, "incremental.run", {"id": str(row.id), "job_id": str(job.id), "auto": False})

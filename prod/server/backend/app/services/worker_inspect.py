@@ -256,6 +256,21 @@ def _apply_proc_detail(heartbeat: dict[str, Any] | None, settings: Settings) -> 
     return merged
 
 
+def _hide_foreign_worker(heartbeat: dict[str, Any] | None, active: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """别人的任务正在跑时，不把路径和进程命令暴露给当前用户。"""
+    if not heartbeat:
+        return heartbeat
+    current = heartbeat.get("current_job") or {}
+    cid = str(current.get("job_id") or "")
+    owned = {str(row.get("id") or "") for row in active}
+    if not cid or cid in owned:
+        return heartbeat
+    copied = dict(heartbeat)
+    copied["current_job"] = None
+    copied["processes"] = []
+    return copied
+
+
 def _compute_state(heartbeat: dict[str, Any] | None, job_id: str) -> str:
     current = (heartbeat or {}).get("current_job") or {}
     if str(current.get("job_id") or "") == str(job_id):
@@ -330,7 +345,7 @@ def _apply_live_gpu(heartbeat: dict[str, Any] | None) -> dict[str, Any] | None:
     return copied
 
 
-def inspect_worker(db: Session, settings: Settings) -> dict[str, Any]:
+def inspect_worker(db: Session, settings: Settings, *, owner_id: int | None = None) -> dict[str, Any]:
     path = status_file(settings)
     heartbeat = _apply_proc_detail(read_heartbeat(path), settings)
     age = _age_seconds(str(heartbeat.get("updated_at") or "")) if heartbeat else None
@@ -346,6 +361,8 @@ def inspect_worker(db: Session, settings: Settings) -> dict[str, Any]:
     jobs = list(
         db.scalars(select(JobRun).where(JobRun.status.in_(tuple(ACTIVE_JOB))).order_by(JobRun.updated_at.desc()))
     )
+    if owner_id is not None:
+        jobs = [job for job in jobs if getattr(job, "created_by", None) == owner_id]
     active = [
         {
             "id": str(j.id),
@@ -364,6 +381,8 @@ def inspect_worker(db: Session, settings: Settings) -> dict[str, Any]:
         for j in jobs
     ]
     heartbeat = attach_orphan_current_job(heartbeat, active)
+    if owner_id is not None:
+        heartbeat = _hide_foreign_worker(heartbeat, active)
     for row in active:
         row["compute_state"] = _compute_state(heartbeat, row["id"])
     if alive:

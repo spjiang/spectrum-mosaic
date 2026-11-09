@@ -217,6 +217,16 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
     up: "航带边缘更满，可能把测区外涂进来",
     down: "边缘黑洞更多",
   },
+  at_bands: {
+    examples: ['["Color","800nm"]', '["Color"]', "留空 → 数据里的全部波段"],
+    tips: [
+      "留空或保持默认 8 项：每个波段都提特征、匹配、平差",
+      "写成 Color 与 800nm：只解这两路，其余波段正射沿用 Color 的外方位",
+      "列表里必须有 Color",
+    ],
+    up: "每多一个波段，空三时间大约按张数增加",
+    down: "少做的波段没有自己的重投影，几何从 Color 迁出",
+  },
   bands: {
     examples: ['["Color"]', '["Color","450nm","510nm","850nm"]'],
     tips: ["留空或保持默认 8 项：按数据里实际有的波长全部出图，可以是几十个", "只出彩色就只留 Color"],

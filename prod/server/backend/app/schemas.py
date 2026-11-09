@@ -19,18 +19,21 @@ class UserOut(BaseModel):
     is_active: bool
     roles: list[str]
     created_at: datetime | None = None
+    expires_at: datetime | None = None
 
 
 class UserCreate(BaseModel):
     username: str
     password: str
     roles: list[str] = Field(default_factory=lambda: ["viewer"])
+    expires_at: datetime | None = None
 
 
 class UserUpdate(BaseModel):
     password: str | None = None
     roles: list[str] | None = None
     is_active: bool | None = None
+    expires_at: datetime | None = None
 
 
 class LoginForm(BaseModel):

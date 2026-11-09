@@ -3,5 +3,6 @@
 RGB_PREVIEW_VALUES = {
     "preset": "rgb_preview",
     "bands": ["Color"],
+    "at_bands": ["Color"],
     "run_mode": "full",
 }

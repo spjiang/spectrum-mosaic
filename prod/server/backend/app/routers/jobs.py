@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response as RawRe
 from sqlalchemy import select
 from sqlalchemy.orm import Session, load_only
 
-from app.auth import require_roles
+from app.auth import is_admin, owns_record, require_roles
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import JobRun, User
@@ -47,6 +47,13 @@ from app.services.deps import get_mq
 from app.services.mq import MQPublisher
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+
+def _owned_job(db: Session, job_id: uuid.UUID, user: User) -> JobRun:
+    job = db.get(JobRun, job_id)
+    if job is None or not owns_record(user, job.created_by):
+        raise HTTPException(404, "任务不存在")
+    return job
 
 
 @router.post("", response_model=JobOut)
@@ -118,16 +125,17 @@ _JOB_LIST_COLS = (
 @router.get("", response_model=list[JobListOut])
 def list_jobs(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> list[JobRun]:
-    rows = list(
-        db.scalars(
-            select(JobRun)
-            .options(load_only(*_JOB_LIST_COLS))
-            .order_by(JobRun.created_at.desc())
-            .limit(200)
-        )
+    stmt = (
+        select(JobRun)
+        .options(load_only(*_JOB_LIST_COLS))
+        .order_by(JobRun.created_at.desc())
+        .limit(200)
     )
+    if not is_admin(user):
+        stmt = stmt.where(JobRun.created_by == user.id)
+    rows = list(db.scalars(stmt))
     for row in rows:
         row.has_rgb = rgb_ortho_path(row) is not None
     return rows
@@ -136,9 +144,12 @@ def list_jobs(
 @router.get("/seam-tasks", response_model=list[JobOut])
 def seam_tasks(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> list[JobRun]:
-    return jobsvc.list_seam_tasks(db)
+    rows = jobsvc.list_seam_tasks(db)
+    if is_admin(user):
+        return rows
+    return [row for row in rows if row.created_by == user.id]
 
 
 @router.post("/seam-tasks", response_model=JobOut)
@@ -147,6 +158,7 @@ def create_seam_task(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobRun:
+    _owned_job(db, body.source_job_id, user)
     job = jobsvc.create_seam_task(db, user_id=user.id, source_id=body.source_job_id)
     record_audit(db, user.id, "job.seam_task", {"job_id": str(job.id), "source_job_id": str(body.source_job_id)})
     return job
@@ -158,7 +170,8 @@ def clear_jobs(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobsClearedOut:
-    deleted = jobsvc.delete_all_jobs(db, mq)
+    owner_id = None if is_admin(user) else user.id
+    deleted = jobsvc.delete_all_jobs(db, mq, owner_id=owner_id)
     record_audit(db, user.id, "job.clear", {"deleted": deleted})
     return JobsClearedOut(deleted=deleted)
 
@@ -167,11 +180,9 @@ def clear_jobs(
 def get_job(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> JobRun:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     if job.status in {"queued", "running", "paused"}:
         eta = jobsvc.estimate_eta_seconds(db, job, float(job.global_percent or 0))
         if eta is not None:
@@ -186,6 +197,7 @@ def delete_job(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> Response:
+    _owned_job(db, job_id, user)
     jobsvc.delete_job(db, mq, job_id)
     record_audit(db, user.id, "job.delete", {"job_id": str(job_id)})
     return Response(status_code=204)
@@ -195,11 +207,9 @@ def delete_job(
 def seam_versions(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> dict:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return list_product_versions(job)
 
 
@@ -208,11 +218,9 @@ def seam_map(
     job_id: uuid.UUID,
     version: str | None = None,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> dict:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     payload = build_seam_map(job, version)
     payload.pop("stamp", None)
     return payload
@@ -222,15 +230,13 @@ def seam_map(
 def rgb_thumb(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> RawResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return RawResponse(
         content=rgb_thumb_jpeg(job),
         media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=86400"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -238,15 +244,13 @@ def rgb_thumb(
 def rgb_hd(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> RawResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return RawResponse(
         content=rgb_hd_jpeg(job),
         media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=86400"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -254,11 +258,9 @@ def rgb_hd(
 def rgb_preview(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> RawResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return RawResponse(content=rgb_preview_png(job), media_type="image/png")
 
 
@@ -267,11 +269,9 @@ def seam_preview(
     job_id: uuid.UUID,
     version: str | None = None,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> RawResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return RawResponse(content=preview_png(job, version), media_type="image/png")
 
 
@@ -281,11 +281,9 @@ def seam_candidates(
     x: float,
     y: float,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> dict:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return {"images": images_covering(job, x, y)}
 
 
@@ -294,11 +292,9 @@ def seam_candidates_many(
     job_id: uuid.UUID,
     body: SeamPointsIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> dict:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return {"images": images_covering_polygon(job, body.points[:80])}
 
 
@@ -308,44 +304,39 @@ def seam_image(
     image_id: int,
     max_side: int = 480,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> RawResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return RawResponse(content=source_image_jpeg(job, image_id, max_side=max_side), media_type="image/jpeg")
 
 
 _ACCURACY_ROLES = ("executor", "viewer", "admin", "configurator")
 
 
-def _accuracy_job(job_id: uuid.UUID, db: Session) -> JobRun:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
-    return job
+def _accuracy_job(job_id: uuid.UUID, db: Session, user: User) -> JobRun:
+    return _owned_job(db, job_id, user)
 
 
 @router.get("/{job_id}/accuracy", response_model=AccuracyState)
 def accuracy_state(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
     from app.services.check_accuracy import build_state
 
-    return build_state(_accuracy_job(job_id, db))
+    return build_state(_accuracy_job(job_id, db, user))
 
 
 @router.get("/{job_id}/accuracy/template.csv")
 def accuracy_template(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> PlainTextResponse:
     from app.services.check_accuracy import template_csv
 
-    _accuracy_job(job_id, db)
+    _accuracy_job(job_id, db, user)
     return PlainTextResponse(
         template_csv(),
         media_type="text/csv; charset=utf-8",
@@ -358,11 +349,11 @@ def accuracy_add_point(
     job_id: uuid.UUID,
     body: AccuracyPickIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
     from app.services.check_accuracy import add_point, move_point
 
-    job = _accuracy_job(job_id, db)
+    job = _accuracy_job(job_id, db, user)
     if body.name:
         return move_point(job, body.name, body.col, body.row)
     return add_point(job, body.col, body.row)
@@ -373,11 +364,11 @@ def accuracy_delete_point(
     job_id: uuid.UUID,
     name: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
     from app.services.check_accuracy import delete_point
 
-    return delete_point(_accuracy_job(job_id, db), name)
+    return delete_point(_accuracy_job(job_id, db, user), name)
 
 
 @router.put("/{job_id}/accuracy/points/{name}/gps", response_model=AccuracyState)
@@ -386,22 +377,22 @@ def accuracy_gps(
     name: str,
     body: AccuracyGpsIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
     from app.services.check_accuracy import set_gps
 
-    return set_gps(_accuracy_job(job_id, db), name, body.x, body.y, body.z, body.crs)
+    return set_gps(_accuracy_job(job_id, db, user), name, body.x, body.y, body.z, body.crs)
 
 
 @router.post("/{job_id}/accuracy/evaluate", response_model=AccuracyState)
 def accuracy_evaluate(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
     from app.services.check_accuracy import run_evaluation
 
-    return run_evaluation(_accuracy_job(job_id, db))
+    return run_evaluation(_accuracy_job(job_id, db, user))
 
 
 @router.put("/{job_id}/accuracy/config", response_model=AccuracyState)
@@ -409,12 +400,12 @@ def accuracy_config(
     job_id: uuid.UUID,
     body: AccuracyConfigIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
     from app.services.check_accuracy import update_config
 
     return update_config(
-        _accuracy_job(job_id, db),
+        _accuracy_job(job_id, db, user),
         body.min_count,
         body.max_count,
         body.max_mean_px,
@@ -430,11 +421,11 @@ def accuracy_window(
     cy: float | None = None,
     size: int | None = None,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> RawResponse:
     from app.services.check_accuracy import window_png
 
-    png, meta = window_png(_accuracy_job(job_id, db), band, cx, cy, size)
+    png, meta = window_png(_accuracy_job(job_id, db, user), band, cx, cy, size)
     headers = {
         "Cache-Control": "no-store",
         "X-Origin-Col": str(meta["origin_col"]),
@@ -452,11 +443,11 @@ def accuracy_overview(
     job_id: uuid.UUID,
     band: str = "",
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> RawResponse:
     from app.services.check_accuracy import overview_png
 
-    png, meta = overview_png(_accuracy_job(job_id, db), band)
+    png, meta = overview_png(_accuracy_job(job_id, db, user), band)
     headers = {
         "Cache-Control": "no-store",
         "X-Win-Width": str(meta["width"]),
@@ -472,11 +463,11 @@ def accuracy_browse(
     job_id: uuid.UUID,
     band: str = "",
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> RawResponse:
     from app.services.check_accuracy import browse_jpeg
 
-    data, meta = browse_jpeg(_accuracy_job(job_id, db), band)
+    data, meta = browse_jpeg(_accuracy_job(job_id, db, user), band)
     headers = {
         "Cache-Control": "no-store",
         "X-Win-Width": str(meta["width"]),
@@ -492,9 +483,9 @@ def evaluate_job(
     job_id: uuid.UUID,
     body: EvaluateIn | None = None,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_ACCURACY_ROLES)),
+    user: User = Depends(require_roles(*_ACCURACY_ROLES)),
 ) -> dict:
-    job = _accuracy_job(job_id, db)
+    job = _accuracy_job(job_id, db, user)
     n = 20 if body is None else int(body.n)
     return jobsvc.evaluate_job(job, n)
 
@@ -506,6 +497,7 @@ def branch_seam_copy(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobRun:
+    _owned_job(db, job_id, user)
     job = jobsvc.branch_seam_copy(db, job_id, body.version)
     record_audit(db, user.id, "job.seam_branch", {"job_id": str(job.id), "seq": job.seq, "version": body.version})
     return job
@@ -518,6 +510,7 @@ def cancel_reseam_job(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobRun:
+    _owned_job(db, job_id, user)
     job = jobsvc.cancel_reseam_job(db, mq, job_id)
     record_audit(db, user.id, "job.seam_cancel", {"job_id": str(job.id), "seq": job.seq})
     return job
@@ -531,6 +524,7 @@ def reseam_job(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobRun:
+    _owned_job(db, job_id, user)
     job = jobsvc.reseam_job(
         db,
         mq,
@@ -553,6 +547,7 @@ def job_action(
     settings: Settings = Depends(get_settings),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobRun:
+    _owned_job(db, job_id, user)
     stop = body.stop_after_stage if body else None
     job = jobsvc.control_job(db, mq, job_id, action, stop_after=stop, settings=settings)
     record_audit(db, user.id, f"job.{action}", {"job_id": str(job.id), "seq": job.seq})
@@ -563,11 +558,9 @@ def job_action(
 def job_stage_steps(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> dict:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     payload = persist_stage_steps(job)
     db.commit()
     return payload
@@ -578,11 +571,9 @@ def job_logs(
     job_id: uuid.UUID,
     tail: int = 200,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> PlainTextResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     return PlainTextResponse(jobsvc.format_job_logs(db, job, tail=tail))
 
 
@@ -590,11 +581,9 @@ def job_logs(
 def job_report(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
+    user: User = Depends(require_roles("executor", "viewer", "admin", "configurator")),
 ) -> FileResponse:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
+    job = _owned_job(db, job_id, user)
     path = jobsvc.locate_report_pdf(job)
     if path is None:
         raise HTTPException(404, "质量报告尚未生成")
@@ -604,22 +593,19 @@ def job_report(
 _FILE_ROLES = ("executor", "viewer", "admin", "configurator")
 
 
-def _file_job(job_id: uuid.UUID, db: Session) -> JobRun:
-    job = db.get(JobRun, job_id)
-    if job is None:
-        raise HTTPException(404, "任务不存在")
-    return job
+def _file_job(job_id: uuid.UUID, db: Session, user: User) -> JobRun:
+    return _owned_job(db, job_id, user)
 
 
 @router.get("/{job_id}/files")
 def job_files(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_FILE_ROLES)),
+    user: User = Depends(require_roles(*_FILE_ROLES)),
 ) -> dict:
     from app.services.job_files import catalog
 
-    return catalog(_file_job(job_id, db))
+    return catalog(_file_job(job_id, db, user))
 
 
 @router.post("/{job_id}/files/ticket")
@@ -627,11 +613,11 @@ def job_file_ticket(
     job_id: uuid.UUID,
     body: FileTicketIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_FILE_ROLES)),
+    user: User = Depends(require_roles(*_FILE_ROLES)),
 ) -> dict:
     from app.services.job_files import issue_ticket
 
-    _file_job(job_id, db)
+    _file_job(job_id, db, user)
     return {"ticket": issue_ticket(str(job_id), body.kind, body.name)}
 
 
@@ -646,7 +632,9 @@ def job_file_download(
     from app.services.job_files import build_archive, drop_file, original_file, read_ticket
 
     row = read_ticket(ticket, str(job_id))
-    job = _file_job(job_id, db)
+    job = db.get(JobRun, job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
     kind = row["kind"]
     if kind == "file":
         path = original_file(job, row["name"])
@@ -664,11 +652,11 @@ def job_file_download(
 def job_quality(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_FILE_ROLES)),
+    user: User = Depends(require_roles(*_FILE_ROLES)),
 ) -> dict:
     from app.services.job_files import quality_view
 
-    return quality_view(_file_job(job_id, db))
+    return quality_view(_file_job(job_id, db, user))
 
 
 @router.get("/{job_id}/quality/figures/{name}")
@@ -676,9 +664,9 @@ def job_quality_figure(
     job_id: uuid.UUID,
     name: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*_FILE_ROLES)),
+    user: User = Depends(require_roles(*_FILE_ROLES)),
 ) -> FileResponse:
     from app.services.job_files import figure_file
 
-    path = figure_file(_file_job(job_id, db), name)
+    path = figure_file(_file_job(job_id, db, user), name)
     return FileResponse(path, media_type="image/png")

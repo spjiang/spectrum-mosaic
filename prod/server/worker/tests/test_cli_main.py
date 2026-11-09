@@ -74,6 +74,22 @@ def test_no_ba_stage3_flag(tmp_path):
     assert params["ba_stage3"] is False
 
 
+def test_at_bands_flag(tmp_path):
+    p = build_parser()
+    args = p.parse_args(
+        [
+            "--input-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--at-bands",
+            "Color,800nm",
+        ]
+    )
+    params = args_to_params(args)
+    assert params["at_bands"] == ["Color", "800nm"]
+
+
 def test_preset_rgb_preview_forces_color(tmp_path):
     inp = tmp_path / "in"
     out = tmp_path / "out"
@@ -85,6 +101,7 @@ def test_preset_rgb_preview_forces_color(tmp_path):
     )
     params = args_to_params(args)
     assert params["bands"] == ["Color"]
+    assert params["at_bands"] == ["Color"]
 
 
 def test_gpu_flags_map_to_web_keys(tmp_path):

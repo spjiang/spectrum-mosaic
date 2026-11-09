@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ms_mosaic.catalog import FileRecord, Pos, Shot
 from ms_mosaic.compose import ms_cache_per_band, ms_worker_mb
-from ms_mosaic.scene import BAND_ORDER, build_block, ordered_bands, resolve_wanted
+from ms_mosaic.scene import BAND_ORDER, build_block, ordered_bands, resolve_wanted, select_at_bands
 
 
 def test_ordered_bands_puts_color_first_then_wavelength():
@@ -27,6 +27,25 @@ def test_default_eight_names_do_not_drop_extra_wavelengths():
     assert resolve_wanted(BAND_ORDER, found) == found
     assert resolve_wanted(["Color"], found) == ("Color",)
     assert resolve_wanted(["850nm", "510nm"], found) == ("510nm", "850nm")
+
+
+def test_at_bands_default_is_every_discovered_band():
+    found = ("Color", "450nm", "510nm", "800nm", "850nm")
+    assert select_at_bands(None, found) == found
+    assert select_at_bands(BAND_ORDER, found) == found
+
+
+def test_at_bands_can_keep_color_and_one_wavelength():
+    found = ("Color", "450nm", "800nm", "850nm")
+    assert select_at_bands(["800nm", "Color"], found) == ("Color", "800nm")
+    assert select_at_bands(["Color"], found) == ("Color",)
+
+
+def test_at_bands_without_color_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="Color"):
+        select_at_bands(["800nm"], ("Color", "800nm", "850nm"))
 
 
 def test_build_block_keeps_wavelengths_outside_s810(monkeypatch):

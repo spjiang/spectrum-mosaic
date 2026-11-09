@@ -43,6 +43,13 @@ def test_max_features_must_be_positive_int():
     assert validate_param_values(defs, {"max_features": -1}) == ["特征点上限须为正整数"]
 
 
+def test_at_bands_subset_must_include_color():
+    defs = [_d(key="at_bands", value_type="string[]")]
+    assert validate_param_values(defs, {}) == []
+    assert validate_param_values(defs, {"at_bands": ["Color", "800nm"]}) == []
+    assert validate_param_values(defs, {"at_bands": ["800nm"]}) == ["空三波段必须包含 Color"]
+
+
 def test_assert_raises_http():
     defs = [_d(key="input_dir", required=True, value_type="path")]
     with pytest.raises(HTTPException):

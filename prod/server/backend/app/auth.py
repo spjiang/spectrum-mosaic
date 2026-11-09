@@ -44,12 +44,39 @@ def get_user_by_username(db: Session, username: str) -> User | None:
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
+    """只核对用户名和密码。停用、到期由 access_block_reason 另报，避免和密码错误混成一句。"""
     user = get_user_by_username(db, username)
-    if user is None or not user.is_active:
-        return None
-    if not verify_password(password, user.password_hash):
+    if user is None or not verify_password(password, user.password_hash):
         return None
     return user
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def access_block_reason(user: User, *, now: datetime | None = None) -> str | None:
+    """账号此刻不能进系统的原因。空表示可以。到期时刻本身已经不能用。"""
+    if not user.is_active:
+        return "账号已停用"
+    expires_at = getattr(user, "expires_at", None)
+    if expires_at is None:
+        return None
+    current = _as_utc(now or datetime.now(timezone.utc))
+    if current >= _as_utc(expires_at):
+        return "试用已到期"
+    return None
+
+
+def owner_may_autostart(user_id: int | None, user: User | None, *, now: datetime | None = None) -> bool:
+    """增量测区到点自动开拼图。没有归属人的旧测区照旧；归属人停用或到期则不再开。"""
+    if user_id is None:
+        return True
+    if user is None:
+        return False
+    return access_block_reason(user, now=now) is None
 
 
 async def get_current_user(
@@ -71,7 +98,23 @@ async def get_current_user(
         raise HTTPException(status_code=503, detail=f"数据库暂时连不上: {exc}") from exc
     if user is None:
         raise cred_exc
+    reason = access_block_reason(user)
+    if reason:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=reason)
     return user
+
+
+def is_admin(user: User) -> bool:
+    return any(role.name == "admin" for role in user.roles)
+
+
+def owns_record(user: User, created_by: int | None, *, shared_if_unset: bool = False) -> bool:
+    """管理员看全部。其他人只看自己创建的记录。没有归属人的旧任务不开放；方案可以共享未归属的模板。"""
+    if is_admin(user):
+        return True
+    if created_by is None:
+        return shared_if_unset
+    return created_by == user.id
 
 
 def require_roles(*allowed: str):

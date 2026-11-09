@@ -89,6 +89,62 @@ def test_delete_job_paused_writes_cancel(tmp_path):
     assert ctrl["pause"] is True
 
 
+def test_owns_record_separates_users():
+    from app.auth import owns_record
+
+    user = SimpleNamespace(id=7, roles=[SimpleNamespace(name="executor")])
+    admin = SimpleNamespace(id=1, roles=[SimpleNamespace(name="admin")])
+    assert owns_record(user, 7) is True
+    assert owns_record(user, 1) is False
+    assert owns_record(user, None) is False
+    assert owns_record(user, None, shared_if_unset=True) is True
+    assert owns_record(admin, 1) is True
+    assert owns_record(admin, None) is True
+
+
+def test_delete_all_jobs_owner_does_not_touch_others(tmp_path):
+    mine = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="succeeded",
+        created_by=7,
+        log_dir=str(tmp_path / "a" / "log"),
+        output_dir=str(tmp_path / "a"),
+    )
+    other = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="running",
+        created_by=1,
+        log_dir=str(tmp_path / "b" / "log"),
+        output_dir=str(tmp_path / "b"),
+    )
+    db = MagicMock()
+    db.scalars.return_value = [mine, other]
+    mq = MagicMock()
+    n = delete_all_jobs(db, mq, owner_id=7)
+    assert n == 1
+    db.delete.assert_called_once_with(mine)
+    mq.purge_jobs.assert_not_called()
+    mq.publish_control.assert_not_called()
+
+
+def test_kill_all_active_owner_skips_foreign_job(tmp_path):
+    other = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="running",
+        created_by=1,
+        log_dir=str(tmp_path / "a" / "log"),
+        output_dir=str(tmp_path / "a"),
+    )
+    db = MagicMock()
+    db.scalars.return_value = [other]
+    mq = MagicMock()
+    n = kill_all_active(db, mq, owner_id=7)
+    assert n == 0
+    assert other.status == "running"
+    mq.purge_jobs.assert_not_called()
+    mq.publish_control.assert_not_called()
+
+
 def test_kill_all_active_cancels_live_keeps_succeeded(tmp_path):
     running = SimpleNamespace(
         id=uuid.uuid4(),

@@ -40,6 +40,7 @@ from ms_mosaic.scene import (
     SIGMA_Z_M,
     Block,
     build_block,
+    select_at_bands,
     usable_shots,
 )
 from ms_mosaic.tracks import Tracks, build_tracks
@@ -286,13 +287,20 @@ def _match_group(indexed_jobs):
     return out
 
 
-def _band_pair_candidates_sequential(block: Block, ground_z: float) -> list:
+def _bands_for_pairs(block: Block, bands) -> tuple[str, ...]:
+    if bands is None:
+        return block.band_order()
+    have = set(block.band_order())
+    return tuple(str(band) for band in bands if str(band) in have)
+
+
+def _band_pair_candidates_sequential(block: Block, ground_z: float, bands=None) -> list:
     """按波段组内选像对，对齐 LiMapper「关联影像序列」按组连通的做法。"""
     from ms_mosaic.pairs import PairCandidate
 
     seen: set[tuple[int, int]] = set()
     out: list[PairCandidate] = []
-    for band in block.band_order():
+    for band in _bands_for_pairs(block, bands):
         band_ims = block.by_band(band)
         if len(band_ims) < 2 or band not in block.cameras:
             continue
@@ -309,12 +317,12 @@ def _band_pair_candidates_sequential(block: Block, ground_z: float) -> list:
     return out
 
 
-def _band_pair_candidates(block: Block, ground_z: float) -> list:
+def _band_pair_candidates(block: Block, ground_z: float, bands=None) -> list:
     """多波段时各组足迹重叠并行算，再合并排序。方程与顺序无关。"""
     from concurrent.futures import ThreadPoolExecutor
 
     jobs: list[tuple] = []
-    for band in block.band_order():
+    for band in _bands_for_pairs(block, bands):
         band_ims = block.by_band(band)
         if len(band_ims) < 2 or band not in block.cameras:
             continue
@@ -324,7 +332,7 @@ def _band_pair_candidates(block: Block, ground_z: float) -> list:
         jobs.append((cameras, poses))
 
     if len(jobs) <= 1:
-        return _band_pair_candidates_sequential(block, ground_z)
+        return _band_pair_candidates_sequential(block, ground_z, bands)
 
     seen: set[tuple[int, int]] = set()
     out = []
@@ -359,10 +367,11 @@ def run_sparse(
     outlier_threshold_px: float | None = None,
     calibrate_intrinsics: bool = True,
     ba_stage3: bool = True,
+    at_bands=None,
     log=lambda *_: None,
     on_catalog_done=None,
 ) -> SparseResult:
-    """全波段稀疏重建（特征/匹配/空三）。有几个波长就做几组，不限于 S810 的 8 组。输入目录只读。"""
+    """稀疏重建（特征/匹配/空三）。默认每个波长一组；at_bands 可收成子集。输入目录只读。"""
     timings: dict[str, float] = {}
     t0 = time.perf_counter()
 
@@ -378,18 +387,28 @@ def run_sparse(
         keys = sorted(keep)[: int(max_frames)]
         keep = {k: keep[k] for k in keys}
     block = build_block(keep)
-    images = list(block.images)
+    catalog_images = list(block.images)
     primary = block.primary()
-    log(f"曝光 {len(shots)} → 可用 {len(keep)}（过滤 {reasons}），影像 {len(images)} 张（含各波段）")
+    log(f"曝光 {len(shots)} → 可用 {len(keep)}（过滤 {reasons}），影像 {len(catalog_images)} 张（含各波段）")
+    at_order = select_at_bands(at_bands, block.band_order())
+    at_set = set(at_order)
+    images = [im for im in catalog_images if im.band in at_set]
+    if tuple(at_order) != block.band_order():
+        log(
+            f"空三只解 {'/'.join(at_order)}，{len(images)} 张。"
+            "未列入的波段不做特征、匹配和平差，正射外方位从 Color 迁出"
+        )
+    else:
+        log(f"空三波段 {len(at_order)} 个：{'/'.join(at_order)}")
     timings["catalog"] = time.perf_counter() - t0
     if on_catalog_done is not None:
         on_catalog_done(timings["catalog"])
 
     poses = {im.index: block.poses[im.index] for im in images}
-    candidates = _band_pair_candidates(block, block.ground_z)
+    candidates = _band_pair_candidates(block, block.ground_z, at_order)
     n_full = len(images) * (len(images) - 1) // 2
     log(
-        f"候选像对 {len(candidates)} 对（按 {len(block.band_order())} 个波段组内选对；"
+        f"候选像对 {len(candidates)} 对（按 {len(at_order)} 个波段组内选对；"
         f"若全影像两两组合为 {n_full}）"
     )
 
@@ -498,7 +517,7 @@ def run_sparse(
         log("平差阶段3已关闭，停在阶段2（焦距、主点、k1、k2）")
     at_stages = calibration_stages(ba_stage3) if calibrate_intrinsics else ((),)
     at = run_at(
-        dict(block.cameras),
+        {band: block.cameras[band] for band in at_order if band in block.cameras},
         poses,
         tracks,
         keypoints,

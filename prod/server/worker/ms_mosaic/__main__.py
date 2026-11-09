@@ -199,6 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="正射波段，逗号分隔（Web: bands）。例: Color 或 Color,550nm",
     )
     parser.add_argument(
+        _flag("at_bands"),
+        default=None,
+        help="空三波段，逗号分隔（Web: at_bands）。留空为全部；例: Color,800nm",
+    )
+    parser.add_argument(
         _flag("color_correction"),
         default=None,
         help="RGB 偏色处理（Web: color_correction）。默认 off；on 只校正 RGB",
@@ -254,9 +259,13 @@ def args_to_params(args: argparse.Namespace) -> dict[str, Any]:
     bands_raw = getattr(args, "bands", None)
     if bands_raw:
         params["bands"] = [s.strip() for s in str(bands_raw).split(",") if s.strip()]
+    at_raw = getattr(args, "at_bands", None)
+    if at_raw:
+        params["at_bands"] = [s.strip() for s in str(at_raw).split(",") if s.strip()]
 
     if params.get("preset") == "rgb_preview":
         params["bands"] = ["Color"]
+        params["at_bands"] = ["Color"]
 
     primary = params.get("primary_band")
     if primary is not None and str(primary) != "Color":

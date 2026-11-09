@@ -55,6 +55,24 @@ def resolve_wanted(
     keep = set(req)
     return tuple(name for name in found if name in keep)
 
+
+def select_at_bands(
+    requested: Sequence[str] | None,
+    discovered: Sequence[str],
+) -> tuple[str, ...]:
+    """空三解哪些波段。
+
+    与正射波段同一套默认：没指定，或仍是写死的 8 个名字时，数据里有的波段全部参与。
+    显式收成子集时必须留下 Color。没做空三的波段不提点、不匹配、不平差，
+    正射外方位从 Color 迁出。
+    """
+    chosen = resolve_wanted(requested, discovered)
+    if not chosen:
+        raise ValueError("数据里没有可做空三的波段")
+    if PRIMARY_BAND in discovered and PRIMARY_BAND not in chosen:
+        raise ValueError("空三波段必须包含 Color。未参与空三的波段，正射外方位从 Color 迁出")
+    return chosen
+
 # GPS/IMU 先验的标准差。XMP 给出 GPSXYAccuracy=3 m、GPSZAccuracy=5 m；
 # 姿态无精度字段，按消费级云台给经验值，并在平差里用弱权。
 SIGMA_XY_M = 3.0

@@ -1,4 +1,4 @@
-/** 流程小步骤的白话说明：做了什么，以及为什么要做。 */
+/** 流程小步骤说明：做了什么，以及作用。 */
 
 export type StepHelp = { does: string; role: string };
 

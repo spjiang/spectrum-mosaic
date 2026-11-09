@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app.auth import authenticate_user, create_access_token
+from app.auth import access_block_reason, authenticate_user, create_access_token
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.schemas import TokenOut
@@ -20,9 +20,10 @@ def login(
 ) -> TokenOut:
     user = authenticate_user(db, form.username, form.password)
     if user is None:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    reason = access_block_reason(user)
+    if reason:
+        raise HTTPException(status_code=401, detail=reason)
     roles = [r.name for r in user.roles]
     token = create_access_token(user.username, roles, settings)
     return TokenOut(access_token=token, roles=roles)

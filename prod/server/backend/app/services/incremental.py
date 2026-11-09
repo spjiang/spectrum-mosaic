@@ -20,8 +20,9 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.auth import owner_may_autostart
 from app.config import Settings
-from app.models import IncrementalFile, IncrementalProject, IncrementalRound, JobRun
+from app.models import IncrementalFile, IncrementalProject, IncrementalRound, JobRun, User
 from app.services.jobs import append_run_log, assert_single_running, create_job, resolve_paths
 from app.services.mq import MQPublisher
 from app.services.paths import detach_derived_dirs, stamp_run_output_dir, validate_paths
@@ -169,19 +170,19 @@ def list_projects(db: Session) -> list[IncrementalProject]:
     return list(db.scalars(select(IncrementalProject).order_by(IncrementalProject.created_at.desc())).all())
 
 
-def page_projects(db: Session, page: int, page_size: int) -> tuple[list[IncrementalProject], int]:
-    """测区管理列表。按创建时间倒序分页。"""
+def page_projects(
+    db: Session, page: int, page_size: int, *, owner_id: int | None = None
+) -> tuple[list[IncrementalProject], int]:
+    """测区管理列表。按创建时间倒序分页。owner_id 有值时只返回这个人的测区。"""
     if page < 1 or page_size < 1 or page_size > 100:
         raise HTTPException(400, "分页参数不正确")
-    total = int(db.scalar(select(func.count()).select_from(IncrementalProject)) or 0)
-    rows = list(
-        db.scalars(
-            select(IncrementalProject)
-            .order_by(IncrementalProject.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        ).all()
-    )
+    count_stmt = select(func.count()).select_from(IncrementalProject)
+    stmt = select(IncrementalProject).order_by(IncrementalProject.created_at.desc())
+    if owner_id is not None:
+        count_stmt = count_stmt.where(IncrementalProject.created_by == owner_id)
+        stmt = stmt.where(IncrementalProject.created_by == owner_id)
+    total = int(db.scalar(count_stmt) or 0)
+    rows = list(db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all())
     return rows, total
 
 
@@ -669,8 +670,11 @@ def tick_due_projects() -> None:
             try:
                 if due:
                     sweep(db, project)
-                if project.auto_run:
+                owner = db.get(User, project.created_by) if project.created_by is not None else None
+                if project.auto_run and owner_may_autostart(project.created_by, owner):
                     launch_mosaic(db, settings, mq, project, user_id=project.created_by, manual=False)
+                elif project.auto_run:
+                    log.info("增量测区 %s 归属账号已停用或到期，不再自动开拼图", project.name)
             except HTTPException as exc:
                 log.warning("增量测区 %s: %s", project.name, exc.detail)
                 db.rollback()

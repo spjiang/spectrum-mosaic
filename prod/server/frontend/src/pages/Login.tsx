@@ -1,10 +1,17 @@
 import { Button, Card, Form, Input, Typography, message } from "antd";
+import { useEffect } from "react";
 import { useAuth } from "../auth";
 import { PRODUCT } from "../product";
 import BrandMark from "../components/BrandMark";
 
 export default function LoginPage() {
   const { login } = useAuth();
+  useEffect(() => {
+    const notice = sessionStorage.getItem("mosaic_login_notice");
+    if (!notice) return;
+    sessionStorage.removeItem("mosaic_login_notice");
+    message.warning(notice);
+  }, []);
   return (
     <div className="mosaic-login">
       <Card className="mosaic-login-card" bordered={false}>

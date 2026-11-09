@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
-from app.auth import require_roles
+from app.auth import is_admin, owns_record, require_roles
 from app.db import get_db
 from app.models import ParamDefinition, ParamProfile, ParamProfileValue, User
 from app.schemas import ParamDefOut, ProfileCreate, ProfileOut, ProfileUpdate
@@ -43,9 +43,12 @@ def _profile_out(db: Session, p: ParamProfile, values: dict[str, Any] | None = N
 @router.get("/profiles", response_model=list[ProfileOut])
 def list_profiles(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("configurator", "executor", "viewer", "admin")),
+    user: User = Depends(require_roles("configurator", "executor", "viewer", "admin")),
 ) -> list[ProfileOut]:
-    profiles = list(db.scalars(select(ParamProfile).order_by(ParamProfile.id)))
+    stmt = select(ParamProfile).order_by(ParamProfile.id)
+    if not is_admin(user):
+        stmt = stmt.where(or_(ParamProfile.created_by == user.id, ParamProfile.created_by.is_(None)))
+    profiles = list(db.scalars(stmt))
     if not profiles:
         return []
     ids = [p.id for p in profiles]
@@ -88,7 +91,7 @@ def update_profile(
     user: User = Depends(require_roles("configurator", "admin")),
 ) -> ProfileOut:
     p = db.get(ParamProfile, profile_id)
-    if p is None:
+    if p is None or not owns_record(user, p.created_by):
         raise HTTPException(404, "参数模版不存在")
     if body.name is not None:
         new_name = body.name.strip()

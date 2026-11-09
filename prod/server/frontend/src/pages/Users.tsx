@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Button, Card, DatePicker, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from "antd";
 import { EditOutlined, PlusOutlined } from "@ant-design/icons";
+import dayjs, { type Dayjs } from "dayjs";
 import { api } from "../api";
 import { LIST_PAGE } from "../listPage";
 import { ROLE_LABEL, ROLE_ORDER } from "../roles";
@@ -11,6 +12,7 @@ type Account = {
   is_active: boolean;
   roles: string[];
   created_at?: string | null;
+  expires_at?: string | null;
 };
 
 function formatTime(v?: string | null) {
@@ -19,6 +21,25 @@ function formatTime(v?: string | null) {
   if (Number.isNaN(d.getTime())) return "—";
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDay(v?: string | null) {
+  if (!v) return "";
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function isExpired(v?: string | null) {
+  if (!v) return false;
+  const t = new Date(v).getTime();
+  return !Number.isNaN(t) && t <= Date.now();
+}
+
+function expiresIso(v: Dayjs | null | undefined) {
+  if (!v) return null;
+  return v.endOf("day").toISOString();
 }
 
 export default function UsersPage() {
@@ -98,7 +119,25 @@ export default function UsersPage() {
             title: "状态",
             dataIndex: "is_active",
             width: 100,
-            render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "启用" : "停用"}</Tag>,
+            render: (_v: boolean, r: Account) => {
+              if (!r.is_active) return <Tag>停用</Tag>;
+              if (isExpired(r.expires_at)) return <Tag color="error">已到期</Tag>;
+              return <Tag color="success">启用</Tag>;
+            },
+          },
+          {
+            title: "使用期限",
+            dataIndex: "expires_at",
+            width: 180,
+            render: (v: string | null) => {
+              if (!v) return "不限期";
+              return (
+                <Space size={6}>
+                  <span>{formatDay(v)}</span>
+                  {isExpired(v) ? <Tag color="error">已到期</Tag> : null}
+                </Space>
+              );
+            },
           },
           {
             title: "创建时间",
@@ -120,6 +159,7 @@ export default function UsersPage() {
                     role: r.roles?.[0],
                     is_active: r.is_active ? "1" : "0",
                     password: "",
+                    expires_at: r.expires_at ? dayjs(r.expires_at) : null,
                   });
                 }}
               >
@@ -146,7 +186,12 @@ export default function UsersPage() {
           onFinish={async (v) => {
             setSaving(true);
             try {
-              await api.createUser({ username: v.username, password: v.password, roles: [v.role] });
+              await api.createUser({
+                username: v.username,
+                password: v.password,
+                roles: [v.role],
+                expires_at: expiresIso(v.expires_at),
+              });
               message.success("已保存");
               createForm.resetFields();
               setCreateOpen(false);
@@ -166,6 +211,9 @@ export default function UsersPage() {
           </Form.Item>
           <Form.Item name="role" label="角色" initialValue="viewer" rules={[{ required: true, message: "请选择角色" }]}>
             <Select options={ROLE_ORDER.map((id) => ({ value: id, label: ROLE_LABEL[id] }))} />
+          </Form.Item>
+          <Form.Item name="expires_at" label="使用期限" extra="留空表示不限期。所选日期当天仍可使用，次日不能登录。">
+            <DatePicker style={{ width: "100%" }} placeholder="不限期" allowClear />
           </Form.Item>
         </Form>
       </Modal>
@@ -191,6 +239,7 @@ export default function UsersPage() {
                 roles: [v.role],
                 is_active: v.is_active === "1",
                 password: v.password || undefined,
+                expires_at: expiresIso(v.expires_at),
               });
               message.success("已保存");
               setEditing(null);
@@ -215,6 +264,9 @@ export default function UsersPage() {
                 { value: "0", label: "停用" },
               ]}
             />
+          </Form.Item>
+          <Form.Item name="expires_at" label="使用期限" extra="留空表示不限期。所选日期当天仍可使用，次日不能登录。">
+            <DatePicker style={{ width: "100%" }} placeholder="不限期" allowClear />
           </Form.Item>
           <Form.Item name="password" label="登录密码">
             <Input.Password placeholder="不修改请留空" />

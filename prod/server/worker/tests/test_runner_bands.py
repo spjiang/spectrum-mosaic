@@ -42,3 +42,27 @@ def test_band_pair_candidates_stay_within_band():
     assert color_pairs
     assert green_pairs
     assert color_pairs.isdisjoint(green_pairs)
+
+
+def test_band_pair_candidates_can_drop_a_band():
+    cam_c = Camera.initial("Color", 1440, 1080, kind="rgb")
+    cam_g = Camera.initial("550nm", 1440, 1080, kind="ms")
+    block = Block(crs="EPSG:32650", ground_z=0.0)
+    block.cameras = {"Color": cam_c, "550nm": cam_g}
+    specs = [
+        (0, 0, "Color", 0.0),
+        (1, 0, "550nm", 0.0),
+        (2, 1, "Color", 12.0),
+        (3, 1, "550nm", 12.0),
+        (4, 2, "Color", 24.0),
+        (5, 2, "550nm", 24.0),
+    ]
+    for idx, shot, band, x in specs:
+        block.images.append(ImageRef(idx, shot, band, Path(f"{band}_{shot}.tif"), 0 if band == "Color" else 1))
+        block.poses[idx] = _pose(x)
+        block.gps[idx] = np.array([x, 0.0, 80.0])
+
+    cands = _band_pair_candidates(block, ground_z=0.0, bands=("Color",))
+    assert cands
+    band_of = {im.index: im.band for im in block.images}
+    assert {band_of[c.i] for c in cands} == {"Color"}

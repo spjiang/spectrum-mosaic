@@ -71,7 +71,7 @@ export default function CliGuidePage() {
           loading={paramLoading}
           intro={
             <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
-              按进度条 0～6 节点说明：每个阶段开头有<strong>白话</strong>，再写算法与参数。改大、改小、关闭的效果在各表最后两列。
+              按进度条 0～6 节点说明：每个阶段开头是<strong>作用</strong>，再写算法与参数。改大、改小、关闭的效果在各表最后两列。
             </Typography.Paragraph>
           }
         />

@@ -52,6 +52,31 @@ function applyPaths(setInput: (v: string) => void, setOutput: (v: string) => voi
   if (values.output_dir) setOutput(String(values.output_dir));
 }
 
+function FieldHelp({ label, help }: { label: string; help: string }) {
+  return (
+    <span className="title-with-help">
+      <Typography.Text type="secondary">{label}</Typography.Text>
+      <Tooltip
+        trigger={["hover", "click"]}
+        placement="bottomLeft"
+        title={<span style={{ display: "inline-block", maxWidth: 320 }}>{help}</span>}
+      >
+        <button
+          type="button"
+          className="param-help-btn"
+          aria-label={`${label}说明`}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+        >
+          <QuestionCircleOutlined />
+        </button>
+      </Tooltip>
+    </span>
+  );
+}
+
 function engineLimitGb(inspect: any): number | null {
   const cgroup = inspect?.worker?.memory?.container_limit_mb;
   const total = inspect?.worker?.host_memory?.mem_total_mb;
@@ -372,7 +397,10 @@ export default function ExecutePage() {
               </Typography.Paragraph>
             )}
             <div>
-              <Typography.Text type="secondary">标题</Typography.Text>
+              <FieldHelp
+                label="标题"
+                help="这条任务在处理记录里显示的名字。留空就用任务号和时间，例如 #36 2026-11-06 16:57。不影响计算。"
+              />
               <Input
                 style={{ marginTop: 6 }}
                 disabled={!allowRun}
@@ -383,7 +411,10 @@ export default function ExecutePage() {
               />
             </div>
             <div>
-              <Typography.Text type="secondary">处理方案</Typography.Text>
+              <FieldHelp
+                label="处理方案"
+                help="决定波段、格网和算法参数。全波段选「标准全波段」，只看彩色选「RGB 快速预览」。这里只选择，不要改方案内容。"
+              />
               <Select
                 placeholder="选择处理方案"
                 disabled={!allowRun}
@@ -406,7 +437,10 @@ export default function ExecutePage() {
               />
             </div>
             <div>
-              <Typography.Text type="secondary">测区数据</Typography.Text>
+              <FieldHelp
+                label="测区数据"
+                help="航片所在目录，必须是页面上的 /data/input/...，不要填自己电脑上的路径。S810 试用保持 1530 这一层。目录要对到架次，只丢一张照片认不出来。"
+              />
               <Input
                 style={{ marginTop: 6 }}
                 disabled={!allowRun}
@@ -469,7 +503,10 @@ export default function ExecutePage() {
               </div>
             </div>
             <div>
-              <Typography.Text type="secondary">成果目录</Typography.Text>
+              <FieldHelp
+                label="成果目录"
+                help="成果写入的根目录，填写 /data/output/runs/任务名。每次开始处理会在下面新建时间戳子目录，不覆盖上一次成果。"
+              />
               <Input
                 style={{ marginTop: 6 }}
                 disabled={!allowRun}
@@ -480,7 +517,10 @@ export default function ExecutePage() {
             </div>
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <Typography.Text type="secondary">任务内存</Typography.Text>
+                <FieldHelp
+                  label="任务内存"
+                  help="这次计算最多占用的内存。滑到 0 表示按机器可用内存自动封顶，不会超过节点上限。试用保持方案带出的值。"
+                />
                 <Typography.Text strong>{memoryGb ? `${memoryGb} GB` : "自动"}</Typography.Text>
               </div>
               <div className="memory-slider">
@@ -504,7 +544,10 @@ export default function ExecutePage() {
             </div>
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <Typography.Text type="secondary">任务 CPU</Typography.Text>
+                <FieldHelp
+                  label="任务 CPU"
+                  help="这次计算最多用几个核，也是同时开的进程上限。滑到 0 表示自动，并留 2 核给系统和页面。拉满容易把页面卡住。试用保持方案带出的值。"
+                />
                 <Typography.Text strong>{cpus ? `${cpus} 核` : "自动"}</Typography.Text>
               </div>
               <div className="memory-slider">
@@ -562,7 +605,10 @@ export default function ExecutePage() {
               })()
             )}
             <div>
-              <Typography.Text type="secondary">任务 GPU</Typography.Text>
+              <FieldHelp
+                label="任务 GPU"
+                help="选择用哪张显卡。像对匹配固定走 CPU，选了显卡也不表示每一步都用 GPU。没有可用显卡时自动改用 CPU，结果相同。试用保持方案带出的值。"
+              />
               <Select
                 style={{ width: "100%", marginTop: 6 }}
                 disabled={!allowRun}
@@ -576,7 +622,10 @@ export default function ExecutePage() {
             </div>
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <Typography.Text type="secondary">任务显存</Typography.Text>
+                <FieldHelp
+                  label="任务显存"
+                  help="这次允许占用的显存。滑到 0 表示用所选显卡当前空闲显存的 85%。不够会自动分批，仍不够则该阶段改用 CPU。选「不用 GPU」时这项不生效。"
+                />
                 <Typography.Text strong>
                   {gpu === "off" ? "不使用" : gpuMemoryGb ? `${gpuMemoryGb} GB` : "自动"}
                 </Typography.Text>
