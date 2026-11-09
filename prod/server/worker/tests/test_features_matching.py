@@ -3,7 +3,7 @@ import pytest
 
 from ms_mosaic.camera import Camera, Pose
 from ms_mosaic.features import extract, root_sift
-from ms_mosaic.matching import PairMatches, cross_check
+from ms_mosaic.matching import DescriptorIndex, PairMatches, cross_check
 from ms_mosaic.pairs import overlap_ratio, select_pairs
 from ms_mosaic.rawio import to_gray8
 from ms_mosaic.tracks import build_tracks
@@ -76,6 +76,20 @@ def test_cross_check_matches_shifted_copy_of_real_features():
     # 绝大多数匹配应落在真实位移 (+40, 0) 上
     good = (np.abs(du - shift) < 2.0) & (np.abs(dv) < 2.0)
     assert good.mean() > 0.9
+
+
+def test_reused_index_returns_the_same_neighbors():
+    """同一棵树查两次，以及按同样描述子再建一棵，近邻应当一致。"""
+    rng = np.random.default_rng(0)
+    base = rng.random((80, 128)).astype(np.float32)
+    base /= np.linalg.norm(base, axis=1, keepdims=True)
+    query = base + rng.normal(0, 0.01, base.shape).astype(np.float32)
+    query /= np.linalg.norm(query, axis=1, keepdims=True)
+    index = DescriptorIndex(base)
+    first = index.knn_ratio(query)
+    assert np.array_equal(first, index.knn_ratio(query))
+    assert np.array_equal(first, DescriptorIndex(base).knn_ratio(query))
+    assert first.shape[0] > 0
 
 
 def test_cross_check_rejects_repetitive_texture():

@@ -20,7 +20,7 @@ from ms_mosaic.at import ATResult, run_at
 from ms_mosaic.camera import Camera, Pose
 from ms_mosaic.catalog import scan_directory
 from ms_mosaic.features import extract_file, load_keypoints
-from ms_mosaic.matching import MIN_INLIERS, PairMatches, geometric_verify, match_pair
+from ms_mosaic.matching import MIN_INLIERS, DescriptorIndex, PairMatches, geometric_verify, match_pair
 from ms_mosaic.cpu import cpu_cap, host_reserve, job_cpus
 from ms_mosaic.memory import release_heap, resolve_memory_budget, visible_limit_bytes
 from ms_mosaic.pairs import select_pairs
@@ -186,6 +186,62 @@ def _extract_worker(job):
     return index
 
 
+# 一张影像大约十几对。主人加这些对手留在进程里，树不必每对重建。
+_MATCH_CACHE_LIMIT = 48
+
+
+class _IndexCache:
+    """进程内按路径记住特征和它的 FLANN 树。"""
+
+    def __init__(self, cache_dir: Path, limit: int, max_features: int, device) -> None:
+        self.cache_dir = Path(cache_dir)
+        self.limit = int(limit)
+        self.max_features = int(max_features)
+        self.device = device
+        self._data: OrderedDict[str, tuple] = OrderedDict()
+
+    def get(self, path) -> tuple:
+        key = str(path)
+        hit = self._data.get(key)
+        if hit is not None:
+            self._data.move_to_end(key)
+            return hit
+        feats = extract_file(
+            Path(path),
+            cache_dir=self.cache_dir,
+            max_features=self.max_features,
+            device=self.device,
+        )
+        packed = (feats, DescriptorIndex(feats.descriptors))
+        self._data[key] = packed
+        while len(self._data) > self.limit:
+            self._data.popitem(last=False)
+        return packed
+
+
+def group_match_jobs(pair_jobs: list) -> list[list[tuple[int, tuple]]]:
+    """把像对分给重叠次数更多的那张影像。
+
+    一组交给同一个进程，这张影像的搜索树只建一次。组与组之间不共享一对，
+    全部组并起来仍是原来的像对，顺序用原下标还原。
+    """
+    from collections import Counter, defaultdict
+
+    degree: Counter = Counter()
+    for job in pair_jobs:
+        degree[job[0]] += 1
+        degree[job[1]] += 1
+    buckets: dict = defaultdict(list)
+    for orig, job in enumerate(pair_jobs):
+        i, j = job[0], job[1]
+        if (degree[i], -i) >= (degree[j], -j):
+            owner = i
+        else:
+            owner = j
+        buckets[owner].append((orig, job))
+    return [buckets[owner] for owner in sorted(buckets, key=lambda o: (-len(buckets[o]), o))]
+
+
 def _match_init(cache_dir, cameras_by_band: dict, device=None, max_features: int = 8192):
     from ms_mosaic.parallel import prefer_oom_kill
 
@@ -196,20 +252,32 @@ def _match_init(cache_dir, cameras_by_band: dict, device=None, max_features: int
     _SHARED["cache_dir"] = str(cache_dir)
     _SHARED["feature_device"] = device
     _SHARED["max_features"] = int(max_features)
+    _SHARED["index_cache"] = _IndexCache(
+        Path(cache_dir), _MATCH_CACHE_LIMIT, int(max_features), device
+    )
 
 
-def _match_worker(job):
+def _match_one(job, cache: _IndexCache):
     i, j, path_i, path_j, band = job
     cam = _SHARED["cameras"][band]
-    cache = Path(_SHARED["cache_dir"])
-    device = _SHARED.get("feature_device")
-    limit = int(_SHARED["max_features"])
-    fi = extract_file(Path(path_i), cache_dir=cache, max_features=limit, device=device)
-    fj = extract_file(Path(path_j), cache_dir=cache, max_features=limit, device=device)
-    pm = match_pair(i, j, fi, fj, cam, cam)
+    fi, index_i = cache.get(path_i)
+    fj, index_j = cache.get(path_j)
+    pm = match_pair(i, j, fi, fj, cam, cam, index_a=index_i, index_b=index_j)
     if pm is None:
         return None
     return (pm.i, pm.j, pm.indices, pm.model)
+
+
+def _match_worker(job):
+    return _match_one(job, _SHARED["index_cache"])
+
+
+def _match_group(indexed_jobs):
+    cache = _SHARED["index_cache"]
+    out = []
+    for orig, job in indexed_jobs:
+        out.append((orig, _match_one(job, cache)))
+    return out
 
 
 def _band_pair_candidates_sequential(block: Block, ground_z: float) -> list:
@@ -569,6 +637,7 @@ def _match_all(
 ) -> list[PairMatches]:
     # S810 实测 GPU 精确 kNN 比 32 进程 FLANN 慢约 4.6×，匹配只走 CPU。
     log(f"匹配：CPU FLANN，{workers} 进程")
+    log("同一张影像的搜索树只建一次")
     return _match_all_cpu(
         pair_jobs,
         workers,
@@ -590,17 +659,29 @@ def _match_all_cpu(
     max_features: int = 8192,
     log=lambda *_: None,
 ) -> list[PairMatches]:
+    groups = group_match_jobs(pair_jobs)
     ctx = multiprocessing.get_context("spawn")
+    total = len(pair_jobs)
+    slots: list = [None] * total
     with ProcessPoolExecutor(
         max_workers=workers,
         mp_context=ctx,
         initializer=_match_init,
         initargs=(str(cache_dir), cameras, feature_device, int(max_features)),
     ) as pool:
-        raw = _map_progress(
-            pool, _match_worker, pair_jobs, log=log, label="匹配", unit="对", chunksize=4
-        )
-    return [PairMatches(*r) for r in raw if r is not None]
+        futures = {pool.submit(_match_group, group): group for group in groups}
+        done = 0
+        t0 = time.time()
+        last = t0
+        for fut in as_completed(futures):
+            for orig, result in fut.result():
+                slots[orig] = result
+                done += 1
+            now = time.time()
+            if done == total or now - last >= 15.0:
+                log(f"已匹配 {done}/{total} 对，用时 {now - t0:.0f} 秒")
+                last = now
+    return [PairMatches(*r) for r in slots if r is not None]
 
 
 class _FeatLRU:

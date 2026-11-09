@@ -44,35 +44,75 @@ def _flann():
     return cv2.FlannBasedMatcher({"algorithm": 1, "trees": 4}, {"checks": 128})
 
 
-def knn_ratio_match(
-    desc_a: np.ndarray, desc_b: np.ndarray, *, ratio: float = RATIO_TEST
-) -> np.ndarray:
-    """单向 kNN + ratio test，返回 (N, 2) 下标。"""
-    if desc_a.shape[0] < 2 or desc_b.shape[0] < 2:
-        return np.zeros((0, 2), int)
-    pairs = _flann().knnMatch(
-        np.ascontiguousarray(desc_a, np.float32), np.ascontiguousarray(desc_b, np.float32), k=2
-    )
+def _take_ratio(pairs, ratio: float) -> np.ndarray:
     out = [
         (m.queryIdx, m.trainIdx)
         for m, n in (p for p in pairs if len(p) == 2)
         if m.distance < ratio * n.distance
     ]
+    if not out:
+        return np.zeros((0, 2), int)
     return np.array(out, int).reshape(-1, 2)
+
+
+class DescriptorIndex:
+    """一张影像的 FLANN 树。
+
+    建树和描述子内容绑定。同一张影像对上十几张重叠影像时只建一次，
+    再逐张查询。ratio test 与每次新建一棵树相同。
+    """
+
+    def __init__(self, descriptors: np.ndarray):
+        self.descriptors = np.ascontiguousarray(descriptors, np.float32)
+        self._matcher = None
+        if self.descriptors.ndim == 2 and self.descriptors.shape[0] >= 2:
+            self._matcher = _flann()
+            self._matcher.add([self.descriptors])
+            self._matcher.train()
+
+    def knn_ratio(self, query: np.ndarray, ratio: float = RATIO_TEST) -> np.ndarray:
+        """在这棵树上做 k=2，返回 (查询下标, 本影像下标)。"""
+        if self._matcher is None or query.ndim != 2 or query.shape[0] < 2:
+            return np.zeros((0, 2), int)
+        pairs = self._matcher.knnMatch(np.ascontiguousarray(query, np.float32), k=2)
+        return _take_ratio(pairs, ratio)
+
+
+def knn_ratio_match(
+    desc_a: np.ndarray, desc_b: np.ndarray, *, ratio: float = RATIO_TEST
+) -> np.ndarray:
+    """单向 kNN + ratio test，返回 (N, 2) 下标。desc_b 是被搜索的那张。"""
+    return DescriptorIndex(desc_b).knn_ratio(desc_a, ratio)
+
+
+def cross_check_indexes(
+    desc_a: np.ndarray,
+    index_a: DescriptorIndex,
+    desc_b: np.ndarray,
+    index_b: DescriptorIndex,
+    *,
+    ratio: float = RATIO_TEST,
+) -> np.ndarray:
+    """双向匹配取交集。index_a 搜的是 desc_a，index_b 搜的是 desc_b。"""
+    ab = index_b.knn_ratio(desc_a, ratio)
+    ba = index_a.knn_ratio(desc_b, ratio)
+    if ab.size == 0 or ba.size == 0:
+        return np.zeros((0, 2), int)
+    # ba 的列是 (b 的下标, a 的下标)，建 b → a 的反查表
+    back = {int(query_b): int(train_a) for query_b, train_a in ba}
+    keep = [(int(a), int(b)) for a, b in ab if back.get(int(b), -1) == int(a)]
+    if not keep:
+        return np.zeros((0, 2), int)
+    return np.array(keep, int).reshape(-1, 2)
 
 
 def cross_check(
     desc_a: np.ndarray, desc_b: np.ndarray, *, ratio: float = RATIO_TEST
 ) -> np.ndarray:
     """双向匹配取交集，消除一对多。"""
-    ab = knn_ratio_match(desc_a, desc_b, ratio=ratio)
-    ba = knn_ratio_match(desc_b, desc_a, ratio=ratio)
-    if ab.size == 0 or ba.size == 0:
-        return np.zeros((0, 2), int)
-    # ba 的列是 (b 的下标, a 的下标)，建 b → a 的反查表
-    back = {int(query_b): int(train_a) for query_b, train_a in ba}
-    keep = [(int(a), int(b)) for a, b in ab if back.get(int(b), -1) == int(a)]
-    return np.array(keep, int).reshape(-1, 2)
+    return cross_check_indexes(
+        desc_a, DescriptorIndex(desc_a), desc_b, DescriptorIndex(desc_b), ratio=ratio
+    )
 
 
 def geometric_verify(
@@ -128,8 +168,12 @@ def match_pair(
     ratio: float = RATIO_TEST,
     threshold_px: float = RANSAC_THRESHOLD_PX,
     min_inliers: int = MIN_INLIERS,
+    index_a: DescriptorIndex | None = None,
+    index_b: DescriptorIndex | None = None,
 ) -> PairMatches | None:
-    idx = cross_check(feats_a.descriptors, feats_b.descriptors, ratio=ratio)
+    ia = index_a if index_a is not None else DescriptorIndex(feats_a.descriptors)
+    ib = index_b if index_b is not None else DescriptorIndex(feats_b.descriptors)
+    idx = cross_check_indexes(feats_a.descriptors, ia, feats_b.descriptors, ib, ratio=ratio)
     if idx.shape[0] < min_inliers:
         return None
     pts_a = feats_a.keypoints[idx[:, 0], :2]

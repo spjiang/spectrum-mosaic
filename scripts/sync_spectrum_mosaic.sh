@@ -39,6 +39,8 @@ RSYNC_EXCLUDES=(
   --exclude 'prod/server/data/output/**'
   --exclude 'prod/server/data/.inspect/'
   --exclude 'prod/server/data/.worker/'
+  # 对比用检出，只读，不进 spectrum-mosaic
+  --exclude 'prod/gcp/'
 )
 
 # 与 data 同类、但不在 data/ 下的海量二进制（默认排除，否则无法推 GitHub）
