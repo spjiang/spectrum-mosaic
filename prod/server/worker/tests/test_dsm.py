@@ -257,6 +257,44 @@ def test_clip_z_sparse_envelope_drops_inband_pit():
     assert np.isfinite(out[80, 80])
 
 
+def test_build_dsm_lifts_inband_low_sheet_to_sparse_ground():
+    """搜索余量留得住的成片低坑，交付时收到稀疏点地面以上，再从周围补回。"""
+    grid = _grid(48, gsd=1.0)
+    z = np.full(grid.shape, 32.0, np.float32)
+    z[8:32, 8:32] = -10.2
+    ref = np.concatenate([np.full(200, 16.0), np.full(200, 32.0)])
+    wide_lo, _hi = plausible_z_limits(ref, margin_lo_m=30.0, margin_hi_m=50.0)
+    assert wide_lo < -10.2
+    dsm = build_dsm(
+        _field(grid, z),
+        fill=True,
+        ref_z=ref,
+        margin_lo_m=30.0,
+        margin_hi_m=50.0,
+        tolerance_m=2.0,
+    )
+    assert dsm.stats["z_clip_lo"] > wide_lo
+    assert dsm.stats["z_min"] >= dsm.stats["z_clip_lo"] - 1e-3
+    assert dsm.stats["dropped_range"] >= 100
+    assert abs(float(dsm.z[20, 20]) - 32.0) < 5.0
+
+
+def test_build_dsm_keeps_relief_above_sparse_floor():
+    grid = _grid(48, gsd=1.0)
+    z = np.full(grid.shape, 32.0, np.float32)
+    z[8:32, 8:32] = 20.0
+    ref = np.concatenate([np.full(200, 16.0), np.full(200, 32.0)])
+    dsm = build_dsm(
+        _field(grid, z),
+        fill=False,
+        ref_z=ref,
+        margin_lo_m=30.0,
+        margin_hi_m=50.0,
+        tolerance_m=2.0,
+    )
+    assert float(dsm.z[20, 20]) == pytest.approx(20.0)
+
+
 def test_build_dsm_drops_range_outliers_and_fills_from_terrain():
     grid = _grid(60, gsd=1.0)
     z = np.full(grid.shape, 1760.0, np.float32)

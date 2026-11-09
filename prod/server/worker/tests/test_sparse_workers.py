@@ -129,3 +129,108 @@ def test_match_all_forwards_feature_limit(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(runner, "_match_all_cpu", fake)
     runner._match_all([], 4, tmp_path, {}, max_features=512, log=lambda *_: None)
     assert seen["max_features"] == 512
+
+
+class _InlinePool:
+    def __init__(self, workers):
+        self.workers = workers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, arg):
+        from concurrent.futures import Future
+
+        fut = Future()
+        try:
+            fut.set_result(fn(arg))
+        except Exception as exc:
+            fut.set_exception(exc)
+        return fut
+
+
+def test_overlap_matches_only_after_features_exist(monkeypatch):
+    from ms_mosaic import runner
+
+    order = []
+
+    def fake_extract(job):
+        order.append(("extract", int(job[0])))
+        return int(job[0])
+
+    def fake_group(indexed):
+        ids = []
+        out = []
+        for orig, job in indexed:
+            ids.extend((int(job[0]), int(job[1])))
+            out.append((orig, (int(job[0]), int(job[1]), np.zeros((1, 2)), "essential")))
+        order.append(("match", tuple(ids)))
+        return out
+
+    monkeypatch.setattr(runner, "_extract_worker", fake_extract)
+    monkeypatch.setattr(runner, "_match_group", fake_group)
+    jobs = [
+        (0, "/in/a.tif", "/cache", 32),
+        (1, "/in/b.tif", "/cache", 32),
+    ]
+    pairs = [(0, 1, "/in/a.tif", "/in/b.tif", "Color")]
+    matches, _feat_s = runner._overlap_extract_match(
+        jobs,
+        pairs,
+        2,
+        Path("/cache"),
+        {},
+        max_features=32,
+        log=lambda *_a: None,
+        pool_factory=_InlinePool,
+    )
+    assert [step[0] for step in order] == ["extract", "extract", "match"]
+    assert matches[0].i == 0 and matches[0].j == 1
+
+
+def test_overlap_skips_cached_features_and_keeps_pair_order(monkeypatch, tmp_path: Path):
+    from ms_mosaic import runner
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for name in ("a", "b", "c", "d"):
+        (cache / f"{name}.npz").write_bytes(b"")
+    order = []
+
+    def fake_extract(job):
+        order.append(("extract", int(job[0])))
+        return int(job[0])
+
+    def fake_group(indexed):
+        out = []
+        for orig, job in indexed:
+            order.append(("match", orig))
+            out.append((orig, (int(job[0]), int(job[1]), np.zeros((1, 2)), "essential")))
+        return out
+
+    monkeypatch.setattr(runner, "_extract_worker", fake_extract)
+    monkeypatch.setattr(runner, "_match_group", fake_group)
+    jobs = [
+        (i, str(tmp_path / f"{name}.tif"), str(cache), 32)
+        for i, name in enumerate("abcd")
+    ]
+    pairs = [
+        (0, 1, jobs[0][1], jobs[1][1], "Color"),
+        (2, 3, jobs[2][1], jobs[3][1], "Color"),
+    ]
+    matches, feat_s = runner._overlap_extract_match(
+        jobs,
+        pairs,
+        1,
+        cache,
+        {},
+        max_features=32,
+        log=lambda *_a: None,
+        pool_factory=_InlinePool,
+    )
+    assert not any(step[0] == "extract" for step in order)
+    assert feat_s == 0.0
+    assert [(m.i, m.j) for m in matches] == [(0, 1), (2, 3)]

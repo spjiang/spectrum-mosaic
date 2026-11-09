@@ -36,8 +36,8 @@ def test_run_sparse_invokes_catalog_done_after_build(monkeypatch, tmp_path: Path
     monkeypatch.setattr(runner, "scan_directory", fake_scan)
     monkeypatch.setattr(runner, "usable_shots", fake_usable)
     monkeypatch.setattr(runner, "build_block", fake_build)
-    monkeypatch.setattr(runner, "_extract_features", lambda *a, **k: None)
-    monkeypatch.setattr(runner, "_match_all", lambda *a, **k: [])
+    monkeypatch.setattr(runner, "_choose_feature_device", lambda log=None: None)
+    monkeypatch.setattr(runner, "_overlap_extract_match", lambda *a, **k: ([], 0.0))
     monkeypatch.setattr(runner, "build_tracks", lambda *a, **k: MagicMock(per_image_counts=lambda: {}))
     monkeypatch.setattr(runner, "summarize_matches", lambda *a, **k: [])
     monkeypatch.setattr(runner, "run_at", lambda *a, **k: MagicMock(

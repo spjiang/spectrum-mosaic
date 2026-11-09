@@ -61,12 +61,12 @@ def _run(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(runner, "scan_directory", lambda *_a, **_k: [object()] * 2)
     monkeypatch.setattr(runner, "usable_shots", lambda shots, **_k: ({0: None, 1: None}, {}))
     monkeypatch.setattr(runner, "build_block", lambda _keep: block)
-    monkeypatch.setattr(runner, "_extract_all", lambda jobs, workers, log=None: None)
+    monkeypatch.setattr(runner, "_choose_feature_device", lambda log=None: None)
     matches = [
         PairMatches(0, 2, np.array([[0, 0], [1, 1]]), "essential"),
         PairMatches(1, 3, np.array([[0, 0]]), "essential"),
     ]
-    monkeypatch.setattr(runner, "_match_all", lambda *_a, **_k: list(matches))
+    monkeypatch.setattr(runner, "_overlap_extract_match", lambda *_a, **_k: (list(matches), 0.0))
     kp = {"Color_0": 7, "Color_1": 9, "550nm_0": 3, "550nm_1": 5}
     monkeypatch.setattr(
         runner, "load_keypoints", lambda path, cache_dir, max_features=8192: np.zeros((kp[Path(path).stem], 2))
@@ -81,18 +81,18 @@ def test_run_sparse_forwards_feature_limit(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(runner, "scan_directory", lambda *_a, **_k: [object()] * 2)
     monkeypatch.setattr(runner, "usable_shots", lambda shots, **_k: ({0: None, 1: None}, {}))
     monkeypatch.setattr(runner, "build_block", lambda _keep: block)
-    monkeypatch.setattr(runner, "_extract_features", lambda jobs, workers, log=None: None)
+    monkeypatch.setattr(runner, "_choose_feature_device", lambda log=None: None)
     seen = {}
 
     def capture_match(*_a, **k):
         seen["match"] = k.get("max_features")
-        return []
+        return [], 0.0
 
     def capture_kp(_path, *, cache_dir, max_features=8192):
         seen["keypoints"] = max_features
         return np.zeros((2, 2))
 
-    monkeypatch.setattr(runner, "_match_all", capture_match)
+    monkeypatch.setattr(runner, "_overlap_extract_match", capture_match)
     monkeypatch.setattr(runner, "load_keypoints", capture_kp)
     monkeypatch.setattr(runner, "run_at", _fake_at)
     runner.run_sparse(tmp_path / "in", tmp_path / "cache" / "features", workers=1, max_features=512)

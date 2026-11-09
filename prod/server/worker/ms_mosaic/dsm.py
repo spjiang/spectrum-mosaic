@@ -175,6 +175,34 @@ def plausible_z_limits(
     return lo, hi
 
 
+def _ground_floor(ref_z: np.ndarray | None, clip_kw: dict) -> float | None:
+    """稀疏点下包络。搜索余量（常为 30 m）不带到交付面上。
+
+    成片低坑落在「分位 − 搜索余量」里时，局部中值也是错的，去尖放不过。
+    交付只留尖刺容差那么一点余量，使留下的高程不低于这块地面。
+    """
+    if ref_z is None:
+        return None
+    kw = dict(clip_kw)
+    kw["margin_lo_m"] = min(float(kw.get("margin_lo_m", TERRAIN_MARGIN_LO_M)), float(SPIKE_TOLERANCE_M))
+    limits = plausible_z_limits(ref_z, **kw)
+    if limits is None:
+        return None
+    return float(limits[0])
+
+
+def _drop_below_ground(z: np.ndarray, floor: float | None) -> tuple[np.ndarray, int]:
+    if floor is None:
+        return z, 0
+    bad = np.isfinite(z) & (z < floor)
+    n = int(bad.sum())
+    if n == 0:
+        return z, 0
+    out = np.array(z, dtype=np.float64, copy=True)
+    out[bad] = np.nan
+    return out, n
+
+
 def terrain_clip_kwargs(
     *,
     margin_lo_m: float | None = None,
@@ -486,6 +514,10 @@ def build_dsm(
     after_range = int(np.isfinite(z).sum())
     z = remove_spikes(z, tolerance_m=tolerance_m)
     after_spikes = int(np.isfinite(z).sum())
+    floor = _ground_floor(ref_z, clip_kw)
+    z, n_below = _drop_below_ground(z, floor)
+    if floor is not None and limits is not None:
+        limits = (max(float(limits[0]), floor), float(limits[1]))
     main = refine_coverage_mask(np.isfinite(z), max_hole_cells=0, merge_gap_cells=4)
     z = np.where(main, z, np.nan)
     if fill:
@@ -498,6 +530,8 @@ def build_dsm(
     # 中值平滑放在补洞之后：补洞前做的话，剔除留下的散点空洞会让每个窗口都
     # 吃进垫底值，等于在真实高程上叠一层插值噪声。
     z = median_smooth(z)
+    z, n_sag = _drop_below_ground(z, floor)
+    n_below += n_sag
 
     valid = np.isfinite(z)
     stats = {
@@ -507,7 +541,7 @@ def build_dsm(
         "n_valid": int(valid.sum()),
         "fill_ratio": float(valid.mean()),
         "dropped_low_confidence": int(np.isfinite(field.z).sum() - raw_valid),
-        "dropped_range": int(raw_valid - after_range),
+        "dropped_range": int(raw_valid - after_range + n_below),
         "dropped_spikes": int(after_range - after_spikes),
         "z_clip_lo": None if limits is None else float(limits[0]),
         "z_clip_hi": None if limits is None else float(limits[1]),
@@ -538,9 +572,12 @@ def complete_dsm_coverage(
     )
     z = clip_z_to_plausible(np.asarray(z, np.float64), ref_z=ref_z, **clip_kw)
     z = remove_spikes(z)
+    floor = _ground_floor(ref_z, clip_kw)
+    z, _n_below = _drop_below_ground(z, floor)
     main = np.isfinite(z)
     domain = _fill_domain(main, coverage, grid.gsd, max_fill_gap_m)
     out = fill_holes(z, domain=domain, trend=trend)
+    out, _n_sag = _drop_below_ground(out, floor)
     if clip_to_coverage:
         out = np.where(np.asarray(coverage, bool), out, np.nan)
     return out

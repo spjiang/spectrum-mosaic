@@ -10,7 +10,13 @@ import multiprocessing
 import os
 import time
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -428,25 +434,40 @@ def run_sparse(
     log(f"每张影像特征点上限 {max_features}")
     t = time.time()
     jobs = [(i, p, str(cache_dir), max_features) for i, p in zip(indices, paths)]
-    feature_device = _extract_features(jobs, workers, log)
-    timings["features"] = time.time() - t
-    log(f"特征提取 {len(jobs)} 张，{timings['features']:.1f}s")
-
-    t = time.time()
     path_by = dict(zip(indices, paths))
     pair_jobs = [
         (c.i, c.j, path_by[c.i], path_by[c.j], band_by[c.i]) for c in candidates
     ]
-    matches = _match_all(
-        pair_jobs,
-        workers,
-        cache_dir,
-        dict(block.cameras),
-        feature_device=feature_device,
-        max_features=max_features,
-        log=log,
-    )
-    timings["matching"] = time.time() - t
+    feature_device = _choose_feature_device(log)
+    if feature_device is None:
+        # 像对、FLANN 比例、几何校验不变。墙钟接近较慢的那一段，两段时间不要相加。
+        matches, feat_s = _overlap_extract_match(
+            jobs,
+            pair_jobs,
+            workers,
+            cache_dir,
+            dict(block.cameras),
+            max_features=max_features,
+            log=log,
+        )
+        timings["features"] = feat_s
+        timings["matching"] = time.time() - t
+        log(f"特征提取 {len(jobs)} 张，{timings['features']:.1f}s（与匹配重叠）")
+    else:
+        _extract_all_gpu(jobs, feature_device, workers, log=log)
+        timings["features"] = time.time() - t
+        log(f"特征提取 {len(jobs)} 张，{timings['features']:.1f}s")
+        t = time.time()
+        matches = _match_all(
+            pair_jobs,
+            workers,
+            cache_dir,
+            dict(block.cameras),
+            feature_device=feature_device,
+            max_features=max_features,
+            log=log,
+        )
+        timings["matching"] = time.time() - t
     log(f"匹配 {len(matches)}/{len(candidates)} 对成功，{timings['matching']:.1f}s")
 
     tracks = build_tracks(matches)
@@ -601,8 +622,8 @@ def _extract_all_gpu(jobs: list, device: int, workers: int, log=lambda *_: None)
                 last = now
 
 
-def _extract_features(jobs: list, workers: int, log=lambda *_: None) -> int | None:
-    """按任务 GPU 设置提特征。返回显卡号；走 CPU 时返回 None，供匹配沿用同一套缓存。"""
+def _choose_feature_device(log=lambda *_: None) -> int | None:
+    """按任务 GPU 设置决定提特征的设备。CPU 返回 None。"""
     from ms_mosaic.gpu import GpuChoice
     from ms_mosaic.gpu import describe as describe_gpu
     from ms_mosaic.gpu import select as select_gpu
@@ -614,10 +635,16 @@ def _extract_features(jobs: list, workers: int, log=lambda *_: None) -> int | No
     if choice.device is not None:
         try:
             prepare_gpu_sift(choice.device)
-            feature_device = choice.device
+            feature_device = int(choice.device)
         except GpuSiftUnavailable as exc:
             choice = GpuChoice(device=None, budget_bytes=0, name="", reason=str(exc))
     log(describe_gpu("特征提取", choice))
+    return feature_device
+
+
+def _extract_features(jobs: list, workers: int, log=lambda *_: None) -> int | None:
+    """按任务 GPU 设置提特征。返回显卡号；走 CPU 时返回 None，供匹配沿用同一套缓存。"""
+    feature_device = _choose_feature_device(log)
     if feature_device is None:
         _extract_all(jobs, workers, log=log)
         return None
@@ -682,6 +709,128 @@ def _match_all_cpu(
                 log(f"已匹配 {done}/{total} 对，用时 {now - t0:.0f} 秒")
                 last = now
     return [PairMatches(*r) for r in slots if r is not None]
+
+
+def _feature_cached(job) -> bool:
+    _idx, path, cache_dir, _max_features = job
+    return (Path(cache_dir) / f"{Path(path).stem}.npz").is_file()
+
+
+def _group_images_ready(group, pending: set[int]) -> bool:
+    """一组里每张影像的 npz 都落盘后才能匹配，搜索树才读得到描述子。"""
+    for _orig, job in group:
+        if int(job[0]) in pending or int(job[1]) in pending:
+            return False
+    return True
+
+
+def _overlap_extract_match(
+    extract_jobs: list,
+    pair_jobs: list,
+    workers: int,
+    cache_dir: Path,
+    cameras: dict,
+    *,
+    max_features: int = 8192,
+    log=lambda *_: None,
+    pool_factory=None,
+) -> tuple[list[PairMatches], float]:
+    """一个进程池里匹配优先，提取只补空闲进程。
+
+    像对仍按 group_match_jobs 分组，一组交给同一个进程，主人影像的搜索树只建一次。
+    结果按原像对下标写回。显卡提特征时不走这里：批量 kNN 要等描述子齐。
+    返回 (匹配, 特征墙钟)。特征墙钟停在最后一张提完，短于整段墙钟，两段重叠。
+    """
+    from collections import deque
+
+    workers = max(1, int(workers))
+    groups = group_match_jobs(pair_jobs)
+    pending: set[int] = set()
+    extract_left: deque = deque()
+    for job in extract_jobs:
+        if _feature_cached(job):
+            continue
+        pending.add(int(job[0]))
+        extract_left.append(job)
+    match_q: deque = deque()
+    waiting: list = []
+    for group in groups:
+        if _group_images_ready(group, pending):
+            match_q.append(group)
+        else:
+            waiting.append(group)
+
+    log(f"匹配：CPU FLANN，{workers} 进程")
+    log("同一张影像的搜索树只建一次")
+    log("特征与匹配重叠调度：匹配优先，提取补空闲进程")
+
+    n_extract = len(extract_jobs)
+    total = len(pair_jobs)
+    done_extract = n_extract - len(extract_left)
+    done_match = 0
+    slots: list = [None] * total
+    t0 = time.time()
+    last = t0
+    feat_elapsed = 0.0 if done_extract == n_extract else None
+
+    def _note(now: float) -> None:
+        nonlocal last
+        finished = done_match == total and done_extract == n_extract
+        if finished or now - last >= 15.0:
+            log(
+                f"已提取 {done_extract}/{n_extract} 张，"
+                f"已匹配 {done_match}/{total} 对，用时 {now - t0:.0f} 秒"
+            )
+            last = now
+
+    if pool_factory is None:
+        ctx = multiprocessing.get_context("spawn")
+        pool_cm = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=ctx,
+            initializer=_match_init,
+            initargs=(str(cache_dir), cameras, None, int(max_features)),
+        )
+    else:
+        pool_cm = pool_factory(workers)
+    with pool_cm as pool:
+        inflight: dict = {}
+        while True:
+            while len(inflight) < workers and match_q:
+                group = match_q.popleft()
+                inflight[pool.submit(_match_group, group)] = ("match", group)
+            while len(inflight) < workers and extract_left:
+                job = extract_left.popleft()
+                inflight[pool.submit(_extract_worker, job)] = ("extract", job)
+            if not inflight:
+                if waiting or extract_left or match_q:
+                    raise RuntimeError("特征未完成，仍有像对不能匹配")
+                break
+            done_set, _pending = wait(set(inflight), return_when=FIRST_COMPLETED)
+            now = time.time()
+            for fut in done_set:
+                kind, _payload = inflight.pop(fut)
+                if kind == "match":
+                    for orig, result in fut.result():
+                        slots[orig] = result
+                        done_match += 1
+                else:
+                    idx = int(fut.result())
+                    pending.discard(idx)
+                    done_extract += 1
+                    if feat_elapsed is None and done_extract == n_extract:
+                        feat_elapsed = now - t0
+                    still = []
+                    for group in waiting:
+                        if _group_images_ready(group, pending):
+                            match_q.append(group)
+                        else:
+                            still.append(group)
+                    waiting = still
+            _note(now)
+    if feat_elapsed is None:
+        feat_elapsed = time.time() - t0
+    return [PairMatches(*r) for r in slots if r is not None], float(feat_elapsed)
 
 
 class _FeatLRU:
