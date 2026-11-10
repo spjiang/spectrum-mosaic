@@ -9,7 +9,6 @@ const HIGHLIGHT = [
   "stop_after_stage",
   "dsm_gsd",
   "cache_dir",
-  "workers_at",
   "max_features",
   "memory_gb",
   "cpus",
@@ -39,7 +38,7 @@ export default function JobSnapshot({
 }) {
   const snap = snapshot || {};
   const keys = Object.keys(snap).sort();
-  const rest = keys.filter((k) => !HIGHLIGHT.includes(k));
+  const rest = keys.filter((k) => k !== "workers_at" && !HIGHLIGHT.includes(k));
 
   return (
     <Collapse

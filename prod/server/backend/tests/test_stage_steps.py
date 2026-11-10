@@ -53,6 +53,31 @@ def test_at_steps_keep_counts_and_durations():
     assert all("10/221" not in s["detail"] for s in stages["S2_at"])
 
 
+def test_band_list_does_not_become_the_ba_summary():
+    """空三波段打在候选像对之前，不能被当成平差，否则合计行会插到筛选后面。"""
+    text = """
+2026-11-10 01:00:00,000 INFO job abc start S2_at 空三 / 稀疏重建
+2026-11-10 01:00:02 曝光 1992 → 可用 1743（过滤 {}），影像 1992 张（含各波段）
+2026-11-10 01:00:03 空三波段 7 个：Color/450nm
+2026-11-10 01:00:03 空三只解 Color，1743 张。未列入的波段不做特征
+2026-11-10 01:00:04 候选像对 9565 对（按 7 个波段组内选对；若全影像两两组合为 1）
+2026-11-10 01:00:05 空三并行 12 进程
+2026-11-10 01:00:06 特征提取：GPU 0 Tesla T4，显存上限 12.3 GB
+2026-11-10 01:00:58 特征提取 1743 张，51.0s
+2026-11-10 01:14:22 匹配 9405/9565 对成功，804.0s
+2026-11-10 01:14:30 连接点 10 条，观测 20，平均轨迹长 2.00
+2026-11-10 01:20:00 交会  物方点 10，观测 20
+2026-11-10 01:30:00 阶段1 自由内参=f RMS=1px 剔除观测 1 剩余点 9
+2026-11-10 01:35:00 空三 900.0s，稀疏重建合计 1800.0s
+"""
+    names = [s["name"] for s in parse_stage_steps(text)["S2_at"]]
+    assert names.index("影像筛选") < names.index("候选像对")
+    assert names.index("候选像对") < names.index("像对匹配")
+    assert names.index("像对匹配") < names.index("前方交会")
+    assert names.index("前方交会") < names.index("平差")
+    assert names.count("平差") == 1
+
+
 def test_dense_and_ortho_skip_tile_progress():
     stages = parse_stage_steps(LOG)
     dense = stages["S3_dense"]

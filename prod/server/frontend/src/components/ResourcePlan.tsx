@@ -19,6 +19,7 @@ export default function ResourcePlan({
   cpus,
   orthoScale,
   memoryCeilingGb,
+  freeMemoryGb,
   cpuCeiling,
   disabled,
   onApply,
@@ -28,14 +29,15 @@ export default function ResourcePlan({
   cpus: number;
   orthoScale: number;
   memoryCeilingGb: number | null;
+  freeMemoryGb: number | null;
   cpuCeiling: number | null;
   disabled?: boolean;
   onApply: (memoryGb: number, cpus: number) => void;
 }) {
   const rows = planRows(scene, memoryGb, cpus, orthoScale);
   const costs = sceneCosts(scene, orthoScale);
-  const advice = planAdvice(scene, memoryGb, cpus, orthoScale, memoryCeilingGb, cpuCeiling);
-  const action = planAction(scene, memoryGb, cpus, orthoScale, memoryCeilingGb, cpuCeiling);
+  const advice = planAdvice(scene, memoryGb, cpus, orthoScale, memoryCeilingGb, cpuCeiling, freeMemoryGb);
+  const action = planAction(scene, memoryGb, cpus, orthoScale, memoryCeilingGb, cpuCeiling, freeMemoryGb);
   const bandLine =
     scene.nMsBands > 0 ? `彩色 + ${scene.nMsBands} 个多光谱` : "彩色";
   const frame = costs.pixels;

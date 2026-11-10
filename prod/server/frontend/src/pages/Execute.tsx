@@ -28,7 +28,7 @@ import JobStageFlow from "../components/JobStageFlow";
 import { TitleWithProgressHelp } from "../components/ProgressHelpTip";
 import LogConsole from "../components/LogConsole";
 import ResourcePlan from "../components/ResourcePlan";
-import { usableCores, type SceneFacts } from "../concurrencyPlan";
+import { cpusFromShare, initialCpu, initialMemoryGb, type SceneFacts } from "../concurrencyPlan";
 import { formatNo } from "../ids";
 import { canExecute, canViewOps } from "../roles";
 import { displayStage, stageLabel } from "../stages";
@@ -85,22 +85,18 @@ function engineLimitGb(inspect: any): number | null {
   return Math.round((mb / 1024) * 10) / 10;
 }
 
+function engineFreeGb(inspect: any): number | null {
+  const mb = inspect?.worker?.host_memory?.mem_available_mb;
+  if (typeof mb !== "number" || !(mb > 0)) return null;
+  return Math.round((mb / 1024) * 10) / 10;
+}
+
 function memorySliderMax(limitGb: number | null): number {
   return limitGb != null && limitGb > 0 ? limitGb : 36;
 }
 
-function pickMemoryGb(raw: unknown, max: number): number {
-  if (typeof raw === "number" && raw > 0) return Math.min(raw, max);
-  return 0;
-}
-
 function cpuSliderMax(limit: number | null): number {
   return limit != null && limit > 0 ? limit : 8;
-}
-
-function pickCpus(raw: unknown, max: number): number {
-  if (typeof raw === "number" && raw > 0) return Math.min(raw, max);
-  return 0;
 }
 
 function asPositiveNumber(raw: unknown): number {
@@ -174,6 +170,7 @@ export default function ExecutePage() {
   const [submitting, setSubmitting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const logBusy = useRef(false);
+  const memoryApplied = useRef(false);
 
   const selected = useMemo(() => profiles.find((p) => p.id === profileId), [profiles, profileId]);
 
@@ -190,8 +187,6 @@ export default function ExecutePage() {
           setProfileId(preferred.id);
           applyPaths(setInputDir, setOutputDir, { ...defaults, ...(preferred.values || {}) });
           if (!searchParams.get("job")) {
-            const gb = preferred.values?.memory_gb ?? defaults.memory_gb;
-            setMemoryGb(typeof gb === "number" && gb > 0 ? gb : 36);
             const n = preferred.values?.cpus ?? defaults.cpus;
             setCpus(typeof n === "number" && n > 0 ? n : 0);
             setGpu(pickGpu(preferred.values?.gpu ?? defaults.gpu));
@@ -220,8 +215,10 @@ export default function ExecutePage() {
       setLogs("");
       const p = profiles.find((x) => x.id === profileId);
       const gb = p?.values?.memory_gb;
-      setMemoryGb(pickMemoryGb(gb, memorySliderMax(engineRamGb)));
-      setCpus(pickCpus(p?.values?.cpus, cpuSliderMax(engineCpu)));
+      const saved = typeof gb === "number" && gb > 0 ? gb : 0;
+      setMemoryGb(initialMemoryGb(saved, engineFreeGb(inspect), memorySliderMax(engineRamGb)));
+      const savedCpu = p?.values?.cpus;
+      setCpus(initialCpu(typeof savedCpu === "number" && savedCpu > 0 ? savedCpu : 0, engineCpu));
       if (p) {
         setGpu(pickGpu(p.values?.gpu));
         setGpuMemoryGb(asPositiveNumber(p.values?.gpu_memory_gb));
@@ -286,6 +283,18 @@ export default function ExecutePage() {
       clearInterval(timer);
     };
   }, [job?.id, job?.status]);
+
+  useEffect(() => {
+    if (memoryApplied.current || searchParams.get("job")) return;
+    if (!profiles.length || inspect == null || engineCpu == null) return;
+    const preferred = profiles.find((p) => p.id === profileId) ?? profiles[0];
+    const saved = preferred?.values?.memory_gb;
+    const gb = typeof saved === "number" && saved > 0 ? saved : 0;
+    setMemoryGb(initialMemoryGb(gb, engineFreeGb(inspect), engineRamGb));
+    const savedCpu = preferred?.values?.cpus;
+    setCpus(initialCpu(typeof savedCpu === "number" && savedCpu > 0 ? savedCpu : 0, engineCpu));
+    memoryApplied.current = true;
+  }, [profiles, profileId, inspect, engineRamGb, engineCpu, searchParams]);
 
   useEffect(() => {
     if (engineRamGb == null) return;
@@ -429,8 +438,10 @@ export default function ExecutePage() {
                   const p = profiles.find((x) => x.id === id);
                   applyPaths(setInputDir, setOutputDir, p?.values);
                   const gb = p?.values?.memory_gb;
-                  setMemoryGb(pickMemoryGb(gb, memMax));
-                  setCpus(pickCpus(p?.values?.cpus, cpuMax));
+                  const saved = typeof gb === "number" && gb > 0 ? gb : 0;
+                  setMemoryGb(initialMemoryGb(saved, engineFreeGb(inspect), memMax));
+                  const savedCpu = p?.values?.cpus;
+                  setCpus(initialCpu(typeof savedCpu === "number" && savedCpu > 0 ? savedCpu : 0, engineCpu));
                   setGpu(pickGpu(p?.values?.gpu));
                   setGpuMemoryGb(asPositiveNumber(p?.values?.gpu_memory_gb));
                 }}
@@ -546,7 +557,7 @@ export default function ExecutePage() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <FieldHelp
                   label="任务 CPU"
-                  help="这次计算最多用几个核，也是同时开的进程上限。滑到 0 表示自动，并留 2 核给系统和页面。拉满容易把页面卡住。试用保持方案带出的值。"
+                  help="这次计算的进程上限。建议用节点核数的 80%。内存养不住这么多进程时，实际路数会少于核数，不会把内存用爆。试用保持方案带出的值。"
                 />
                 <Typography.Text strong>{cpus ? `${cpus} 核` : "自动"}</Typography.Text>
               </div>
@@ -563,9 +574,10 @@ export default function ExecutePage() {
                 />
               </div>
               <Typography.Paragraph type="secondary" style={{ margin: "0 0 0", fontSize: 12, lineHeight: 1.6 }}>
-                0 表示自动，留 2 核给系统和页面。核数是进程数的上限。
+                核数是进程数的上限。建议用节点的 80%
+                {engineCpu != null ? `（${cpusFromShare(engineCpu)} 核）` : ""}
+                。内存不够的阶段会少开进程。
                 {showOpsHelp ? `当前节点 ${engineCpu != null ? `${engineCpu} 核` : "核数未知"}。` : ""}
-                {engineCpu != null && engineCpu > 4 ? `拉到 ${engineCpu} 会占满本机，系统和页面容易卡住。` : ""}
               </Typography.Paragraph>
             </div>
             {sceneLoading ? (
@@ -579,7 +591,7 @@ export default function ExecutePage() {
             ) : (
               (() => {
                 const planMemory = memoryGb && memoryGb > 0 ? memoryGb : engineRamGb;
-                const planCpu = cpus > 0 ? cpus : usableCores(engineCpu) ?? engineCpu;
+                const planCpu = cpus > 0 ? cpus : cpusFromShare(engineCpu) ?? engineCpu;
                 if (planMemory == null || planCpu == null || planMemory <= 0 || planCpu <= 0) {
                   return (
                     <Typography.Paragraph type="secondary" style={{ margin: "8px 0 0", fontSize: 12 }}>
@@ -594,6 +606,7 @@ export default function ExecutePage() {
                     cpus={planCpu}
                     orthoScale={orthoScale}
                     memoryCeilingGb={engineRamGb}
+                    freeMemoryGb={engineFreeGb(inspect)}
                     cpuCeiling={engineCpu}
                     disabled={!allowRun}
                     onApply={(gb, n) => {
@@ -668,7 +681,6 @@ export default function ExecutePage() {
                       </Descriptions.Item>
                       <Descriptions.Item label="reuse_dsm">{summary.reuse_dsm || "—"}</Descriptions.Item>
                       <Descriptions.Item label="cache_dir">{summary.cache_dir || "默认"}</Descriptions.Item>
-                      <Descriptions.Item label="workers_at">{summary.workers_at ?? "—"}</Descriptions.Item>
                       <Descriptions.Item label="特征点上限">{summary.max_features ?? 8192}</Descriptions.Item>
                       <Descriptions.Item label="memory_gb">{String(summary.memory_gb ?? 0)}</Descriptions.Item>
                       <Descriptions.Item label="cpus">{String(summary.cpus ?? 0)}</Descriptions.Item>

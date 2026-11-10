@@ -416,9 +416,10 @@ def _classify(stage: str, msg: str, ts: datetime | None, ortho_open: dict[str, d
             return _step(f"平差阶段{stage_no.group(1)}", _tidy_ba(stage_no.group(2)), elapsed, ts)
         if body.startswith("平差阶段3已关闭"):
             return _step("平差阶段3", "已关闭，停在阶段2（焦距、主点、k1、k2）", elapsed, ts)
-        if body.startswith("空三并行"):
+        if body.startswith("空三并行") or body.startswith("空三波段") or body.startswith("空三只解"):
             return None
-        if body.startswith("空三"):
+        # 只有收尾那行「空三 12.0s，稀疏重建合计」才是平差合计。波段说明打在候选像对之前。
+        if body.startswith("空三") and "稀疏重建" in body:
             return _step("平差", body.removeprefix("空三").strip(), elapsed, ts)
         if body.startswith("复用空三"):
             return _step("复用空三", body, elapsed, ts)

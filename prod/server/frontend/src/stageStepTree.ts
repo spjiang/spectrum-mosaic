@@ -14,30 +14,32 @@ function rankBa(name: string): number {
   return stage ? Number(stage[1]) : 9;
 }
 
-/** 同一名字里耗时不到 1 秒的那一行是开工说明，并进真正干活的那一行。 */
+function joinDetail(left?: string, right?: string): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const bit of `${left || ""} · ${right || ""}`.split(" · ")) {
+    const text = bit.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    parts.push(text);
+  }
+  return parts.join(" · ");
+}
+
+/** 同一名字里不到 2 秒的那一行是开工说明（页面会把 1 秒左右显示成「1秒」），并进真正干活的那一行。 */
 function foldAnnouncements(steps: StageStep[]): StageStep[] {
   const out: StageStep[] = [];
   for (const step of steps) {
     const prev = out[out.length - 1];
     const copy = { ...step };
-    if (prev && prev.name === copy.name && (prev.gpu || copy.gpu)) {
-      prev.gpu = true;
-      copy.gpu = true;
-    }
-    if (prev && prev.name === copy.name) {
-      const prevShort = seconds(prev) < 1;
-      const copyShort = seconds(copy) < 1;
-      if (prevShort !== copyShort) {
-        const detail = [prev.detail, copy.detail].filter(Boolean).join(" · ");
-        if (prevShort) {
-          prev.detail = detail;
-          prev.elapsed_s = copy.elapsed_s;
-          prev.status = copy.status;
-        } else {
-          prev.detail = detail;
-        }
-        continue;
+    if (prev && prev.name === copy.name && (seconds(prev) < 2 || seconds(copy) < 2)) {
+      if (prev.gpu || copy.gpu) prev.gpu = true;
+      prev.detail = joinDetail(prev.detail, copy.detail);
+      if (seconds(copy) >= seconds(prev)) {
+        prev.elapsed_s = copy.elapsed_s;
+        prev.status = copy.status;
       }
+      continue;
     }
     out.push(copy);
   }

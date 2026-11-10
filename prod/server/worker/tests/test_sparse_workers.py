@@ -4,7 +4,14 @@ from types import SimpleNamespace
 import numpy as np
 
 from ms_mosaic.features import Features
-from ms_mosaic.runner import cap_at_workers
+from ms_mosaic.runner import at_worker_target, cap_at_workers
+
+
+def test_at_workers_follow_the_job_cpu():
+    assert at_worker_target(60, 64) == 60
+    assert at_worker_target(51, 64) == 51
+    assert at_worker_target(None, 62) == 62
+    assert at_worker_target(0, 62) == 62
 
 
 def test_cap_at_workers_by_available_memory(monkeypatch):

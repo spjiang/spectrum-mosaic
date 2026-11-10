@@ -168,6 +168,7 @@ export default function ProfileEditPage() {
   const grouped = useMemo(() => {
     const g: Record<string, ParamDef[]> = {};
     for (const d of defs) {
+      if (d.key === "workers_at") continue;
       (g[d.stage_id] ||= []).push(d);
     }
     return g;
@@ -195,7 +196,10 @@ export default function ProfileEditPage() {
         const [d, profiles] = await Promise.all([api.paramDefs(), api.profiles()]);
         setDefs(d);
         const init: Record<string, any> = {};
-        for (const x of d) init[x.key] = x.default_value;
+        for (const x of d) {
+          if (x.key === "workers_at") continue;
+          init[x.key] = x.default_value;
+        }
 
         if (isNew) {
           setName("未命名模版");
@@ -212,7 +216,9 @@ export default function ProfileEditPage() {
         }
         setName(p.name);
         setDescription(p.description || "");
-        setValues({ ...init, ...(p.values || {}) });
+        const loaded = { ...init, ...(p.values || {}) };
+        delete loaded.workers_at;
+        setValues(loaded);
       } catch (e: any) {
         message.error(String(e.message || e));
       }

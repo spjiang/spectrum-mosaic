@@ -76,6 +76,20 @@ def _available_memory_bytes() -> int | None:
     return None
 
 
+def at_worker_target(cpu_budget: int | None, visible_cap: int) -> int:
+    """空三进程数按这次任务设置的核数算，不看方案里的并行度。
+
+    没设核数时用节点可见核数。内存够不够由 cap_at_workers 再往下压。
+    """
+    try:
+        budget = int(cpu_budget) if cpu_budget is not None else 0
+    except (TypeError, ValueError):
+        budget = 0
+    if budget > 0:
+        return budget
+    return max(1, int(visible_cap or 1))
+
+
 def cap_at_workers(
     requested: int,
     *,
@@ -416,7 +430,6 @@ def run_sparse(
     indices = [im.index for im in images]
     paths = [str(im.path) for im in images]
     band_by = {im.index: im.band for im in images}
-    requested = workers
     budget_bytes = resolve_memory_budget(memory_gb)
     try:
         gb = float(memory_gb) if memory_gb is not None else 0.0
@@ -436,17 +449,21 @@ def run_sparse(
     cpu_budget = job_cpus()
     if cpu_budget:
         log(f"任务 CPU 预算 {cpu_budget} 核（引擎可见 {cpu_cap()}）")
-    workers = cap_at_workers(workers, budget_bytes=budget_bytes)
-    if workers != requested:
+    target = at_worker_target(cpu_budget, cpu_cap())
+    workers = cap_at_workers(target, budget_bytes=budget_bytes)
+    if workers < target:
         bits = []
         if gb > 0:
             bits.append(f"内存 {gb:g} GB")
         if cpu_budget:
             bits.append(f"CPU {cpu_budget} 核")
         why = "、".join(bits) if bits else "可用内存/CPU"
-        log(f"空三并行下调 {requested} → {workers}（按{why}封顶）")
+        note = f"（任务 {target} 核，按{why}只开 {workers} 路。匹配用这些进程；提点若在一张显卡上仍是串行）"
+    elif cpu_budget:
+        note = "（按这次任务设置的核数。匹配用这些进程；提点若在一张显卡上仍是串行）"
     else:
-        log(f"空三并行 {workers} 进程")
+        note = "（按节点可见核数。匹配用这些进程；提点若在一张显卡上仍是串行）"
+    log(f"空三并行 {workers} 进程{note}")
     if int(max_features) < 1:
         raise ValueError(f"每张影像特征点上限必须是正整数，当前 {max_features}")
     max_features = int(max_features)
