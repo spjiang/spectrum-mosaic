@@ -15,6 +15,7 @@ import {
   message,
 } from "antd";
 import { api, type IncrementalDetail } from "../api";
+import { useAuth } from "../auth";
 import JobStatusTag from "../components/JobStatusTag";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -34,6 +35,19 @@ function hostPath(path: string) {
     return "/home/spectrum-mosaic/server/data" + path.slice("/data".length);
   }
   return path;
+}
+
+function uploadTarget(path: string, username: string | null) {
+  const user = username || "";
+  const input = `/data/input/${user}`;
+  const output = `/data/output/runs/${user}`;
+  if (user && (path === input || path.startsWith(`${input}/`))) {
+    return `${user}@10.17.19.198:input${path.slice(input.length)}`;
+  }
+  if (user && (path === output || path.startsWith(`${output}/`))) {
+    return `${user}@10.17.19.198:output${path.slice(output.length)}`;
+  }
+  return `root@10.17.19.198:${hostPath(path)}`;
 }
 
 function shotTone(bands: IncrementalDetail["shots"][number]["bands"]) {
@@ -110,7 +124,8 @@ export default function IncrementalPage() {
     setCurrent(detail);
   }
 
-  const upload = current ? `rsync -av --progress ./新航片/ root@10.17.19.198:${hostPath(current.inbox_dir)}/` : "";
+  const { username } = useAuth();
+  const upload = current ? `rsync -av --progress ./新航片/ ${uploadTarget(current.inbox_dir, username)}/` : "";
 
   if (!current) {
     return (

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import is_admin, owns_record, require_roles
+from app.services.paths import assert_owned_dirs
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import User
@@ -76,6 +77,7 @@ def create_project(
     settings: Settings = Depends(get_settings),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict:
+    assert_owned_dirs(user.username, body.input_dir, body.output_root, is_admin=is_admin(user))
     row = svc.create_project(
         db,
         settings,

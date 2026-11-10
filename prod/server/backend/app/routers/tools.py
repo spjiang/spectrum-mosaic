@@ -7,7 +7,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
-from app.auth import require_roles
+from app.auth import is_admin, require_roles
+from app.services.paths import assert_owned_dirs
 from app.config import Settings, get_settings
 from app.models import User
 from app.services.resolution import measure_native_gsd, resolve_input_dir
@@ -29,8 +30,9 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 def native_gsd(
     input_dir: str = Query(...),
     settings: Settings = Depends(get_settings),
-    _: User = Depends(require_roles("admin", "configurator", "executor", "viewer")),
+    user: User = Depends(require_roles("admin", "configurator", "executor", "viewer")),
 ) -> dict:
+    assert_owned_dirs(user.username, input_dir, f"/data/output/runs/{user.username}", is_admin=is_admin(user))
     return measure_native_gsd(resolve_input_dir(input_dir, settings))
 
 _CHUNK = 1024 * 1024

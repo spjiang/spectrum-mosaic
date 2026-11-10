@@ -39,6 +39,35 @@ def detach_derived_dirs(params: dict, original_output: str) -> None:
 
 
 
+_USER_DIR = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def trial_dirs(username: str) -> tuple[str, str]:
+    """试用账号只能使用同名的输入目录和成果目录。"""
+    if not _USER_DIR.match(username or ""):
+        raise HTTPException(400, "当前账号不能对应数据目录")
+    return f"/data/input/{username}", f"/data/output/runs/{username}"
+
+
+def _inside(path: str, root: str) -> bool:
+    text = (path or "").strip().rstrip("/")
+    base = root.rstrip("/")
+    if not text or ".." in Path(text).parts:
+        return False
+    return text == base or text.startswith(base + "/")
+
+
+def assert_owned_dirs(username: str, input_dir: str, output_dir: str, *, is_admin: bool) -> None:
+    """管理员不限。其它账号的测区和成果必须落在自己的目录下，不能改别人的数据。"""
+    if is_admin:
+        return
+    in_root, out_root = trial_dirs(username)
+    if not _inside(input_dir, in_root):
+        raise HTTPException(400, f"测区数据只能使用 {in_root} 及其子目录")
+    if not _inside(output_dir, out_root):
+        raise HTTPException(400, f"成果目录只能使用 {out_root} 及其子目录")
+
+
 def validate_paths(settings: Settings, input_dir: str, output_dir: str) -> tuple[Path, Path]:
     inp = Path(input_dir).expanduser().resolve()
     out = Path(output_dir).expanduser().resolve()

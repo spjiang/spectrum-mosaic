@@ -14,6 +14,20 @@ def test_stages_cover_pipeline():
     assert STAGES[0] == "S0_io"
 
 
+def test_trial_user_is_kept_inside_own_dirs():
+    from app.services.paths import assert_owned_dirs
+
+    assert_owned_dirs("zdrh", "/data/input/zdrh", "/data/output/runs/zdrh", is_admin=False)
+    assert_owned_dirs("zdrh", "/data/input/zdrh/架次", "/data/output/runs/zdrh/20261110_120000", is_admin=False)
+    assert_owned_dirs("admin", "/data/input/S810原始数据", "/data/output/runs/s810", is_admin=True)
+    with pytest.raises(HTTPException):
+        assert_owned_dirs("zdrh", "/data/input/S810原始数据", "/data/output/runs/zdrh", is_admin=False)
+    with pytest.raises(HTTPException):
+        assert_owned_dirs("zdrh", "/data/input/zdrh", "/data/output/runs/demo", is_admin=False)
+    with pytest.raises(HTTPException):
+        assert_owned_dirs("zdrh", "/data/input/zdrh/../demo", "/data/output/runs/zdrh", is_admin=False)
+
+
 def test_validate_paths_rejects_nested_out(tmp_path: Path):
     settings = Settings(data_roots=str(tmp_path))
     inp = tmp_path / "in"

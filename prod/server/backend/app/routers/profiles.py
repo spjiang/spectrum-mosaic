@@ -13,6 +13,7 @@ from app.schemas import ParamDefOut, ProfileCreate, ProfileOut, ProfileUpdate
 from app.presets import RGB_PREVIEW_VALUES
 from app.services.audit import record_audit
 from app.services.params import assert_param_values
+from app.services.paths import assert_owned_dirs
 
 router = APIRouter(prefix="/api", tags=["profiles"])
 
@@ -69,6 +70,12 @@ def create_profile(
     values = dict(body.values)
     if body.preset == "rgb_preview":
         values.update(RGB_PREVIEW_VALUES)
+    assert_owned_dirs(
+        user.username,
+        str(values.get("input_dir") or ""),
+        str(values.get("output_dir") or ""),
+        is_admin=is_admin(user),
+    )
     assert_param_values(list(db.scalars(select(ParamDefinition))), values)
     p = ParamProfile(name=body.name, description=body.description, preset=body.preset, created_by=user.id)
     db.add(p)
@@ -112,6 +119,12 @@ def update_profile(
         values = dict(body.values)
         if p.preset == "rgb_preview":
             values.update(RGB_PREVIEW_VALUES)
+        assert_owned_dirs(
+            user.username,
+            str(values.get("input_dir") or ""),
+            str(values.get("output_dir") or ""),
+            is_admin=is_admin(user),
+        )
         assert_param_values(list(db.scalars(select(ParamDefinition))), values)
         db.execute(delete(ParamProfileValue).where(ParamProfileValue.profile_id == p.id))
         for k, v in values.items():

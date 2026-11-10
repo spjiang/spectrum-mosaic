@@ -450,7 +450,7 @@ export default function ExecutePage() {
             <div>
               <FieldHelp
                 label="测区数据"
-                help="航片所在目录，必须是页面上的 /data/input/...，不要填自己电脑上的路径。S810 试用保持 1530 这一层。目录要对到架次，只丢一张照片认不出来。"
+                help="只能填写本账号的目录 /data/input/自己的用户名，及其子目录。航片用 SSH 传到这个目录。不能改成其它测区，也不要填自己电脑上的路径。"
               />
               <Input
                 style={{ marginTop: 6 }}
@@ -516,7 +516,7 @@ export default function ExecutePage() {
             <div>
               <FieldHelp
                 label="成果目录"
-                help="成果写入的根目录，填写 /data/output/runs/任务名。每次开始处理会在下面新建时间戳子目录，不覆盖上一次成果。"
+                help="只能填写 /data/output/runs/自己的用户名。每次开始处理会在下面新建时间戳子目录，不覆盖上一次成果，也不能写到别人的成果目录。"
               />
               <Input
                 style={{ marginTop: 6 }}

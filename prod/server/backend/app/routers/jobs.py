@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, load_only
 
 from app.auth import is_admin, owns_record, require_roles
+from app.services.paths import assert_owned_dirs
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import JobRun, User
@@ -64,6 +65,7 @@ def create_job(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> JobRun:
+    assert_owned_dirs(user.username, body.input_dir, body.output_dir, is_admin=is_admin(user))
     job = jobsvc.create_job(
         db,
         settings=settings,
