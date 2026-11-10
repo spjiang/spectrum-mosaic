@@ -118,8 +118,8 @@ def ms_parent_reserve_mb(
 ) -> int:
     """规划进程时留给主进程累加器的内存。
 
-    页能退回时只留当前块和相邻重叠块。退不回时按整幅计，
-    避免脏页和子进程叠在一起把虚拟机撑满。
+    页能退回时，同一行的块要等这一行都交齐才退页，按 4 行块的整行宽度留。
+    退不回时按整幅计，避免脏页和子进程叠在一起把虚拟机撑满。
     """
     if tile is None:
         tile = ORTHO_TILE
@@ -129,9 +129,8 @@ def ms_parent_reserve_mb(
     height, width = int(grid.height), int(grid.width)
     if not _pages_can_be_dropped():
         return max(1, -(-(height * width * _RASTER_CELL_BYTES * n) // 2**20))
-    rows = min(height, int(tile) + 2 * int(overlap))
-    cols = min(width, int(tile) + 2 * int(overlap))
-    return max(1, -(-(rows * cols * _RASTER_CELL_BYTES * n * 2) // 2**20))
+    rows = min(height, 4 * (int(tile) + 2 * int(overlap)))
+    return max(1, -(-(rows * width * _RASTER_CELL_BYTES * n) // 2**20))
 
 
 def _drop_memmap_rows(arr, row0: int, row1: int) -> None:
@@ -167,6 +166,65 @@ def _drop_memmap_rows(arr, row0: int, row1: int) -> None:
             mm.madvise(advice, start_a, end_a - start_a)
         except (OSError, ValueError, BufferError, SystemError):
             continue
+
+
+class TileRowRelease:
+    """一行里的块都交齐、并且相邻行不再改这些像元时，才把这些行退回磁盘。
+
+    按块退回会把整行 msync 一次再立刻读回来：同一行有几十块，主进程就堵在
+    文件系统日志上，计算进程空等。重叠行要等相邻行也完成，数值与按块退回相同。
+    """
+
+    def __init__(self, height: int, width: int, tile: int, overlap: int) -> None:
+        self.height = int(height)
+        self.width = int(width)
+        self.tile = max(1, int(tile))
+        self.overlap = max(0, int(overlap))
+        self.n_cols = max(1, -(-self.width // self.tile))
+        self.n_rows = max(1, -(-self.height // self.tile))
+        self.got = [0] * self.n_rows
+        self.row_done = bytearray(self.n_rows)
+        self.row_released = bytearray(self.height)
+
+    def _span(self, tile_row: int) -> tuple[int, int]:
+        core = tile_row * self.tile
+        return max(0, core - self.overlap), min(self.height, core + self.tile + self.overlap)
+
+    def _row_safe(self, row: int) -> bool:
+        tile, ov = self.tile, self.overlap
+        i_min = max(0, (row - tile - ov) // tile + 1)
+        i_max = min(self.n_rows - 1, (row + ov) // tile)
+        return all(self.row_done[i] for i in range(i_min, i_max + 1))
+
+    def add(self, index: int) -> list[tuple[int, int]]:
+        """记下第 index 块已累加。返回这次可以退回的行区间 [start, end)。"""
+        if index < 0 or index >= self.n_rows * self.n_cols:
+            return []
+        tile_row = index // self.n_cols
+        self.got[tile_row] += 1
+        if self.got[tile_row] < self.n_cols or self.row_done[tile_row]:
+            return []
+        self.row_done[tile_row] = 1
+        if self.overlap >= self.tile:
+            lo, hi = 0, self.height
+        else:
+            lo = self._span(max(0, tile_row - 1))[0]
+            hi = self._span(min(self.n_rows - 1, tile_row + 1))[1]
+        ranges: list[tuple[int, int]] = []
+        run: int | None = None
+        for row in range(lo, hi):
+            if not self.row_released[row] and self._row_safe(row):
+                if run is None:
+                    run = row
+                continue
+            if run is not None:
+                ranges.append((run, row))
+                self.row_released[run:row] = b"\x01" * (row - run)
+                run = None
+        if run is not None:
+            ranges.append((run, hi))
+            self.row_released[run:hi] = b"\x01" * (hi - run)
+        return ranges
 
 
 # 块与块之间必须有足够重叠，并且按权重融合。旧写法 overlap=16 再硬裁内芯，
@@ -599,13 +657,14 @@ def render_ms_bands(
         "cache_per_band": cache_per_band,
     }
     rasters = {name: BandRaster(grid, 1, scratch_root=scratch_root) for name in names}
-    # 进程数要给主进程留出正在写的那一块。整幅大约 16 GB，按块退回后不用按整幅留。
+    # 一行的块交齐后再退页。按块退回会把同一整行反复刷盘。
     parent_mb = ms_parent_reserve_mb(grid, len(names), tile=tile, overlap=overlap)
+    releaser = TileRowRelease(grid.height, grid.width, tile, overlap)
     try:
         with reserve_memory(parent_mb):
             if log is not None:
-                log(f"多光谱累加器按块退回常驻，主进程留 {parent_mb} MB")
-            for _, window, tiles in map_tiles(
+                log(f"多光谱累加器按行退回常驻，主进程留 {parent_mb} MB")
+            for index, window, tiles in map_tiles(
                 windows,
                 partial(_ms_setup, payload),
                 _ms_fn,
@@ -619,7 +678,9 @@ def render_ms_bands(
                     if mosaic.size == 0 or not views:
                         continue
                     rasters[band].add_tile(window, mosaic, labels, views, weight)
-                    rasters[band].release_window(window)
+                for row0, row1 in releaser.add(index):
+                    for raster in rasters.values():
+                        raster.release_rows(row0, row1)
             for raster in rasters.values():
                 raster.evict()
         return rasters
@@ -729,23 +790,24 @@ class BandRaster:
         for arr in (self.acc, self.wsum, self._labels1, self.label_w):
             arr.flush()
 
-    def release_window(self, window: tuple[int, int, int, int]) -> None:
-        """这块已经累加完。先写回磁盘，再把这些行从常驻退回。
-
-        下一块重叠到同一行时从磁盘读回，数值与一直留在内存里相同。
-        不退的话，7 个波段的整幅脏页大约 16 GB，会和子进程一起把内存用满。
-        """
-        row0, _col0, rows, _cols = (int(v) for v in window)
-        if rows <= 0:
+    def release_rows(self, row0: int, row1: int) -> None:
+        """[row0, row1) 已经不会再改。先写回磁盘，再从常驻退回。"""
+        row0 = max(0, int(row0))
+        row1 = min(int(self.grid.height), int(row1))
+        if row1 <= row0:
             return
         if not _pages_can_be_dropped():
             self.flush()
             return
-        row1 = min(int(self.grid.height), row0 + rows)
-        if row1 <= row0:
-            return
         for arr in (self.acc, self.wsum, self._labels1, self.label_w):
             _drop_memmap_rows(arr, row0, row1)
+
+    def release_window(self, window: tuple[int, int, int, int]) -> None:
+        """这块覆盖的行先写回再退回。多光谱主路径用 TileRowRelease，避免同一行反复刷盘。"""
+        row0, _col0, rows, _cols = (int(v) for v in window)
+        if rows <= 0:
+            return
+        self.release_rows(row0, row0 + rows)
 
     def evict(self) -> None:
         """成果已写出后，把累加器页从常驻内存退回。下次读拼接线时再从磁盘调入。"""
@@ -779,9 +841,44 @@ class BandRaster:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+def _free_bytes(path: Path) -> int:
+    import shutil
+
+    target = path if path.exists() else path.parent
+    try:
+        return int(shutil.disk_usage(target).free)
+    except OSError:
+        return 0
+
+
+def choose_scratch_base(tmp: Path, home: Path, *, tmp_free: int, home_free: int, home_ok: bool) -> Path:
+    """临时目录剩余不足 64 GB、且 /home 至少多出 32 GB 时，累加器改到 /home。"""
+    if home_ok and tmp_free < 64 * 2**30 and home_free > tmp_free + 32 * 2**30:
+        return home / "ms-scratch"
+    return tmp
+
+
 def scratch_dir() -> Path:
-    """正射累加器的落盘目录。默认容器本地 /tmp（ext4），不要放到宿主机共享卷上做 mmap。"""
-    return Path(os.environ.get("MS_SCRATCH_DIR") or tempfile.gettempdir()) / "ms_ortho"
+    """正射累加器的落盘目录。
+
+    指定 MS_SCRATCH_DIR 时用它。否则用本机临时目录。临时目录所在分区快满、
+    而 /home 明显更空时改到 /home/ms-scratch。容器里两者多半是同一块盘，
+    剩余一样，仍用临时目录。不要把累加器 mmap 到快满的根分区上。
+    """
+    env = os.environ.get("MS_SCRATCH_DIR")
+    if env:
+        base = Path(env)
+    else:
+        tmp = Path(tempfile.gettempdir())
+        home = Path("/home")
+        base = choose_scratch_base(
+            tmp,
+            home,
+            tmp_free=_free_bytes(tmp),
+            home_free=_free_bytes(home) if home.is_dir() else 0,
+            home_ok=home.is_dir(),
+        )
+    return base / "ms_ortho"
 
 
 def _sweep_stale_scratch(root: Path) -> None:

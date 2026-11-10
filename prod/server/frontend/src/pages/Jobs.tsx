@@ -12,6 +12,7 @@ import JobRowMenu from "../components/JobRowMenu";
 import JobStageFlow from "../components/JobStageFlow";
 import JobProcessTable from "../components/JobProcessTable";
 import JobDetailModal from "../components/JobDetailModal";
+import JobParamsModal from "../components/JobParamsModal";
 import JobRgbThumbnail from "../components/JobRgbThumbnail";
 import { ResizableHeader, useColumnWidths } from "../components/ResizableHeader";
 import { attachJobProcesses, fmtMb, jobComputeState } from "../processTree";
@@ -67,6 +68,7 @@ export default function JobsPage() {
   const [inspect, setInspect] = useState<any>(null);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [detailId, setDetailId] = useState<string | undefined>();
+  const [paramsId, setParamsId] = useState<string | undefined>();
   const nav = useNavigate();
   const { widths, setWidth, total } = useColumnWidths("jobs-table-v11", COL_W);
 
@@ -347,6 +349,7 @@ export default function JobsPage() {
                   computeState={r.compute_state}
                   allowRun={allowRun}
                   onDetail={() => setDetailId(r.id)}
+                  onParamsDetail={() => setParamsId(r.id)}
                   onEvaluate={() => nav(`/jobs/${r.id}/accuracy`)}
                   onReport={async () => {
                     try {
@@ -376,6 +379,7 @@ export default function JobsPage() {
         />
       </Card>
 
+      <JobParamsModal open={Boolean(paramsId)} jobId={paramsId} onClose={() => setParamsId(undefined)} />
       <JobDetailModal
         open={Boolean(detailId)}
         jobId={detailId}

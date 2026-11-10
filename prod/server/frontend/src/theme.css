@@ -2023,6 +2023,28 @@ body.is-col-resizing {
   max-height: 280px;
 }
 
+.job-snapshot-stage {
+  margin-top: 12px;
+}
+
+.job-snapshot-stage:first-of-type {
+  margin-top: 0;
+}
+
+.job-snapshot-stage-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 650;
+  margin-bottom: 6px;
+}
+
+.job-snapshot-stage-title span {
+  color: var(--mosaic-muted);
+  font-weight: 450;
+  font-size: 12px;
+}
+
 .mosaic-role-member {
   display: flex;
   align-items: center;

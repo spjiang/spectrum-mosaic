@@ -596,6 +596,37 @@ def test_comparison_report_text_includes_verdicts():
     assert rep.ok is False
 
 
+def test_coarse_delivery_keeps_a_fine_edge():
+    """降低分辨率只做块平均：细格网边缘的一列有效高程必须留在交付格网上。"""
+    from ms_mosaic.dsm import aggregate_height_field
+    from ms_mosaic.grid import delivery_match_factor
+
+    assert delivery_match_factor(0.09324, 0.0889) == 1
+    assert delivery_match_factor(0.18648, 0.09324) == 2
+    assert delivery_match_factor(0.37296, 0.08867) == 5
+
+    delivery = _grid(4, gsd=0.4)
+    fine = delivery.refine(0.5)
+    z = np.full(fine.shape, np.nan)
+    z[:, -1] = 100.0
+    z[0, 0] = 10.0
+    z[0, 1] = 30.0
+    field = HeightField(
+        fine,
+        z.astype(np.float32),
+        np.where(np.isfinite(z), 0.8, np.nan).astype(np.float32),
+        np.where(np.isfinite(z), 3, 0).astype(np.int32),
+    )
+    out = aggregate_height_field(field, delivery, 2)
+    assert out.grid == delivery
+    assert out.z.shape == delivery.shape
+    assert np.isnan(out.z[2, 1])
+    assert out.z[0, 0] == pytest.approx(20.0)
+    assert out.z[:, -1] == pytest.approx(100.0)
+    assert out.confidence[0, 0] == pytest.approx(0.8)
+    assert int(out.view_count[0, 0]) == 3
+
+
 def test_geometric_shift_recovers_known_translation(tmp_path):
     """人为把影像平移已知距离，相位相关应当把它找回来。"""
     from scipy.ndimage import gaussian_filter

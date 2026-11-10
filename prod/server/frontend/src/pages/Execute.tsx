@@ -465,8 +465,8 @@ export default function ExecutePage() {
                   <Tooltip
                     title={
                       nativeGsd
-                        ? `像元越小，分辨率越高。当前原始像元 ${nativeGsd.toFixed(4)} m，比降低后的 ${(nativeGsd * 4).toFixed(4)} m 更细。选「降低到 1/2」或「降低到 1/4」是把像元放大，分辨率变低，正射更快。`
-                        : "像元越小，分辨率越高。数字越小，一个像元盖住的地面越小、看得越细。选「降低到 1/2」或「降低到 1/4」是把像元放大，分辨率变低，正射更快。"
+                        ? `像元越小，分辨率越高。当前原始像元 ${nativeGsd.toFixed(4)} m，比降低后的 ${(nativeGsd * 4).toFixed(4)} m 更细。选「降低到 1/2」或「降低到 1/4」只放大成果像元，覆盖仍按相片足迹，正射更快。`
+                        : "像元越小，分辨率越高。数字越小，一个像元盖住的地面越小、看得越细。选「降低到 1/2」或「降低到 1/4」只放大成果像元，覆盖仍按相片足迹，正射更快。"
                     }
                   >
                     <button type="button" className="param-help-btn" aria-label="降低分辨率说明">
@@ -505,7 +505,7 @@ export default function ExecutePage() {
                     <div style={{ marginTop: 4 }}>
                       <Typography.Text type="secondary">
                         {nativeGsd
-                          ? `原始分辨率 ${nativeGsd.toFixed(4)} m（航高取 ${gsdSamples} 张 Color）。选 1/2、1/4 会把像元放大，正射更快。`
+                          ? `原始分辨率 ${nativeGsd.toFixed(4)} m（航高取 ${gsdSamples} 张 Color）。选 1/2、1/4 只放大成果像元，覆盖不缩小。`
                           : gsdNote || "填写测区目录后自动读取原始分辨率"}
                       </Typography.Text>
                     </div>

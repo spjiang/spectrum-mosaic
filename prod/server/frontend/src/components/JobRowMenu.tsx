@@ -8,6 +8,7 @@ import {
   EditOutlined,
   EyeOutlined,
   FileSearchOutlined,
+  ProfileOutlined,
   FundViewOutlined,
   PauseCircleOutlined,
   QuestionCircleOutlined,
@@ -48,6 +49,7 @@ export default function JobRowMenu({
   allowRun,
   hasRgb,
   onDetail,
+  onParamsDetail,
   onEvaluate,
   onReport,
   onQuality,
@@ -64,6 +66,7 @@ export default function JobRowMenu({
   computeState?: ComputeState;
   allowRun: boolean;
   onDetail: () => void;
+  onParamsDetail: () => void;
   onEvaluate: () => void;
   onReport: () => void;
   onQuality: () => void;
@@ -140,6 +143,14 @@ export default function JobRowMenu({
       tone: "primary",
       help: "查看流程、分辨率、输入输出路径和运行日志。",
       onClick: () => run(onDetail),
+    },
+    {
+      key: "params",
+      label: "参数详情",
+      icon: <ProfileOutlined />,
+      tone: "primary",
+      help: "按处理流程查看这次运行实际保存的全部参数。后来改方案不会改变这里。",
+      onClick: () => run(onParamsDetail),
     },
     {
       key: "mosaic",

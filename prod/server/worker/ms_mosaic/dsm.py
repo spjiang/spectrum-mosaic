@@ -422,6 +422,47 @@ def _block_reduce_nanmean(a: np.ndarray, f: int) -> np.ndarray:
     return np.where(cnt > 0, num / np.maximum(cnt, 1), np.nan)
 
 
+def _fit_block(a: np.ndarray, shape: tuple[int, int], fill: float) -> np.ndarray:
+    """裁或补到正好 factor 倍的交付格网，多出来的边丢掉，缺的边当无效。"""
+    out = np.full(shape, fill, dtype=np.float64)
+    h = min(int(shape[0]), int(a.shape[0]))
+    w = min(int(shape[1]), int(a.shape[1]))
+    out[:h, :w] = np.asarray(a, np.float64)[:h, :w]
+    return out
+
+
+def _block_reduce_nanmax(a: np.ndarray, valid: np.ndarray, f: int) -> np.ndarray:
+    """块内有效样本的最大值。没有有效样本的块给 nan。"""
+    filled = np.where(valid, a, -np.inf)
+    blocks = filled.reshape(a.shape[0] // f, f, a.shape[1] // f, f)
+    reduced = blocks.max(axis=(1, 3))
+    return np.where(np.isfinite(reduced), reduced, np.nan)
+
+
+def aggregate_height_field(field: HeightField, delivery: Grid, factor: int) -> HeightField:
+    """把细格网高程收成交付格网：块内有效值取均值，空块保持空。
+
+    一个交付像元里只要有一个细格网解出高程，该像元就有效。无效值不参与平均，
+    所以降低分辨率不会把航带两侧收成 nodata。
+    """
+    f = int(factor)
+    if f <= 1:
+        return field
+    shape = (delivery.height * f, delivery.width * f)
+    z = _fit_block(field.z, shape, np.nan)
+    finite = np.isfinite(z)
+    conf = _fit_block(field.confidence, shape, np.nan)
+    views = _fit_block(field.view_count, shape, 0.0)
+    z_out = _block_reduce_nanmean(z, f).astype(np.float32)
+    conf_out = _block_reduce_nanmax(conf, finite, f).astype(np.float32)
+    view_blocks = views.reshape(shape[0] // f, f, shape[1] // f, f)
+    view_out = view_blocks.max(axis=(1, 3)).astype(np.int32)
+    stats = dict(field.stats)
+    stats["match_gsd"] = float(field.grid.gsd)
+    stats["delivery_factor"] = f
+    return HeightField(delivery, z_out, conf_out, view_out, stats)
+
+
 def _fill_large_gaps_coarse(
     z: np.ndarray, take: np.ndarray, *, max_component_cells: int
 ) -> np.ndarray:

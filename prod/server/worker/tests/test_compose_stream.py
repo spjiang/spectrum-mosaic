@@ -10,7 +10,14 @@ import numpy as np
 import rasterio
 from scipy.ndimage import distance_transform_edt
 
-from ms_mosaic.compose import BandRaster, _sweep_stale_scratch, ms_parent_reserve_mb, write_band_product
+from ms_mosaic.compose import (
+    BandRaster,
+    TileRowRelease,
+    _sweep_stale_scratch,
+    choose_scratch_base,
+    ms_parent_reserve_mb,
+    write_band_product,
+)
 from ms_mosaic.dense import _sample_bilinear
 from ms_mosaic.grid import Grid
 from ms_mosaic.products import RGB_BAND, apply_coverage_mask, group_name, quantize, rgb_with_alpha
@@ -125,15 +132,69 @@ def test_release_window_keeps_overlap_and_labels(tmp_path: Path):
         dropped.close()
 
 
-def test_parent_reserve_is_one_tile_when_pages_drop(monkeypatch):
-    """能退页时不为 7 幅整图预留；退不了页时按整幅计，进程数才会降下来。"""
+def test_parent_reserve_is_open_rows_when_pages_drop(monkeypatch):
+    """能退页时只留几行块，不按 7 幅整图预留；退不了页时按整幅计。"""
     grid = _grid(8000, 8000)
     monkeypatch.setattr("ms_mosaic.compose._pages_can_be_dropped", lambda: True)
     hot = ms_parent_reserve_mb(grid, 7)
-    assert hot < 100
+    assert hot < 2000
     monkeypatch.setattr("ms_mosaic.compose._pages_can_be_dropped", lambda: False)
     whole = ms_parent_reserve_mb(grid, 7)
     assert whole > 5000
+    assert hot < whole
+
+
+def test_tile_row_release_waits_for_the_whole_row():
+    """同一行没交齐不退页；交齐后只退不再被相邻行改写的行。"""
+    rel = TileRowRelease(100, 80, 40, 10)
+    assert rel.add(0) == []
+    assert rel.add(1) == [(0, 30)]
+    assert rel.add(5) == []
+    assert rel.add(4) == [(90, 100)]
+    assert rel.add(2) == []
+    assert rel.add(3) == [(30, 90)]
+
+
+def test_row_release_matches_keeping_pages(tmp_path: Path):
+    """按行退回后，乱序累加的结果与一直留在内存里相同。"""
+    grid = _grid(100, 80)
+    kept = BandRaster(grid, 1, scratch_root=tmp_path)
+    dropped = BandRaster(grid, 1, scratch_root=tmp_path)
+    rel = TileRowRelease(grid.height, grid.width, 40, 10)
+    windows = list(grid.tiles(40, overlap=10))
+    rng = np.random.default_rng(6)
+    order = [4, 5, 0, 2, 1, 3]
+    try:
+        for index in order:
+            window = windows[index]
+            _r0, _c0, rows, cols = window
+            tile = rng.uniform(1, 50, (1, rows, cols)).astype(np.float32)
+            labels = np.full((rows, cols), index, np.int16)
+            weight = rng.uniform(0.2, 1.0, (rows, cols)).astype(np.float32)
+            views = [10 + index]
+            kept.add_tile(window, tile, labels, views, weight)
+            dropped.add_tile(window, tile, labels, views, weight)
+            for row0, row1 in rel.add(index):
+                dropped.release_rows(row0, row1)
+        np.testing.assert_allclose(dropped.to_array(), kept.to_array(), rtol=1e-5, equal_nan=True)
+        assert np.array_equal(dropped.labels, kept.labels)
+    finally:
+        kept.close()
+        dropped.close()
+
+
+def test_scratch_base_leaves_a_full_root(tmp_path: Path):
+    tmp = tmp_path / "tmp"
+    home = tmp_path / "home"
+    assert choose_scratch_base(
+        tmp, home, tmp_free=10 * 2**30, home_free=200 * 2**30, home_ok=True
+    ) == home / "ms-scratch"
+    assert choose_scratch_base(
+        tmp, home, tmp_free=80 * 2**30, home_free=200 * 2**30, home_ok=True
+    ) == tmp
+    assert choose_scratch_base(
+        tmp, home, tmp_free=10 * 2**30, home_free=20 * 2**30, home_ok=True
+    ) == tmp
 
 
 def test_tile_labels_are_global_view_indices(tmp_path: Path):

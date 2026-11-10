@@ -15,6 +15,9 @@ from rasterio.transform import Affine
 
 # 正射 GSD 相对 DSM 的比例，与商业成品一致
 ORTHO_OVER_DSM = 0.5
+# 交付格网比原生 DSM 粗过这么多，密集匹配才改在原生格网上做。
+# 提交时航高取整会让「不降低」的 GSD 比估计值大约 5%，不能当成降分辨率。
+MATCH_COARSER_THAN = 1.5
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,21 @@ def estimate_native_gsd(camera, poses: dict, ground_z: float) -> float:
 def estimate_dsm_gsd(camera, poses: dict, ground_z: float) -> float:
     """DSM 取原生 GSD 的 2 倍，正射再 refine 回一半。"""
     return 2.0 * estimate_native_gsd(camera, poses, ground_z)
+
+
+def delivery_match_factor(delivery_gsd: float, match_gsd: float) -> int:
+    """交付 DSM 比原生 DSM 粗时，返回匹配格网相对交付格网的整数倍数。
+
+    倍数为 1：就在交付格网上匹配。降低到 1/2、1/4 时倍数 ≥ 2，匹配像元不粗于
+    航高/焦距给出的原生 DSM，成果再按块平均收成交付格网。
+    """
+    delivery = float(delivery_gsd)
+    match = float(match_gsd)
+    if delivery <= 0.0 or match <= 0.0:
+        return 1
+    if delivery < match * MATCH_COARSER_THAN:
+        return 1
+    return max(2, int(math.ceil(delivery / match - 1e-9)))
 
 
 def estimate_z_margin_m(points: np.ndarray) -> float:

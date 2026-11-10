@@ -43,6 +43,7 @@ from ms_mosaic.dense import DenseConfig, compute_height_field
 from ms_mosaic.dsm import (
     Dsm,
     MAX_FILL_GAP_M,
+    aggregate_height_field,
     build_dsm,
     complete_dsm_coverage,
     flatten_edge_z,
@@ -52,6 +53,7 @@ from ms_mosaic.grid import (
     ORTHO_OVER_DSM,
     Grid,
     coverage_from_footprints,
+    delivery_match_factor,
     erode_coverage,
     estimate_dsm_gsd,
     estimate_native_gsd,
@@ -474,8 +476,17 @@ def run_mosaic(
             dense_cfg.n_layers = int(n_layers)
         if max_tilt_deg is not None:
             dense_cfg.max_tilt_deg = float(max_tilt_deg)
+        match_gsd = 2.0 * float(native)
+        factor = 1 if lock is not None else delivery_match_factor(float(grid.gsd), match_gsd)
+        match_grid = grid if factor == 1 else grid.refine(1.0 / factor)
+        if factor > 1:
+            log(
+                f"交付 DSM {grid.gsd:.4f} m 粗于匹配所需 {match_gsd:.4f} m，"
+                f"密集匹配在 {match_grid.gsd:.4f} m（{match_grid.width}×{match_grid.height}）上做，"
+                f"再按 {factor}×{factor} 块平均收成交付格网"
+            )
         field = compute_height_field(
-            grid,
+            match_grid,
             pts,
             {i: sparse.camera for i in dense_poses},
             dense_poses,
@@ -484,6 +495,13 @@ def run_mosaic(
             log=log,
             workers=dense_workers,
         )
+        if factor > 1:
+            fine_ratio = float(np.isfinite(field.z).mean()) if field.z.size else 0.0
+            field = aggregate_height_field(field, grid, factor)
+            log(
+                f"交付格网有效 {float(np.isfinite(field.z).mean()):.1%}"
+                f"（细格网 {fine_ratio:.1%}，无效值不参与块平均）"
+            )
         timings["dense"] = time.perf_counter() - t
         reporter.stage_done("S3_dense", timings["dense"])
         early = _barrier(control, reporter, "S3_dense")
