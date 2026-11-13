@@ -54,14 +54,16 @@ function wide(key: string, value: unknown, valueType?: string): boolean {
   return fmt(key, value).length > 42;
 }
 
-export function JobSnapshotBody({
+export default function JobSnapshot({
   snapshot,
   profileId,
   profileVersion,
+  defaultOpen = false,
 }: {
   snapshot?: Record<string, unknown> | null;
   profileId?: number | null;
   profileVersion?: number | null;
+  defaultOpen?: boolean;
 }) {
   const snap = snapshot || {};
   const [defs, setDefs] = useState<Def[]>([]);
@@ -102,12 +104,20 @@ export function JobSnapshotBody({
     .filter((key) => !placed.has(key) && !HIDDEN.has(key))
     .sort();
 
-  const body = (
+  return (
+    <Collapse
+      size="small"
+      defaultActiveKey={defaultOpen ? ["snap"] : []}
+      items={[
+        {
+          key: "snap",
+          label: "当时保存的配置",
+          children: (
             <div>
               <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
                 点击执行时写入的参数，按处理流程节点排列
                 {profileId != null ? `（方案 #${profileId} v${profileVersion ?? "-"}）` : ""}
-                。后来改方案不会改这里。空三进程数按本次任务的 CPU 核数计算，不单列。
+                。后来改方案不会改这里。
               </Typography.Paragraph>
               {groups.map(({ stage, rows }) => (
                 <div key={stage} className="job-snapshot-stage">
@@ -143,32 +153,6 @@ export function JobSnapshotBody({
                 </div>
               )}
             </div>
-  );
-
-  return body;
-}
-
-export default function JobSnapshot({
-  snapshot,
-  profileId,
-  profileVersion,
-  defaultOpen = false,
-}: {
-  snapshot?: Record<string, unknown> | null;
-  profileId?: number | null;
-  profileVersion?: number | null;
-  defaultOpen?: boolean;
-}) {
-  return (
-    <Collapse
-      size="small"
-      defaultActiveKey={defaultOpen ? ["snap"] : []}
-      items={[
-        {
-          key: "snap",
-          label: "当时保存的配置",
-          children: (
-            <JobSnapshotBody snapshot={snapshot} profileId={profileId} profileVersion={profileVersion} />
           ),
         },
       ]}
