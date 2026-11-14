@@ -4,7 +4,7 @@
 #   GPU_HOST=root@10.17.19.198 GPU_PASS='…' bash scripts/upload_max_full_to_198.sh
 #   GPU_HOST=… GPU_PASS=… bash scripts/upload_max_full_to_198.sh check   # 只看远端空间与是否已有数据
 #
-# 本机源目录默认：prod/server/data/input/MAX_20251017/（含 MAX_20251017_001、可选 拼图结果）
+# 本机源目录默认：mosaic/server/data/input/MAX_20251017/（含 MAX_20251017_001、可选 拼图结果）
 # 远端主存：/home/spectrum-mosaic/data/MAX_20251017/
 # 宿主机 Worker（server/data 挂成 /data）通过符号链接指向同一目录，避免重复占 30G。
 set -euo pipefail

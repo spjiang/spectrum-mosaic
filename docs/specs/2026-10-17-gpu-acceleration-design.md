@@ -2,7 +2,7 @@
 
 > 状态：待评审
 > 日期：2026-10-17
-> 范围：`prod/server`（worker / backend / frontend / db / compose）
+> 范围：`mosaic/server`（worker / backend / frontend / db / compose）
 > 性质：生产交付。客户现场为 RTX 4090，目标 S810 全规模（约 2000 张、8 波段、全分辨率）25 分钟。
 
 ---
@@ -205,4 +205,4 @@ worker：stage_runner → pipeline
 
 - `算法出处.md`：增加「GPU 加速」相关行，写明每个 GPU 实现的出处和许可证查证结论。
 - `worker/docs/参数说明.md`、`cli-usage.md`：补充 `gpu`、`gpu_memory_gb` 两个参数。
-- `prod/server/README.md`：补充 GPU 部署方式（第 7.1 节）。
+- `mosaic/server/README.md`：补充 GPU 部署方式（第 7.1 节）。

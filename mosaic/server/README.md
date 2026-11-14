@@ -18,14 +18,14 @@ server/
 ## 快速启动
 
 ```bash
-cd algorithm/projects/数据融合/prod/server
+cd mosaic/server
 ./scripts/dev_up.sh
 ```
 
 或：
 
 ```bash
-cd algorithm/projects/数据融合/prod/server
+cd mosaic/server
 cp .env.example .env
 # 按需改 DATASET_MAX_20251017 / JWT_SECRET / 密码
 docker compose up -d --build

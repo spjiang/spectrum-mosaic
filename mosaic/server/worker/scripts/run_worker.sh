@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本机调试 Worker。正式默认用 prod/server compose 里的 worker 容器，不要两边一起开。
+# 本机调试 Worker。正式默认用 mosaic/server compose 里的 worker 容器，不要两边一起开。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../local_defaults.sh
