@@ -12,11 +12,27 @@ from app.config import Settings
 from app.models import ParamDefinition, ParamProfileValue, SystemSetting, User
 from app.param_catalog import PARAM_LABELS
 from app.services.mq import check_rabbitmq, check_worker
+from app.services.paths import trial_dirs
 
 log = logging.getLogger(__name__)
 
 
+def _db_dir() -> Path:
+    here = Path(__file__).resolve()
+    for cand in (
+        here.parents[2] / "db",
+        here.parents[1] / "db",
+        Path("/db"),
+    ):
+        if cand.is_dir():
+            return cand
+    return here.parents[2] / "db"
+
+
 def _migration_dir() -> Path:
+    db = _db_dir() / "migrations"
+    if db.is_dir():
+        return db
     here = Path(__file__).resolve()
     for cand in (
         here.parents[1] / "db" / "migrations",
@@ -298,20 +314,64 @@ def _migrate_legacy_source_paths(db: Session) -> None:
         log.info("migrated %s legacy paths → /data layout", n)
 
 
+def _table_exists(db: Session, name: str) -> bool:
+    return bool(
+        db.scalar(
+            text("SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=:n"),
+            {"n": name},
+        )
+    )
+
+
+def _ensure_schema(db: Session) -> None:
+    """空库应用 init.sql；缺文件时回退 migrations/001_init.sql。"""
+    if _table_exists(db, "roles"):
+        return
+    init_sql = _db_dir() / "init.sql"
+    if init_sql.is_file():
+        log.info("empty database detected; applying %s", init_sql)
+        _run_sql_file(db, init_sql)
+    else:
+        legacy = _migration_dir() / "001_init.sql"
+        log.warning("missing %s; falling back to %s", init_sql, legacy)
+        _run_sql_file(db, legacy)
+    if not _table_exists(db, "roles"):
+        raise RuntimeError("init.sql 执行后仍无 roles 表，无法继续 bootstrap")
+
+
+def _ensure_init_data(db: Session) -> None:
+    data = _db_dir() / "init-data.sql"
+    if not data.is_file():
+        raise RuntimeError(f"缺少初始数据文件: {data}")
+    log.info("applying %s", data)
+    _run_sql_file(db, data)
+
+
+def _ensure_trial_dirs() -> None:
+    for username in ("trial1", "trial2"):
+        for root in trial_dirs(username):
+            try:
+                Path(root).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.warning("mkdir %s failed: %s", root, exc)
+
+
 def bootstrap(db: Session, settings: Settings) -> None:
     t0 = time.perf_counter()
+    _ensure_schema(db)
     for name in ("admin", "configurator", "executor", "viewer"):
         ensure_role(db, name)
     db.commit()
     _ensure_param_schema(db)
     _ensure_param_catalog(db)
     _ensure_param_schema(db)
+    # label 列须先于带 label 的 INSERT（memory_gb / cpus）
+    _ensure_param_labels(db)
     _ensure_memory_gb_param(db)
     _ensure_job_memory_gb(db)
     _ensure_cpus_param(db)
     _ensure_job_cpus(db)
     _ensure_job_seq(db)
-    _ensure_param_labels(db)
     _ensure_job_run_logs(db)
     _ensure_sql_named(db, "011_terrain_band.sql")
     _ensure_sql_named(db, "012_grid_lock_and_radiometry.sql")
@@ -331,6 +391,7 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "025_job_title.sql")
     _ensure_user_expires_at(db)
     _migrate_legacy_source_paths(db)
+    _ensure_init_data(db)
     user = db.scalar(select(User).where(User.username == settings.bootstrap_admin_user))
     if user is None:
         admin = User(
@@ -341,24 +402,8 @@ def bootstrap(db: Session, settings: Settings) -> None:
         admin.roles.append(ensure_role(db, "admin"))
         db.add(admin)
         db.commit()
-    _ensure_demo_users(db)
+    _ensure_trial_dirs()
     log.info("bootstrap finished in %.2fs", time.perf_counter() - t0)
-
-
-def _ensure_demo_users(db: Session) -> None:
-    """首次安装补齐示例角色账号，便于对照菜单权限。已存在则跳过。"""
-    samples = (
-        ("executor", "executor123", "executor"),
-        ("configurator", "configurator123", "configurator"),
-        ("viewer", "viewer123", "viewer"),
-    )
-    for username, password, role in samples:
-        if db.scalar(select(User).where(User.username == username)) is not None:
-            continue
-        u = User(username=username, password_hash=hash_password(password), is_active=True)
-        u.roles.append(ensure_role(db, role))
-        db.add(u)
-    db.commit()
 
 
 def health_payload(db: Session, settings: Settings) -> dict:

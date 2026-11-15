@@ -1,9 +1,13 @@
--- visual_server initial schema
+-- DEPRECATED as schema source of truth.
+-- Canonical schema: ../init.sql
+-- Kept temporarily for older docs; prefer mounting ../init.sql in compose.
+
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username VARCHAR(64) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -92,7 +96,3 @@ CREATE TABLE IF NOT EXISTS system_settings (
   key VARCHAR(64) PRIMARY KEY,
   value JSONB NOT NULL
 );
-
-INSERT INTO roles (name) VALUES
-  ('admin'), ('configurator'), ('executor'), ('viewer')
-ON CONFLICT DO NOTHING;
