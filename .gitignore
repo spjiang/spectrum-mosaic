@@ -36,3 +36,14 @@ docs/需求/测试正式数据/
 test/work/
 test/out/
 test/input_bench/
+
+# 发版台密钥与产物（私钥严禁入库）
+release/keys/*
+!release/keys/.gitkeep
+release/artifacts/**
+!release/artifacts/.gitkeep
+release/build/.embed/license_public.pem
+release/server/frontend/node_modules/
+release/server/frontend/dist/
+
+.worktrees/
