@@ -1,0 +1,59 @@
+name: release-console
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-release}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-release_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-release_console}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - release_pgdata:/var/lib/postgresql/data
+      - ./db/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-release} -d ${POSTGRES_DB:-release_console}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-release}:${POSTGRES_PASSWORD:-release_secret}@postgres:5432/${POSTGRES_DB:-release_console}
+      JWT_SECRET: ${JWT_SECRET:-change-me-release-jwt}
+      BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin123}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8180,http://127.0.0.1:8180}
+      KEYS_DIR: /keys
+      ARTIFACTS_DIR: /artifacts
+      # 本机绝对路径，供「查看内容」展示；可在 .env 覆盖 ARTIFACTS_HOST_DIR
+      ARTIFACTS_HOST_DIR: ${ARTIFACTS_HOST_DIR:-}
+      MOSAIC_SERVER_ROOT: /workspace/mosaic/server
+      RELEASE_BUILD_ROOT: /workspace/release/build
+      PRODUCT_NAME: spectrum-mosaic
+    ports:
+      - "${BACKEND_PORT:-8100}:8100"
+    volumes:
+      - ../keys:/keys
+      - ../artifacts:/artifacts
+      - ../..:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./db/migrations:/db/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    group_add:
+      - "0"
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-8180}:80"
+    depends_on:
+      - backend
+
+volumes:
+  release_pgdata:
+    name: release_pgdata

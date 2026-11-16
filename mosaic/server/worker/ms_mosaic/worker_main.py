@@ -293,12 +293,32 @@ def _run_payload(url: str, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
+    try:
+        from ms_mosaic.license_check import LicenseError, enforce_license_or_raise
+
+        enforce_license_or_raise()
+    except LicenseError as exc:
+        log.error("%s", exc)
+        return 2
     url = os.environ.get("RABBITMQ_URL", "amqp://mosaic:mosaic_secret@127.0.0.1:5672/")
     leftover = terminate_job_workers(os.getpid())
     if leftover:
         log.warning("startup leftover compute: %s", leftover)
     worker_status.start_heartbeat()
     stop = threading.Event()
+
+    def _lease_supervisor() -> None:
+        from ms_mosaic.license_check import LEASE_CHECK_INTERVAL_SECONDS, LicenseError, enforce_license_or_raise
+
+        while not stop.wait(LEASE_CHECK_INTERVAL_SECONDS):
+            try:
+                enforce_license_or_raise()
+            except LicenseError as exc:
+                log.error("%s", exc)
+                os._exit(2)
+
+    if os.environ.get("MOSAIC_REQUIRE_LICENSE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        threading.Thread(target=_lease_supervisor, daemon=True, name="worker-license").start()
     threading.Thread(target=_control_supervisor, args=(url, stop), daemon=True, name="worker-control").start()
     threading.Thread(target=_consume_jobs, args=(url, stop), daemon=True, name="worker-jobs").start()
     worker_status.set_listening(True)

@@ -12,7 +12,7 @@ from app.config import Settings
 from app.models import ParamDefinition, ParamProfileValue, SystemSetting, User
 from app.param_catalog import PARAM_LABELS
 from app.services.mq import check_rabbitmq, check_worker
-from app.services.paths import trial_dirs
+from app.services.paths import ensure_worker_tree, trial_dirs
 
 log = logging.getLogger(__name__)
 
@@ -348,10 +348,11 @@ def _ensure_init_data(db: Session) -> None:
 
 
 def _ensure_trial_dirs() -> None:
+    boundary = Path("/data")
     for username in ("trial1", "trial2"):
         for root in trial_dirs(username):
             try:
-                Path(root).mkdir(parents=True, exist_ok=True)
+                ensure_worker_tree(Path(root), stop=boundary)
             except OSError as exc:
                 log.warning("mkdir %s failed: %s", root, exc)
 
@@ -365,7 +366,7 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_param_schema(db)
     _ensure_param_catalog(db)
     _ensure_param_schema(db)
-    # label 列须先于带 label 的 INSERT（memory_gb / cpus）
+    # label 列须先于带 label 的 INSERT（memory_gb / cpus），否则空库升级会中断后续迁移
     _ensure_param_labels(db)
     _ensure_memory_gb_param(db)
     _ensure_job_memory_gb(db)

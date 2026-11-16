@@ -105,6 +105,13 @@ def main(argv: Sequence[str] | None = None, *, rabbitmq_url: str | None = None) 
     if len(args) < 2:
         log.error("用法: python -m ms_mosaic.job_child --ms-job-<id> <payload.json>")
         return 2
+    try:
+        from ms_mosaic.license_check import LicenseError, enforce_license_or_raise
+
+        enforce_license_or_raise()
+    except LicenseError as exc:
+        log.error("%s", exc)
+        return 2
     payload_path = Path(args[-1])
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     url = rabbitmq_url or os.environ.get("RABBITMQ_URL", "amqp://mosaic:mosaic_secret@127.0.0.1:5672/")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,44 @@ def detach_derived_dirs(params: dict, original_output: str) -> None:
 
 
 _USER_DIR = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+# 与 release/build/Dockerfile.worker-customer 的 useradd -u 10001、start.sh 的 WORKER_UID 一致
+WORKER_UID = 10001
+WORKER_GID = 10001
+
+
+def ensure_worker_tree(
+    path: Path,
+    *,
+    stop: Path,
+    uid: int = WORKER_UID,
+    gid: int = WORKER_GID,
+) -> None:
+    """创建 path，并把 stop 之下的每一层交给 worker。
+
+    stop 本身不动（通常是 start.sh 准备好的 /data）。目录模式 0755，只有属主可写。
+    没有 chown 权限时，仅把这些子目录改成 0777，避免试用账号无法落盘。
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    current = path.resolve()
+    boundary = stop.resolve()
+    chain: list[Path] = []
+    while True:
+        if current != boundary:
+            chain.append(current)
+        if current == boundary:
+            break
+        parent = current.parent
+        if parent == current or (boundary not in parent.parents and parent != boundary):
+            break
+        current = parent
+    for directory in reversed(chain):
+        try:
+            os.chown(directory, uid, gid)
+            directory.chmod(0o755)
+        except PermissionError:
+            directory.chmod(0o777)
 
 
 def trial_dirs(username: str) -> tuple[str, str]:

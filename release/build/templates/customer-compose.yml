@@ -1,0 +1,91 @@
+# 客户部署模板：无源码挂载。许可与数据目录单独挂载。
+# 离线包：先 images/load-images.sh，再 compose up（pull_policy: never，禁止悄悄拉仓库）。
+name: spectrum-mosaic-customer
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/{{ARCH}}
+    pull_policy: never
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mosaic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mosaic_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-mosaic_visual}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mosaic} -d ${POSTGRES_DB:-mosaic_visual}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    platform: linux/{{ARCH}}
+    pull_policy: never
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-mosaic}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-mosaic_secret}
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 86400000"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: ${BACKEND_IMAGE:-spectrum-mosaic-backend:{{VERSION}}-{{ARCH}}}
+    platform: linux/{{ARCH}}
+    pull_policy: never
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mosaic}:${POSTGRES_PASSWORD:-mosaic_secret}@postgres:5432/${POSTGRES_DB:-mosaic_visual}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      DATA_ROOTS: /data
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    image: {{IMAGE_NAME}}
+    platform: linux/{{ARCH}}
+    pull_policy: never
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
+      PYTHONPATH: /app
+      MPLBACKEND: Agg
+      DATA_ROOTS: /data
+      WORKER_STATUS_PATH: /data/.worker/status.json
+      MOSAIC_REQUIRE_LICENSE: "1"
+      LICENSE_PATH: /license/license.lic
+      LICENSE_PUBLIC_KEY_PATH: /app/license_public.pem
+      LICENSE_CLOCK_PATH: /data/.license/clock.json
+      LICENSE_CLOCK_TOLERANCE_HOURS: "{{LICENSE_CLOCK_TOLERANCE_HOURS}}"
+      LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-}
+      LICENSE_LEASE_PATH: /data/.license/lease.json
+      HOST_MACHINE_ID_PATH: /host/machine-id
+    volumes:
+      - ./data:/data
+      - ./licenses/{{LICENSE_FILE}}:/license/license.lic:ro
+      - /etc/machine-id:/host/machine-id:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-spectrum-mosaic-frontend:{{VERSION}}-{{ARCH}}}
+    platform: linux/{{ARCH}}
+    pull_policy: never
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

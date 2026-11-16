@@ -1,0 +1,55 @@
+# 客户版 worker：Cython 编译算法模块 + 强制离线许可
+# 构建上下文必须是仓库根目录 spectrum-mosaic/
+FROM python:3.11-slim AS builder
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ \
+        libgomp1 \
+        libglib2.0-0 \
+        libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mosaic/server/worker/requirements-worker.txt /build/worker/requirements-worker.txt
+RUN pip install --no-cache-dir -r /build/worker/requirements-worker.txt \
+    && pip install --no-cache-dir Cython==3.0.11 setuptools wheel
+
+COPY mosaic/server/worker /build/worker
+COPY release/build /build/release/build
+
+WORKDIR /build/worker
+ENV CYTHON_MODULES_FILE=/build/release/build/cython_modules.txt
+RUN chmod +x /build/release/build/compile_in_image.sh \
+    && /build/release/build/compile_in_image.sh /build/worker /build/release/build/cython_modules.txt
+
+FROM python:3.11-slim
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ \
+        libgomp1 \
+        libglib2.0-0 \
+        libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mosaic/server/worker/requirements-worker.txt .
+RUN pip install --no-cache-dir -r requirements-worker.txt \
+    && apt-get purge -y --auto-remove g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/worker/ms_mosaic ./ms_mosaic
+COPY release/build/.embed/license_public.pem /app/license_public.pem
+
+RUN useradd -m -u 10001 mosaic \
+    && chown -R mosaic:mosaic /app \
+    && python -c "import ms_mosaic.license_check; import pathlib; assert not pathlib.Path('ms_mosaic/pipeline.py').exists(), 'pipeline.py must not ship'"
+
+USER mosaic
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    MPLBACKEND=Agg \
+    MOSAIC_REQUIRE_LICENSE=1 \
+    LICENSE_PATH=/license/license.lic \
+    LICENSE_PUBLIC_KEY_PATH=/app/license_public.pem
+
+CMD ["python", "-m", "ms_mosaic.worker_main"]

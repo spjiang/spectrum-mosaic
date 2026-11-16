@@ -1,0 +1,16 @@
+**/.git
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.venv
+**/venv
+**/dist
+mosaic/server/data
+mosaic/server/frontend/node_modules
+mosaic/server/frontend/dist
+release/artifacts
+release/keys
+docs/需求
+**/*.tif
+**/*.zip
+**/.DS_Store

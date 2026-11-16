@@ -1,0 +1,16 @@
+keys/*
+!keys/.gitkeep
+artifacts/**
+!artifacts/.gitkeep
+server/backend/.venv/
+server/backend/.pytest_cache/
+server/frontend/dist/
+server/frontend/node_modules/
+**/.env
+!**/.env.example
+**/__pycache__/
+**/.pytest_cache/
+*.pem
+*.lic
+*.tar
+*.zip
