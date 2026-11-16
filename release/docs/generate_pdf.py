@@ -13,7 +13,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 HERE = Path(__file__).resolve().parent
 MD = HERE / "customer-manual.md"
@@ -32,21 +32,61 @@ def find_font() -> tuple[str, str]:
     raise SystemExit("未找到中文字体（STHeiti）")
 
 
+# Courier 没有汉字，也没有制表符。代码块整段用已嵌入的黑体；行内代码里的中文同样改走黑体。
+_CJK = re.compile(
+    r"[\u2190-\u21ff\u2500-\u257f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]+"
+)
+
+
 def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def mixed_font(s: str, *, mono: bool, nbsp: bool = False) -> str:
+    """正文沿用段落里的黑体。行内代码的英文用 Courier，汉字用黑体。代码块整段黑体，空格改为不换行空格。"""
+    parts: list[str] = []
+    pos = 0
+    for match in _CJK.finditer(s):
+        if match.start() > pos:
+            parts.append(_run(s[pos : match.start()], mono=mono, cjk=False, nbsp=nbsp))
+        parts.append(_run(match.group(), mono=mono, cjk=True, nbsp=nbsp))
+        pos = match.end()
+    if pos < len(s):
+        parts.append(_run(s[pos:], mono=mono, cjk=False, nbsp=nbsp))
+    return "".join(parts)
+
+
+def _run(s: str, *, mono: bool, cjk: bool, nbsp: bool) -> str:
+    text = esc(s)
+    if nbsp:
+        text = text.replace(" ", "&nbsp;")
+    if not mono:
+        return text
+    face = "CN" if cjk else "Courier"
+    return f"<font name='{face}'>{text}</font>"
+
+
 def inline(s: str) -> str:
-    html = esc(s)
-    html = re.sub(r"`([^`]+)`", r"<font face='Courier' size='8'>\1</font>", html)
-    html = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", html)
-    return html
+    chunks: list[str] = []
+    pos = 0
+    for match in re.finditer(r"`([^`]+)`|\*\*([^*]+)\*\*", s):
+        if match.start() > pos:
+            chunks.append(mixed_font(s[pos : match.start()], mono=False))
+        if match.group(1) is not None:
+            chunks.append(mixed_font(match.group(1), mono=True))
+        else:
+            chunks.append("<b>" + mixed_font(match.group(2), mono=False) + "</b>")
+        pos = match.end()
+    if pos < len(s):
+        chunks.append(mixed_font(s[pos:], mono=False))
+    return "".join(chunks)
 
 
 def main() -> None:
     light, medium = find_font()
     pdfmetrics.registerFont(TTFont("CN", light, subfontIndex=0))
     pdfmetrics.registerFont(TTFont("CN-Bold", medium, subfontIndex=0))
+    pdfmetrics.registerFontFamily("CN", normal="CN", bold="CN-Bold", italic="CN", boldItalic="CN-Bold")
 
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="H1", fontName="CN-Bold", fontSize=18, leading=26, spaceAfter=12, spaceBefore=6))
@@ -56,7 +96,7 @@ def main() -> None:
     styles.add(
         ParagraphStyle(
             name="CodeCN",
-            fontName="Courier",
+            fontName="CN",
             fontSize=8.5,
             leading=12,
             backColor=colors.Color(0.95, 0.95, 0.96),
@@ -97,7 +137,7 @@ def main() -> None:
             if re.match(r"^\|?\s*-+", row):
                 continue
             cells = [c.strip() for c in row.strip().strip("|").split("|")]
-            rows.append([Paragraph(esc(c), styles["BodyCN"]) for c in cells])
+            rows.append([Paragraph(inline(c) or "&nbsp;", styles["BodyCN"]) for c in cells])
         if rows:
             t = Table(rows, hAlign="LEFT")
             t.setStyle(
@@ -122,7 +162,8 @@ def main() -> None:
         line = lines[i]
         if line.strip().startswith("```"):
             if in_code:
-                story.append(Preformatted("\n".join(code_buf) or " ", styles["CodeCN"]))
+                block = mixed_font("\n".join(code_buf), mono=False, nbsp=True).replace("\n", "<br/>")
+                story.append(Paragraph(block or "&nbsp;", styles["CodeCN"]))
                 code_buf = []
                 in_code = False
             else:
@@ -148,7 +189,7 @@ def main() -> None:
         elif line.startswith("### "):
             story.append(Paragraph(esc(line[4:].strip()), styles["H3"]))
         elif re.match(r"^\d+\.\s", line.strip()) or line.strip().startswith("- "):
-            story.append(Paragraph("• " + esc(re.sub(r"^(\d+\.\s|- )", "", line.strip())), styles["LiCN"]))
+            story.append(Paragraph("• " + inline(re.sub(r"^(\d+\.\s|- )", "", line.strip())), styles["LiCN"]))
         elif line.strip() == "":
             story.append(Spacer(1, 4))
         elif line.strip().startswith("*") and line.strip().endswith("*"):
