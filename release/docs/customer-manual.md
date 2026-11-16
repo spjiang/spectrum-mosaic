@@ -116,7 +116,7 @@ chmod +x start.sh
 docker compose up -d
 ```
 
-默认 Web 地址：`http://localhost:8080`（以 `.env` / compose 端口为准）。
+默认 Web 地址：`http://localhost:9080`（以 `.env` / compose 端口为准）。
 
 查看状态与日志：
 
@@ -266,7 +266,7 @@ docker compose up -d --force-recreate
 | 测试机 | `10.156.196.228` | 内网 Linux；需已装 Docker / Compose |
 | SSH | `ssh root@<测试机IP>` | 口令或密钥由供应商单独告知 |
 | 部署目录 | `/root/mosaic` | 交付 zip 与解压目录放此处 |
-| Web 访问 | `http://<测试机IP>:8080` | 若改过 `.env` 中端口，以实际为准 |
+| Web 访问 | `http://<测试机IP>:9080` | 若改过 `.env` 中端口，以实际为准 |
 
 ### 10.2 操作步骤
 
@@ -329,7 +329,7 @@ worker 日志不应出现「许可无效或已过期」「许可尚未生效」�
 
 **⑥ 浏览器验收**
 
-1. 打开 `http://<测试机IP>:8080`（或 `.env` 中的前端端口）。  
+1. 打开 `http://<测试机IP>:9080`（或 `.env` 中的前端端口）。  
 2. 使用供应商提供的账号登录。  
 3. 进入「新建处理」提交一条小任务，或至少打开「处理记录」确认页面可用。  
 4. 需要时查阅 `docs/操作手册.pdf`。

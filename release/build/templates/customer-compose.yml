@@ -83,7 +83,7 @@ services:
     platform: linux/{{ARCH}}
     pull_policy: never
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
+      - "${FRONTEND_PORT:-9080}:80"
     depends_on:
       - backend
 

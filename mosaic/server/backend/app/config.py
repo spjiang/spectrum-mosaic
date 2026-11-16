@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     cli_module: str = "ms_mosaic"
     cli_cwd: str = "/app"
     cli_probe_args: str = "-h"
-    cors_origins: str = "http://localhost:8080,http://localhost:5173"
+    cors_origins: str = "http://localhost:9080,http://localhost:5173"
     hold_queue_while_awaiting: bool = False
     # compose 里 Worker 容器执行主程序，backend 不再在容器内探测本机 python
     cli_probe: bool = True

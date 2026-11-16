@@ -25,7 +25,7 @@ chmod +x start.sh
 
 `docker-compose.yml` 已设置 `pull_policy: never`：本地没有对应 tag 的镜像时会直接失败，而不会去拉仓库。
 
-页面默认 http://localhost:8080 （以 `.env` 中 `FRONTEND_PORT` 为准）。worker 启动时会校验许可；过期、签名无效、机器指纹不符或系统时间异常回拨时进程退出（详见 `docs/操作手册`）。
+页面默认 http://localhost:9080 （以 `.env` 中 `FRONTEND_PORT` 为准）。worker 启动时会校验许可；过期、签名无效、机器指纹不符或系统时间异常回拨时进程退出（详见 `docs/操作手册`）。
 
 `./start.sh` 会打印本机 `machine_id`。绑定许可须把该值交给供应商写入 `.lic`，并在 `.env` 填写 `LICENSE_SERVER_URL`（发版台地址）。未写 `machine_id` 的旧许可仍按离线方式校验。
 

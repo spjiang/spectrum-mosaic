@@ -63,7 +63,7 @@ echo ">>> docker compose up -d"
 docker compose up -d
 docker compose ps
 
-FRONTEND_PORT=8080
+FRONTEND_PORT=9080
 line=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | head -1 || true)
 if [ -n "$line" ]; then
   val=${line#FRONTEND_PORT=}

@@ -31,7 +31,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-- 前端：http://localhost:8080  
+- 前端：http://localhost:9080  
 - API：http://localhost:8000/api/health  
 - RabbitMQ 管理：http://localhost:15672 （mosaic / mosaic_secret）  
 - 默认管理员：`admin` / `admin123`（请立刻修改）
