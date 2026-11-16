@@ -33,6 +33,7 @@ mosaic/gcp/
 docs/需求/拼图数据集/
 docs/需求/测试结果验证数据/
 docs/需求/测试正式数据/
+docs/需求/无人机数据/
 test/work/
 test/out/
 test/input_bench/
