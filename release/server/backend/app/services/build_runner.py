@@ -40,6 +40,12 @@ def _image_tag(repo: str, version: str, arch: str) -> str:
     return f"{repo}:{version}-{arch}"
 
 
+def worker_customer_dockerfile(context: Path, arch: str) -> Path:
+    """amd64 客户 worker 带 CUDA/CuPy；arm64 仍用 CPU 镜像。"""
+    name = "Dockerfile.worker-customer-gpu" if arch == "amd64" else "Dockerfile.worker-customer"
+    return context / "release" / "build" / name
+
+
 def start_build(release_id: int) -> None:
     with _lock:
         threading.Thread(target=_run_build, args=(release_id,), daemon=True).start()
@@ -283,7 +289,7 @@ def _run_build(release_id: int) -> None:
             raise RuntimeError("公钥不存在，无法打进客户镜像")
 
         context = _workspace()
-        worker_df = context / "release" / "build" / "Dockerfile.worker-customer"
+        worker_df = worker_customer_dockerfile(context, arch)
         backend_df = context / "release" / "build" / "Dockerfile.backend-customer"
         frontend_ctx = context / "mosaic" / "server" / "frontend"
         frontend_df = frontend_ctx / "Dockerfile"
@@ -302,6 +308,7 @@ def _run_build(release_id: int) -> None:
 
         with log_path.open("w", encoding="utf-8") as logf:
             logf.write(f"platform={platform}\n")
+            logf.write(f"worker dockerfile={worker_df}\n")
             logf.write("=== full offline stack build ===\n")
 
             try:

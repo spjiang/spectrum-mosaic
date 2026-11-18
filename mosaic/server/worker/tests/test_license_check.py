@@ -12,6 +12,7 @@ from ms_mosaic.license_check import (
     check_clock_rollback,
     clock_rollback_tolerance,
     enforce_license_or_raise,
+    lease_check_interval_seconds,
     load_clock_state,
     machine_fingerprint,
     verify_license_doc,
@@ -105,6 +106,15 @@ def test_clock_rollback_beyond_tolerance_rejected(tmp_path: Path):
     rolled = first - timedelta(hours=2)
     with pytest.raises(LicenseError, match="时钟回拨"):
         check_clock_rollback(license_id="lic-a", now=rolled, path=clock, tolerance=timedelta(hours=1))
+
+
+def test_lease_interval_from_env(monkeypatch):
+    monkeypatch.setenv("LICENSE_LEASE_CHECK_INTERVAL_HOURS", "2")
+    assert lease_check_interval_seconds() == 2 * 3600
+    monkeypatch.setenv("LICENSE_LEASE_CHECK_INTERVAL_HOURS", "bad")
+    assert lease_check_interval_seconds() == 6 * 3600
+    monkeypatch.setenv("LICENSE_LEASE_CHECK_INTERVAL_HOURS", "0")
+    assert lease_check_interval_seconds() == 6 * 3600
 
 
 def test_clock_tolerance_from_env(monkeypatch):

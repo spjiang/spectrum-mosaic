@@ -19,7 +19,8 @@ DEFAULT_CLOCK_TOLERANCE_HOURS = 1.0
 DEFAULT_CLOCK_PATH = "/data/.license/clock.json"
 DEFAULT_LEASE_PATH = "/data/.license/lease.json"
 DEFAULT_MACHINE_ID_PATH = "/host/machine-id"
-LEASE_CHECK_INTERVAL_SECONDS = 6 * 3600
+DEFAULT_LEASE_CHECK_INTERVAL_HOURS = 6.0
+LEASE_CHECK_INTERVAL_SECONDS = int(DEFAULT_LEASE_CHECK_INTERVAL_HOURS * 3600)
 
 
 class LicenseError(Exception):
@@ -58,6 +59,20 @@ def _fmt_utc(value: datetime) -> str:
 
 def clock_state_path() -> Path:
     return Path(os.environ.get("LICENSE_CLOCK_PATH", DEFAULT_CLOCK_PATH))
+
+
+def lease_check_interval_seconds() -> float:
+    """运行中自动领租约的间隔。交付包写入 LICENSE_LEASE_CHECK_INTERVAL_HOURS。"""
+    raw = os.environ.get("LICENSE_LEASE_CHECK_INTERVAL_HOURS", "").strip()
+    hours = DEFAULT_LEASE_CHECK_INTERVAL_HOURS
+    if raw:
+        try:
+            hours = float(raw)
+        except ValueError:
+            hours = DEFAULT_LEASE_CHECK_INTERVAL_HOURS
+    if hours <= 0:
+        hours = DEFAULT_LEASE_CHECK_INTERVAL_HOURS
+    return hours * 3600
 
 
 def clock_rollback_tolerance() -> timedelta:

@@ -1,0 +1,16 @@
+# 有 NVIDIA 时由 start.sh / start.ps1 自动叠加。
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# 不要单独使用本文件。没卡或 Docker 传不进 GPU 时启动脚本会退回 CPU。
+services:
+  worker:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${MOSAIC_GPUS:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

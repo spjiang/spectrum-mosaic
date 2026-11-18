@@ -25,8 +25,13 @@ if [[ ! -f "$PUB" ]]; then
 fi
 cp "$PUB" "$EMBED"
 
-echo "=== build worker ($PLATFORM) ==="
-docker build --platform "$PLATFORM" -f "$ROOT/release/build/Dockerfile.worker-customer" -t "$WORKER" "$ROOT" | tee "$OUT/build.log"
+if [[ "$ARCH" == "amd64" ]]; then
+  WORKER_DF="$ROOT/release/build/Dockerfile.worker-customer-gpu"
+else
+  WORKER_DF="$ROOT/release/build/Dockerfile.worker-customer"
+fi
+echo "=== build worker ($PLATFORM) df=$(basename "$WORKER_DF") ==="
+docker build --platform "$PLATFORM" -f "$WORKER_DF" -t "$WORKER" "$ROOT" | tee "$OUT/build.log"
 docker save -o "$OUT/worker-image.tar" "$WORKER"
 
 echo "=== build backend ($PLATFORM) ==="

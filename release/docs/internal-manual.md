@@ -90,7 +90,9 @@
 
 登记版本号，并选择 CPU 架构（`amd64` 或 `arm64`）。同一版本号可以各构建一次，交付包不能混用架构。
 
-构建会编译 worker、导出页面、接口、worker、PostgreSQL、RabbitMQ 五份离线镜像。状态变为成功后才能打交付包。失败时在本页看日志。
+**amd64** 的客户 worker 按 GPU 镜像构建（CUDA 12.2 + CuPy），包内另有 `docker-compose.gpu.yml`。客户机有 NVIDIA 且 Docker 能传 GPU 时，启动脚本自动叠加上去；没有卡或传失败则走 CPU，服务仍能起来。**arm64** 仍是 CPU 镜像。不要把 `gpus` 写进默认 `docker-compose.yml`，否则没卡的机器 `compose up` 会失败。
+
+构建会编译 worker、导出页面、接口、worker、PostgreSQL、RabbitMQ 五份离线镜像。状态变为成功后才能打交付包。失败时在本页看日志。GPU 版 worker 比 CPU 版大，构建更久。
 
 **② 客户档案**
 
@@ -106,7 +108,12 @@
 
 **⑤ 操作手册**
 
-这是给客户的部署说明，打 zip 时放进 `docs/操作手册.md` 和 `docs/操作手册.pdf`。不要把本内部手册放进去。
+打 zip 时放进两份拼图服务手册，来源是仓库 `docs/操作文档/`：
+
+- `docs/拼图服务私有部署操作手册.md`
+- `docs/拼图服务WEB操作手册.md`
+
+不要把本内部手册放进去。发版台页面上的「客户操作手册」仍是 `release/docs/customer-manual.md`，不打进交付包。
 
 ---
 
@@ -134,6 +141,10 @@
 **把未绑定许可绑上机器**
 
 在列表里点该许可的「编辑」，填入 64 位指纹，保存。文件会按原 `license_id` 重新签名。再点「下载」，把这个新 `.lic` 交给客户替换。不要只改数据库而不把文件交给客户。
+
+**改到期日或机器指纹**
+
+在「编辑许可」里改生效时间、到期时间或机器指纹，点「确定」后，发版台按原 `license_id` 重新签名。客户机器上已有的 `.lic` 不会跟着变，里面仍是改之前的到期日和指纹。必须按第 8 节把新文件交下去并重启 worker。只在网页上保存，客户现场不会生效。
 
 **停用**
 
@@ -182,14 +193,16 @@ LICENSE_SERVER_URL=http://<发版台主机>:8180
 
 未绑定许可这里留空。
 
-4. 在交付包目录执行：
+4. 在交付包目录重启 worker。只覆盖文件时，正在跑的进程仍拿着旧许可，需要重建容器：
 
 ```bash
-docker compose up -d
+docker compose up -d --force-recreate worker
 docker compose logs --tail=80 worker
 ```
 
-成功时日志里有 `license ok`。已绑定的还会带 `machine=bound`。不应出现「许可无效或已过期」「许可尚未生效」「许可与当前机器不匹配」「无法连接许可服务器」。
+Windows 在同一目录的命令提示符里执行同样两条命令。
+
+成功时日志里有 `license ok`，`expires=` 与发版台当前到期时间一致（日志是 UTC）。已绑定的还会带 `machine=bound`。不应出现「许可无效或已过期」「许可尚未生效」「许可与当前机器不匹配」「无法连接许可服务器」。
 
 客户执行 `./start.sh` 时会先打印本机 `machine_id`。未绑定许可看到即可。已绑定许可用它核对是不是这台机器；指纹不对要回到发版台改签，而不是在客户机器上改 `.lic` 里的字段。
 
@@ -199,13 +212,14 @@ docker compose logs --tail=80 worker
 
 ```text
 交付包.zip
-├── start.sh                 打印机器指纹，导入镜像，生成 .env，启动
+├── start.sh                 打印机器指纹，必要时启用 GPU，导入镜像，生成 .env，启动
 ├── docker-compose.yml       不挂算法源码
+├── docker-compose.gpu.yml   NVIDIA 覆盖层；没卡时不要单独使用
 ├── .env.example
 ├── README.md
 ├── licenses/<许可ID>.lic
-├── docs/操作手册.md
-├── docs/操作手册.pdf
+├── docs/拼图服务私有部署操作手册.md
+├── docs/拼图服务WEB操作手册.md
 └── images/                  离线镜像（勾选全量时）
     ├── load-images.sh
     ├── worker-image.tar
@@ -220,3 +234,54 @@ docker compose logs --tail=80 worker
 页面端口以包里 `.env` 的 `FRONTEND_PORT` 为准。现在的模板默认是 **9080**。早于这次修改打出的包仍可能是 **8080**，以该包的 `.env` 为准，改端口后执行 `docker compose up -d`。
 
 客户侧初始账号来自安装种子数据：管理员 `admin` / `admin123`，试用 `trial1`、`trial2` / `trial@123456`。试用账号只能使用自己的数据目录。
+
+---
+
+## 10. 现场记录：中达瑞和 Windows 私有部署（2026-11-18）
+
+客户是深圳市中达瑞和科技有限公司。许可 `37f671b2-df15-40f7-b96d-f37856ba5faa` 装在 Windows 电脑 `E:\spectrum-mosaic`，页面 `http://localhost:9080`。发版台是 `http://123.56.26.229:8180`。
+
+| 项 | 值 |
+| --- | --- |
+| 设备名 | `CHINAMI-IPKILU3` |
+| 系统 | Windows 10 专业版 22H2 x64，公司镜像，账号 `Administrator` |
+| CPU / 内存 | Intel Core i5-12600KF（10 核 16 线程），64 GB |
+| 显卡 | NVIDIA GeForce RTX 4070 Ti SUPER（另有向日葵虚拟显示器 `OrayIddDriver Device`，不是计算卡） |
+| 安装目录 | `E:\spectrum-mosaic` |
+| 机器码 | Docker 虚拟机 `/etc/machine-id`：`791af66aa8344bf8beade4efb4045f49` |
+| 机器指纹 | `607d8cfb88bcb03f7680abe8d7c605d064bf1a90e726b0c67a16b91fb972aaa2` |
+| 原到期 | `2027-12-31T00:00:00Z` |
+| 现到期 | `2026-12-15T00:00:00Z`（页面上为北京时间 2026-12-15 08:00） |
+| 租约地址 | `LICENSE_SERVER_URL=http://123.56.26.229:8180` |
+
+这张许可原先绑的是测试机 `10.156.196.228` 的指纹 `d6a4829f0e6c6612762ec47c214e517576a8f39ffda4f7669c985095baee9649`。改绑到这台 Windows 之后，测试机下次领租约会被拒绝。
+
+机器码在交付包目录用一行读出，不要和别的命令粘在同一行：
+
+```bat
+docker run --rm -v /etc/machine-id:/host/machine-id:ro --entrypoint cat postgres:16-alpine /host/machine-id
+```
+
+写进「机器指纹」的是这 32 位十六进制去掉换行后的 SHA-256，不是机器码本身。
+
+2026-11-18 把到期日改到 12 月 15 日。编辑框点「确定」后必须重新下发，客户机上的旧文件不会自动更新：
+
+1. 在「许可签发」下载新的 `37f671b2-df15-40f7-b96d-f37856ba5faa.lic`。
+2. 覆盖 `E:\spectrum-mosaic\licenses\` 里的同名文件。机器指纹那一格不要改。
+3. `.env` 里保持 `LICENSE_SERVER_URL=http://123.56.26.229:8180`。
+4. 在 `E:\spectrum-mosaic` 双击 `start.cmd`（有 GPU 覆盖层时不要只跑不带 `-f docker-compose.gpu.yml` 的 `compose up`，否则显卡会从容器里拿掉）。只换许可时也可以：
+   `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate worker`
+5. 日志应为 `license ok`，`expires=2026-12-15T00:00:00Z`，`machine=bound`。
+
+### 让 4070 Ti SUPER 出现在「任务 GPU」
+
+页面读的是 worker 容器里的 CuPy，不是 Windows 设备管理器。CPU 版 worker 永远列不出这张卡。要用 GPU：
+
+1. 发版台新建 **amd64** 版本（建议 `0.1.0-rc2`，不要覆盖已发出的 rc1 产物）并构建。日志里应有 `worker dockerfile=...Dockerfile.worker-customer-gpu`。
+2. 打交付包，或至少取出新的 `worker-image.tar` 和 `docker-compose.gpu.yml`。
+3. 在 `E:\spectrum-mosaic`：把 `docker-compose.gpu.yml` 放到与 `docker-compose.yml` 同一层；`docker load -i worker-image.tar`（tag 须与 compose 里 worker 的 image 一致）。
+4. 确认 Docker Desktop 为 WSL 2 引擎、本机 `nvidia-smi` 能列出 RTX 4070 Ti SUPER。
+5. 双击 `start.cmd`。窗口应出现「检测到 NVIDIA 显卡，启用 GPU」。若出现「未能把显卡交给容器」，先重启 Docker Desktop 后再开一次，不要只用 `docker compose up -d`（那不会叠加 GPU 文件）。
+6. 打开新建处理：下拉应有 `GPU 0 NVIDIA GeForce RTX 4070 Ti SUPER`。计算节点页同样列出这张卡。选「自动」即可；匹配仍走 CPU。
+
+Docker 虚拟磁盘在 C 盘。给 WSL 的内存建议约 48 GB、处理器 12，见 `C:\Users\Administrator\.wslconfig`。改完执行 `wsl --shutdown` 并重启 Docker。

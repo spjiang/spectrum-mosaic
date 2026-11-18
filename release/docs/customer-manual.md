@@ -224,6 +224,7 @@ docker compose up -d --force-recreate
 
 ### 6.5 GPU 使用简要说明
 
+- 用交付包里的 `start.sh` / `start.cmd` 启动。本机有 NVIDIA 且 Docker 能把显卡交给容器时，「任务 GPU」会列出卡名；否则只有「自动 / 不用 GPU」，任务走 CPU。
 - 可选「不用 GPU」或指定某张卡。
 - 部分阶段（如匹配）可能固定走 CPU；选了 GPU 不代表每一步都用显卡。
 - 显存不足时系统可能自动分批或回退 CPU，以日志为准。

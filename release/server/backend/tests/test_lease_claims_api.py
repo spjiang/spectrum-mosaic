@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
-from app.models import LeaseClaim
+from app.models import Customer, LeaseClaim, SystemSetting
 from app.routers.licenses import check_license, list_lease_claims
 from app.schemas import LicenseCheckIn
+from app.services.system_settings import KEY_LEASE_HOURS
 
 
 def _request(ip: str = "203.0.113.10"):
@@ -60,3 +62,49 @@ def test_list_lease_claims_pagination(db_session, bound_license, settings, admin
     assert page1.page_size == 2
     assert len(page1.items) == 2
     assert page1.items[0].created_at >= page1.items[1].created_at
+
+
+def test_check_license_uses_configured_lease_hours(db_session, bound_license, settings):
+    row = db_session.get(SystemSetting, KEY_LEASE_HOURS)
+    if row is None:
+        db_session.add(
+            SystemSetting(
+                key=KEY_LEASE_HOURS,
+                value="3",
+                label="租约有效期（小时）",
+                description="",
+                used_by="",
+            )
+        )
+    else:
+        row.value = "3"
+    db_session.flush()
+    lic, machine_id = bound_license
+    before = datetime.now(timezone.utc)
+    doc = check_license(
+        LicenseCheckIn(license_id=lic.license_id, machine_id=machine_id),
+        _request(),
+        db_session,
+        settings,
+    )
+    expires = datetime.strptime(doc["payload"]["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    delta = expires - before
+    assert timedelta(hours=2, minutes=59) <= delta <= timedelta(hours=3, minutes=1)
+
+
+def test_check_license_customer_lease_hours_override_global(db_session, bound_license, settings):
+    lic, machine_id = bound_license
+    customer = db_session.get(Customer, lic.customer_id)
+    assert customer is not None
+    customer.lease_hours = "5"
+    db_session.flush()
+    before = datetime.now(timezone.utc)
+    doc = check_license(
+        LicenseCheckIn(license_id=lic.license_id, machine_id=machine_id),
+        _request(),
+        db_session,
+        settings,
+    )
+    expires = datetime.strptime(doc["payload"]["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    delta = expires - before
+    assert timedelta(hours=4, minutes=59) <= delta <= timedelta(hours=5, minutes=1)

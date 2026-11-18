@@ -12,7 +12,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mosaic_secret}
       POSTGRES_DB: ${POSTGRES_DB:-mosaic_visual}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # 数据库放在交付包根目录，不放进 data/。data/ 会被改成 worker 的属主。
+      - ./pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mosaic} -d ${POSTGRES_DB:-mosaic_visual}"]
       interval: 5s
@@ -67,6 +68,7 @@ services:
       LICENSE_PUBLIC_KEY_PATH: /app/license_public.pem
       LICENSE_CLOCK_PATH: /data/.license/clock.json
       LICENSE_CLOCK_TOLERANCE_HOURS: "{{LICENSE_CLOCK_TOLERANCE_HOURS}}"
+      LICENSE_LEASE_CHECK_INTERVAL_HOURS: "{{LICENSE_LEASE_CHECK_INTERVAL_HOURS}}"
       LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-}
       LICENSE_LEASE_PATH: /data/.license/lease.json
       HOST_MACHINE_ID_PATH: /host/machine-id
@@ -86,6 +88,3 @@ services:
       - "${FRONTEND_PORT:-9080}:80"
     depends_on:
       - backend
-
-volumes:
-  pgdata:

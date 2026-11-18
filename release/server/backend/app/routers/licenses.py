@@ -26,8 +26,8 @@ from app.services.license_crypto import (
     sign_license,
     write_license_file,
 )
+from app.services.system_settings import get_lease_hours
 
-LEASE_HOURS = 72
 log = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/api/licenses", tags=["licenses"])
@@ -159,7 +159,8 @@ def check_license(
         reject(403, "该许可未绑定机器")
     if bound != machine_id:
         reject(403, "许可与当前机器不匹配")
-    lease_end = now + timedelta(hours=LEASE_HOURS)
+    customer = db.get(Customer, row.customer_id)
+    lease_end = now + timedelta(hours=get_lease_hours(db, customer=customer))
     if lease_end > _as_utc(row.expires_at):
         lease_end = _as_utc(row.expires_at)
     try:

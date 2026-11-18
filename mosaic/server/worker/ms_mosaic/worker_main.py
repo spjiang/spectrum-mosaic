@@ -308,9 +308,10 @@ def main() -> int:
     stop = threading.Event()
 
     def _lease_supervisor() -> None:
-        from ms_mosaic.license_check import LEASE_CHECK_INTERVAL_SECONDS, LicenseError, enforce_license_or_raise
+        from ms_mosaic.license_check import LicenseError, enforce_license_or_raise, lease_check_interval_seconds
 
-        while not stop.wait(LEASE_CHECK_INTERVAL_SECONDS):
+        interval = lease_check_interval_seconds()
+        while not stop.wait(interval):
             try:
                 enforce_license_or_raise()
             except LicenseError as exc:

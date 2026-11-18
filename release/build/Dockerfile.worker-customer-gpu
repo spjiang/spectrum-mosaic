@@ -1,0 +1,79 @@
+# 客户版 GPU worker：Cython 编译算法模块 + CUDA 12.2 运行库 + CuPy + 强制离线许可。
+# 构建上下文必须是仓库根目录 spectrum-mosaic/。仅用于 linux/amd64。
+# 没有把显卡交给容器时仍可启动，探测失败则走 CPU。
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04 AS builder
+WORKDIR /build
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH=/opt/venv/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+        g++ \
+        libgomp1 \
+        libglib2.0-0 \
+        libexpat1 \
+    && python3.11 -m venv /opt/venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mosaic/server/worker/requirements-worker.txt /build/worker/requirements-worker.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /build/worker/requirements-worker.txt \
+    && pip install --no-cache-dir Cython==3.0.11 setuptools wheel
+
+COPY mosaic/server/worker /build/worker
+COPY release/build /build/release/build
+
+WORKDIR /build/worker
+ENV CYTHON_MODULES_FILE=/build/release/build/cython_modules.txt
+RUN chmod +x /build/release/build/compile_in_image.sh \
+    && /build/release/build/compile_in_image.sh /build/worker /build/release/build/cython_modules.txt
+
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH=/opt/venv/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        python3.11-dev \
+        g++ \
+        libgomp1 \
+        libglib2.0-0 \
+        libexpat1 \
+    && python3.11 -m venv /opt/venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mosaic/server/worker/requirements-worker.txt mosaic/server/worker/requirements-gpu.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements-gpu.txt \
+    && apt-get purge -y --auto-remove g++ python3.11-dev software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/worker/ms_mosaic ./ms_mosaic
+COPY release/build/.embed/license_public.pem /app/license_public.pem
+
+RUN useradd -m -u 10001 mosaic \
+    && (getent group video >/dev/null && usermod -aG video mosaic || true) \
+    && (getent group render >/dev/null && usermod -aG render mosaic || true) \
+    && chown -R mosaic:mosaic /app \
+    && python -c "import ms_mosaic.license_check, cupy; import pathlib; assert not pathlib.Path('ms_mosaic/pipeline.py').exists(), 'pipeline.py must not ship'"
+
+USER mosaic
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    MPLBACKEND=Agg \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    MOSAIC_REQUIRE_LICENSE=1 \
+    LICENSE_PATH=/license/license.lic \
+    LICENSE_PUBLIC_KEY_PATH=/app/license_public.pem
+
+CMD ["python", "-m", "ms_mosaic.worker_main"]

@@ -46,7 +46,7 @@ export default function SystemConfigPage() {
         <Space>
           <span>全局配置</span>
           <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>
-            发版台统一配置 · 打交付包时下发到客户 compose
+            发版台统一配置
           </Typography.Text>
         </Space>
       }
@@ -60,7 +60,7 @@ export default function SystemConfigPage() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="修改后对新打的交付包生效；已部署客户需替换 compose / 环境变量并重启 worker。"
+        message="这里是默认值。客户档案里留空时使用这些值；客户单独填写后优先用客户的值。租约有效期在下一次领取时生效。领取间隔和回拨容差写入新交付包。"
       />
       <Form
         form={form}

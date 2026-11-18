@@ -24,6 +24,9 @@ class CustomerIn(BaseModel):
     contact: str = ""
     status: str = "trial"
     notes: str = ""
+    clock_tolerance_hours: str = ""
+    lease_hours: str = ""
+    lease_interval_hours: str = ""
 
 
 class CustomerOut(BaseModel):
@@ -32,6 +35,12 @@ class CustomerOut(BaseModel):
     contact: str
     status: str
     notes: str
+    clock_tolerance_hours: str = ""
+    lease_hours: str = ""
+    lease_interval_hours: str = ""
+    effective_clock_tolerance_hours: str = ""
+    effective_lease_hours: str = ""
+    effective_lease_interval_hours: str = ""
     created_at: datetime
     updated_at: datetime
 

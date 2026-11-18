@@ -11,7 +11,7 @@ from app.config import Settings
 from app.models import Customer, License, Release
 from app.services.image_arch import assert_tar_arch
 from app.services.release_images import resolve_worker_image
-from app.services.system_settings import get_clock_tolerance_hours
+from app.services.system_settings import format_hours, get_clock_tolerance_hours, get_lease_interval_hours
 
 # 与 build_runner 产出、load-images.sh 一致
 _IMAGE_TARS = (
@@ -65,13 +65,18 @@ def build_delivery_zip(
     shutil.copy2(lic_src, staging / "licenses" / f"{license_row.license_id}.lic")
 
     tolerance_hours = "1"
+    interval_hours = "6"
     if db is not None:
-        hours = get_clock_tolerance_hours(db)
-        tolerance_hours = str(int(hours)) if hours == int(hours) else str(hours)
+        tolerance_hours = format_hours(get_clock_tolerance_hours(db, customer=customer))
+        interval_hours = format_hours(get_lease_interval_hours(db, customer=customer))
 
     compose_src = templates / "customer-compose.yml"
+    gpu_compose_src = templates / "customer-compose.gpu.yml"
     readme_src = templates / "customer-README.md"
     env_src = templates / "customer.env.example"
+    if not gpu_compose_src.exists():
+        raise FileNotFoundError(f"缺少 {gpu_compose_src}")
+    shutil.copy2(gpu_compose_src, staging / "docker-compose.gpu.yml")
     for src, name in (
         (compose_src, "docker-compose.yml"),
         (readme_src, "README.md"),
@@ -92,10 +97,11 @@ def build_delivery_zip(
             .replace("{{LICENSE_FILE}}", f"{license_row.license_id}.lic")
             .replace("{{CUSTOMER}}", customer.name)
             .replace("{{LICENSE_CLOCK_TOLERANCE_HOURS}}", tolerance_hours)
+            .replace("{{LICENSE_LEASE_CHECK_INTERVAL_HOURS}}", interval_hours)
         )
         (staging / name).write_text(text, encoding="utf-8")
 
-    for name in ("start.sh", "start.ps1", "start.cmd"):
+    for name in ("start.sh", "start.ps1", "start.cmd", "uninstall.sh", "uninstall.ps1", "uninstall.cmd"):
         src = templates / name
         if not src.exists():
             raise FileNotFoundError(f"缺少 {src}")
@@ -104,17 +110,17 @@ def build_delivery_zip(
         if name.endswith(".sh"):
             dst.chmod(0o755)
 
-    docs_src = _workspace() / "release" / "docs"
     docs_dst = staging / "docs"
     docs_dst.mkdir()
-    for src_name, dst_name in (
-        ("customer-manual.md", "操作手册.md"),
-        ("customer-manual.pdf", "操作手册.pdf"),
+    manual_src = _workspace() / "docs" / "操作文档"
+    for name in (
+        "拼图服务私有部署操作手册.md",
+        "拼图服务WEB操作手册.md",
     ):
-        src = docs_src / src_name
+        src = manual_src / name
         if not src.exists():
-            raise FileNotFoundError(f"缺少客户手册文件: {src}")
-        shutil.copy2(src, docs_dst / dst_name)
+            raise FileNotFoundError(f"缺少拼图服务操作手册: {src}")
+        shutil.copy2(src, docs_dst / name)
 
     if include_image_tar:
         if not release.artifact_path:

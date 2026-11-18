@@ -61,6 +61,7 @@ def bootstrap(db: Session, settings: Settings, migration_path: Path) -> None:
         "006_release_arch.sql",
         "007_license_machine.sql",
         "008_lease_claims.sql",
+        "009_customer_settings.sql",
     ):
         path = migrations_dir / name
         if not path.exists():
