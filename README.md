@@ -24,3 +24,15 @@ docker compose up -d --build
 测区放到 `mosaic/server/data/input/<测区>/<架次>/`。详见 `mosaic/server/README.md`。
 
 发版台见 `release/README.md`。
+
+## 测试（推荐在 Docker 内）
+
+本机若未安装 `requirements.txt` 全量依赖，或 PyNaCl 与 CPU 架构不一致，请用容器跑单测：
+
+```bash
+./mosaic/server/scripts/test_backend.sh
+./mosaic/server/scripts/test_worker.sh
+./release/server/scripts/test_backend.sh
+```
+
+规格与需求对照见 `docs/specs/README.md`。

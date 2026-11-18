@@ -239,12 +239,10 @@ export default function LicensesPage() {
           <Form.Item
             name="machine_id"
             label="机器指纹"
-            rules={[
-              { required: true, message: "请填写客户机 machine_id" },
-              { pattern: /^[0-9a-fA-F]{64}$/, message: "须为 64 位十六进制" },
-            ]}
+            extra="留空可先签发未绑定许可并打交付包；客户运行 start.sh 后把指纹发回，再在编辑里填写并重签。"
+            rules={[{ pattern: /^$|^[0-9a-fA-F]{64}$/, message: "须为 64 位十六进制，或留空表示不绑定" }]}
           >
-            <Input placeholder="客户机 ./start.sh 打印的 machine_id" />
+            <Input placeholder="可选：客户机 start.sh 打印的 machine_id" />
           </Form.Item>
         </Form>
       </Modal>
@@ -310,7 +308,7 @@ export default function LicensesPage() {
             label="机器指纹"
             rules={[{ pattern: /^$|^[0-9a-fA-F]{64}$/, message: "须为 64 位十六进制，旧许可可留空" }]}
           >
-            <Input placeholder="留空表示不绑定机器" />
+            <Input placeholder="留空表示不绑定；清空已填写的指纹可解绑并重签" />
           </Form.Item>
         </Form>
       </Modal>

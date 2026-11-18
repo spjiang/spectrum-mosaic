@@ -63,6 +63,18 @@ class LicenseUpdateIn(BaseModel):
     expires_at: datetime | None = None
     machine_id: str | None = None
 
+    @field_validator("machine_id")
+    @classmethod
+    def _machine_id_optional(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        text = v.strip()
+        if not text:
+            return ""
+        if len(text) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in text):
+            raise ValueError("须为 64 位十六进制，留空表示不绑定机器")
+        return text.lower()
+
 
 class ReleaseOut(BaseModel):
     id: int
@@ -103,7 +115,17 @@ class LicenseCreateIn(BaseModel):
     release_id: int
     starts_at: datetime | None = None
     expires_at: datetime
-    machine_id: str = Field(min_length=64, max_length=64)
+    machine_id: str = ""
+
+    @field_validator("machine_id")
+    @classmethod
+    def _machine_id_optional(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            return ""
+        if len(text) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in text):
+            raise ValueError("须为 64 位十六进制，留空表示不绑定机器")
+        return text.lower()
 
 
 class LicenseCheckIn(BaseModel):

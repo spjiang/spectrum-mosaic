@@ -21,6 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && docker --version \
     && docker buildx version
 COPY app ./app
+COPY pytest.ini .
+COPY tests ./tests
 ENV PYTHONUNBUFFERED=1
 ENV DOCKER_CLI_PLUGIN_PATH=/usr/local/lib/docker/cli-plugins
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8100"]

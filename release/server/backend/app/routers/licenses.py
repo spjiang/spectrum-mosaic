@@ -254,10 +254,7 @@ def create_license(
     expires_at = _as_utc(body.expires_at)
     _ensure_window(starts_at, expires_at)
 
-    try:
-        machine_id = normalize_machine_id(body.machine_id)
-    except LicenseError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    machine_id = (body.machine_id or "").strip().lower()
     payload = {
         "license_id": license_id,
         "customer": customer.name,
@@ -266,8 +263,13 @@ def create_license(
         "starts_at": _fmt(starts_at),
         "expires_at": _fmt(expires_at),
         "issued_at": _fmt(issued_at),
-        "machine_id": machine_id,
     }
+    if machine_id:
+        try:
+            machine_id = normalize_machine_id(machine_id)
+        except LicenseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload["machine_id"] = machine_id
     try:
         doc = sign_license(payload, priv)
     except LicenseError as exc:
@@ -318,11 +320,14 @@ def update_license(
         raise HTTPException(status_code=400, detail="status 无效")
 
     next_machine = (row.machine_id or "").strip().lower()
-    if body.machine_id is not None and body.machine_id.strip():
-        try:
-            next_machine = normalize_machine_id(body.machine_id)
-        except LicenseError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if body.machine_id is not None:
+        if body.machine_id.strip():
+            try:
+                next_machine = normalize_machine_id(body.machine_id)
+            except LicenseError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            next_machine = ""
     resign = (
         body.starts_at is not None
         or body.expires_at is not None

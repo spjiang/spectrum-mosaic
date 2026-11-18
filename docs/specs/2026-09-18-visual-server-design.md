@@ -1,9 +1,22 @@
 # 多光谱拼图可视化管控台（visual_server）设计规格
 
-> 状态：待实现  
-> 日期：2026-09-18  
-> 范围：`prod/visual_server` + `prod/source` 最小钩子（宿主机 worker）  
+> **状态：已实现（2026-11-18）** — 代码在仓库 `mosaic/server/`，为本规格的演进落地。  
+> 日期：2026-09-18（设计稿）  
+> 原范围：`prod/visual_server` + `prod/source`  
 > 性质：**生产交付**，非演示
+
+### 与本文档的目录对照
+
+| 设计稿（本文） | 当前仓库 |
+| --- | --- |
+| `visual_server/backend` | `mosaic/server/backend` |
+| `visual_server/frontend` | `mosaic/server/frontend` |
+| `visual_server/docker-compose.yml` | `mosaic/server/docker-compose.yml` |
+| `source/ms_mosaic` + 宿主机 worker | `mosaic/server/worker/ms_mosaic`（开发可挂源码；客户交付见 `release/`） |
+| `db/migrations/` | `mosaic/server/db/`（`init.sql` + 迁移链） |
+| RabbitMQ 解耦 + 单任务串行 | 已实现，见 `worker_main.py` |
+
+运维与快速启动以 **`mosaic/server/README.md`** 为准；客户离线交付以 **`release/README.md`** 为准。下文保留 2026-09-18 原始设计细节，供溯源。
 
 ---
 
