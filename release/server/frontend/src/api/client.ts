@@ -35,17 +35,15 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return res as unknown as T;
 }
 
-export async function download(path: string, filename: string) {
+export function download(path: string, filename: string) {
   const token = getToken();
-  const res = await fetch(path, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!res.ok) throw new Error("下载失败");
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  const url = new URL(path, window.location.origin);
+  if (token) url.searchParams.set("token", token);
   const a = document.createElement("a");
-  a.href = url;
+  a.href = `${url.pathname}${url.search}`;
   a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
 }

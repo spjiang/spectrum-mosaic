@@ -13,6 +13,9 @@ router = APIRouter(prefix="/api/manual", tags=["manual"])
 
 TITLE = "高光谱拼图 · 客户操作手册"
 DOWNLOAD_STEM = "操作手册"
+INTERNAL_TITLE = "发版台内部操作手册"
+INTERNAL_FILE = "internal-manual.md"
+INTERNAL_DOWNLOAD_STEM = "内部操作手册"
 
 
 def _docs_dir() -> Path:
@@ -66,4 +69,24 @@ def download_manual(
         path,
         media_type="application/pdf",
         filename=f"{DOWNLOAD_STEM}.pdf",
+    )
+
+
+@router.get("/internal", response_model=ManualMeta)
+def get_internal_manual(_: Admin = Depends(get_current_admin)) -> ManualMeta:
+    md = _docs_dir() / INTERNAL_FILE
+    if not md.exists():
+        raise HTTPException(status_code=404, detail="内部操作手册不存在")
+    return ManualMeta(title=INTERNAL_TITLE, markdown=md.read_text(encoding="utf-8"), has_pdf=False)
+
+
+@router.get("/internal/download")
+def download_internal_manual(_: Admin = Depends(get_current_admin)):
+    path = _docs_dir() / INTERNAL_FILE
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="内部操作手册不存在")
+    return PlainTextResponse(
+        path.read_text(encoding="utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{INTERNAL_DOWNLOAD_STEM}.md"'},
     )

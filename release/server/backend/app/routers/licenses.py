@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -13,8 +14,8 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_admin
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.models import Admin, Customer, Delivery, License, Release
-from app.schemas import LicenseCheckIn, LicenseCreateIn, LicenseOut, LicenseUpdateIn
+from app.models import Admin, Customer, Delivery, LeaseClaim, License, Release
+from app.schemas import LeaseClaimPage, LicenseCheckIn, LicenseCreateIn, LicenseOut, LicenseUpdateIn
 from app.services.audit import write_audit
 from app.services.license_crypto import (
     PRIVATE_NAME,
@@ -27,6 +28,7 @@ from app.services.license_crypto import (
 )
 
 LEASE_HOURS = 72
+log = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/api/licenses", tags=["licenses"])
 public_router = APIRouter(tags=["licenses"])
@@ -47,38 +49,122 @@ def _ensure_window(starts_at: datetime, expires_at: datetime) -> None:
         raise HTTPException(status_code=400, detail="生效时间必须早于到期时间")
 
 
+def _client_ip(request: Request) -> str:
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real[:128]
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded.strip():
+        return forwarded.split(",")[0].strip()[:128]
+    if request.client is not None:
+        return request.client.host[:128]
+    return ""
+
+
+def _record_claim(
+    db: Session,
+    *,
+    license_id: str,
+    customer_name: str,
+    machine_id: str,
+    ok: bool,
+    detail: str,
+    lease_expires_at: datetime | None,
+    client_ip: str,
+) -> None:
+    try:
+        db.add(
+            LeaseClaim(
+                license_id=license_id[:128],
+                customer_name=customer_name[:200],
+                machine_id=machine_id[:128],
+                ok=ok,
+                detail=detail[:500],
+                lease_expires_at=lease_expires_at,
+                client_ip=client_ip,
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("lease claim log failed")
+
+
+def _customer_name(db: Session, row: License) -> str:
+    customer = db.get(Customer, row.customer_id)
+    return customer.name if customer is not None else ""
+
+
 @public_router.post("/api/license/check")
 def check_license(
     body: LicenseCheckIn,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict:
-    """客户 worker 联网换取短时租约。不要求管理员登录。"""
+    """客户 worker 联网换取短时租约。不要求管理员登录。每次领取都写入 lease_claims。"""
+    ip = _client_ip(request)
+    license_id = body.license_id.strip()
     try:
         machine_id = normalize_machine_id(body.machine_id)
     except LicenseError as exc:
+        _record_claim(
+            db,
+            license_id=license_id,
+            customer_name="",
+            machine_id=body.machine_id,
+            ok=False,
+            detail=str(exc),
+            lease_expires_at=None,
+            client_ip=ip,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    row = db.scalar(select(License).where(License.license_id == body.license_id.strip(), License.deleted_at.is_(None)))
+    row = db.scalar(select(License).where(License.license_id == license_id, License.deleted_at.is_(None)))
     if row is None:
+        _record_claim(
+            db,
+            license_id=license_id,
+            customer_name="",
+            machine_id=machine_id,
+            ok=False,
+            detail="许可不存在",
+            lease_expires_at=None,
+            client_ip=ip,
+        )
         raise HTTPException(status_code=404, detail="许可不存在")
+    customer_name = _customer_name(db, row)
+
+    def reject(status: int, detail: str) -> None:
+        _record_claim(
+            db,
+            license_id=row.license_id,
+            customer_name=customer_name,
+            machine_id=machine_id,
+            ok=False,
+            detail=detail,
+            lease_expires_at=None,
+            client_ip=ip,
+        )
+        raise HTTPException(status_code=status, detail=detail)
+
     if row.status != "active":
-        raise HTTPException(status_code=403, detail="许可已停用")
+        reject(403, "许可已停用")
     now = datetime.now(timezone.utc)
     if now < _as_utc(row.starts_at):
-        raise HTTPException(status_code=403, detail="许可尚未生效")
+        reject(403, "许可尚未生效")
     if now > _as_utc(row.expires_at):
-        raise HTTPException(status_code=403, detail="许可已过期")
+        reject(403, "许可已过期")
     bound = (row.machine_id or "").strip().lower()
     if not bound:
-        raise HTTPException(status_code=403, detail="该许可未绑定机器")
+        reject(403, "该许可未绑定机器")
     if bound != machine_id:
-        raise HTTPException(status_code=403, detail="许可与当前机器不匹配")
+        reject(403, "许可与当前机器不匹配")
     lease_end = now + timedelta(hours=LEASE_HOURS)
     if lease_end > _as_utc(row.expires_at):
         lease_end = _as_utc(row.expires_at)
     try:
         priv, _ = init_keys(Path(settings.keys_dir))
-        return sign_lease(
+        signed = sign_lease(
             {
                 "license_id": row.license_id,
                 "machine_id": machine_id,
@@ -88,7 +174,47 @@ def check_license(
             priv,
         )
     except LicenseError as exc:
+        _record_claim(
+            db,
+            license_id=row.license_id,
+            customer_name=customer_name,
+            machine_id=machine_id,
+            ok=False,
+            detail=str(exc),
+            lease_expires_at=None,
+            client_ip=ip,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _record_claim(
+        db,
+        license_id=row.license_id,
+        customer_name=customer_name,
+        machine_id=machine_id,
+        ok=True,
+        detail="已签发租约",
+        lease_expires_at=lease_end,
+        client_ip=ip,
+    )
+    return signed
+
+
+@router.get("/lease-claims", response_model=LeaseClaimPage)
+def list_lease_claims(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: Admin = Depends(get_current_admin),
+) -> LeaseClaimPage:
+    total = db.scalar(select(func.count()).select_from(LeaseClaim)) or 0
+    rows = list(
+        db.scalars(
+            select(LeaseClaim)
+            .order_by(LeaseClaim.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    )
+    return LeaseClaimPage(total=total, page=page, page_size=page_size, items=rows)
 
 
 @router.get("", response_model=list[LicenseOut])

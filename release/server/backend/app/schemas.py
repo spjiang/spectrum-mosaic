@@ -111,6 +111,27 @@ class LicenseCheckIn(BaseModel):
     machine_id: str = Field(min_length=64, max_length=64)
 
 
+class LeaseClaimOut(BaseModel):
+    id: int
+    license_id: str
+    customer_name: str
+    machine_id: str
+    ok: bool
+    detail: str
+    lease_expires_at: datetime | None
+    client_ip: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class LeaseClaimPage(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[LeaseClaimOut]
+
+
 class LicenseOut(BaseModel):
     id: int
     license_id: str

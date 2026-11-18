@@ -14,12 +14,22 @@
 
 在交付包根目录执行：
 
+Linux / macOS：
+
 ```bash
 chmod +x start.sh
 ./start.sh
 ```
 
-`start.sh` 会依次：准备 `data/` 目录权限（供 worker uid 10001 写入许可时钟）→ 若存在 `images/` 则调用 `images/load-images.sh` 导入离线镜像 → 必要时生成 `.env` → `docker compose up -d`。
+Windows（在交付包根目录，PowerShell）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+也可以双击 `start.cmd`。
+
+`start.sh` / `start.ps1` 会依次：准备 `data/` 目录（供 worker 写入许可时钟）→ 若存在 `images/` 则导入离线镜像 → 必要时生成 `.env` → `docker compose up -d`。
 
 也可分步手动：`./images/load-images.sh` → `cp .env.example .env` → 自行处理 `data` 权限 → `docker compose up -d`。
 
@@ -27,7 +37,7 @@ chmod +x start.sh
 
 页面默认 http://localhost:9080 （以 `.env` 中 `FRONTEND_PORT` 为准）。worker 启动时会校验许可；过期、签名无效、机器指纹不符或系统时间异常回拨时进程退出（详见 `docs/操作手册`）。
 
-`./start.sh` 会打印本机 `machine_id`。绑定许可须把该值交给供应商写入 `.lic`，并在 `.env` 填写 `LICENSE_SERVER_URL`（发版台地址）。未写 `machine_id` 的旧许可仍按离线方式校验。
+`start.sh` 或 `start.ps1` 会打印本机 `machine_id`。绑定许可须把该值交给供应商写入 `.lic`，并在 `.env` 填写 `LICENSE_SERVER_URL`（发版台地址）。未写 `machine_id` 的旧许可仍按离线方式校验。
 
 ## 3. 操作手册
 

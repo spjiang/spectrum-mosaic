@@ -103,12 +103,22 @@ Get-FileHash .\交付包.zip -Algorithm SHA256
 
 在交付包根目录执行（推荐一键脚本）：
 
+Linux / macOS：
+
 ```bash
 chmod +x start.sh
 ./start.sh
 ```
 
-`start.sh` 会：准备 `data/` 权限（worker 需写入 `data/.license`）→ 若有 `images/load-images.sh` 则导入离线全量镜像 → 必要时生成 `.env` → `docker compose up -d`。
+Windows 在交付包根目录执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+或双击 `start.cmd`。
+
+`start.sh` / `start.ps1` 会：准备 `data/`（worker 需写入 `data/.license`）→ 若有 `images/` 则导入离线全量镜像 → 必要时生成 `.env` → `docker compose up -d`。
 
 也可仅手动启动（需已导入镜像并自行保证 `data` 可写）：
 
@@ -145,7 +155,7 @@ worker 启动时会校验许可。若签名无效、尚未生效或已过期，�
 - 没有 `machine_id` 的旧许可不联网，只做本地验签。
 - 本机系统时间不准会导致误判，请先校时。
 
-机器指纹在交付包根目录执行 `./start.sh` 时打印。换机须向供应商重新签发。
+机器指纹在交付包根目录执行 `./start.sh`（Windows 为 `start.ps1`）时打印。换机须向供应商重新签发。
 
 ### 5.2 续期步骤
 
@@ -309,7 +319,7 @@ cd pack
 ls -la
 ```
 
-期望看到：`start.sh`、`docker-compose.yml`、`.env.example`、`README.md`、`licenses/`、`docs/`；若勾选了离线全量镜像，还应有 `images/` 下五个 `*-image.tar` 与 `load-images.sh`。
+期望看到：`start.sh`、`start.ps1`、`start.cmd`、`docker-compose.yml`、`.env.example`、`README.md`、`licenses/`、`docs/`；若勾选了离线全量镜像，还应有 `images/` 下五个 `*-image.tar` 与 `load-images.sh`。
 
 **⑤ 一键启动（导入镜像 + 权限 + compose）**
 
@@ -320,6 +330,8 @@ docker compose ps
 docker compose logs --tail=100 worker
 docker images | grep -E 'spectrum-mosaic|postgres|rabbitmq'
 ```
+
+Windows 在解压目录执行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1`，或双击 `start.cmd`。
 
 应能看到带版本 tag 的 `spectrum-mosaic-worker` / `backend` / `frontend`，以及 `postgres:16-alpine`、`rabbitmq:3.13-management-alpine`。**不应**再执行 `docker compose pull`。
 

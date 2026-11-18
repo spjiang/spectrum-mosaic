@@ -11,7 +11,9 @@ import {
   UserOutlined,
   AppstoreOutlined,
   GiftOutlined,
+  HistoryOutlined,
   ReadOutlined,
+  BookOutlined,
   SettingOutlined,
   AlertOutlined,
   ControlOutlined,
@@ -21,8 +23,10 @@ import BrandMark from "./components/BrandMark";
 import { getToken, setToken } from "./api/client";
 import CustomersPage from "./pages/CustomersPage";
 import DeliveriesPage from "./pages/DeliveriesPage";
+import LeaseClaimsPage from "./pages/LeaseClaimsPage";
 import LicensesPage from "./pages/LicensesPage";
 import LoginPage from "./pages/LoginPage";
+import InternalManualPage from "./pages/InternalManualPage";
 import ManualPage from "./pages/ManualPage";
 import NotesPage from "./pages/NotesPage";
 import ReleasesPage from "./pages/ReleasesPage";
@@ -34,8 +38,10 @@ const TITLES: Record<string, string> = {
   releases: "版本构建",
   customers: "客户档案",
   licenses: "许可签发",
+  "lease-claims": "租约日志",
   deliveries: "交付包",
   manual: "操作手册",
+  "internal-manual": "内部手册",
   notes: "注意事项",
   config: "全局配置",
 };
@@ -63,8 +69,17 @@ function Shell({ children }: { children: React.ReactNode }) {
           { key: "releases", icon: <CloudServerOutlined />, label: <Link to="/releases">版本构建</Link> },
           { key: "customers", icon: <TeamOutlined />, label: <Link to="/customers">客户档案</Link> },
           { key: "licenses", icon: <KeyOutlined />, label: <Link to="/licenses">许可签发</Link> },
+          { key: "lease-claims", icon: <HistoryOutlined />, label: <Link to="/lease-claims">租约日志</Link> },
           { key: "deliveries", icon: <GiftOutlined />, label: <Link to="/deliveries">交付包</Link> },
+        ],
+      },
+      {
+        key: "grp-manual",
+        icon: <ReadOutlined />,
+        label: "手册",
+        children: [
           { key: "manual", icon: <ReadOutlined />, label: <Link to="/manual">操作手册</Link> },
+          { key: "internal-manual", icon: <BookOutlined />, label: <Link to="/internal-manual">内部手册</Link> },
         ],
       },
       {
@@ -115,7 +130,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           className="mosaic-sider-menu"
           mode="inline"
           selectedKeys={[key]}
-          defaultOpenKeys={["grp-release", "grp-settings"]}
+          defaultOpenKeys={["grp-release", "grp-manual", "grp-settings"]}
           items={items}
         />
         <div className="mosaic-sider-footer">
@@ -162,8 +177,10 @@ export default function App() {
       <Route path="/releases" element={<Private><ReleasesPage /></Private>} />
       <Route path="/customers" element={<Private><CustomersPage /></Private>} />
       <Route path="/licenses" element={<Private><LicensesPage /></Private>} />
+      <Route path="/lease-claims" element={<Private><LeaseClaimsPage /></Private>} />
       <Route path="/deliveries" element={<Private><DeliveriesPage /></Private>} />
       <Route path="/manual" element={<Private><ManualPage /></Private>} />
+      <Route path="/internal-manual" element={<Private><InternalManualPage /></Private>} />
       <Route path="/settings/config" element={<Private><SystemConfigPage /></Private>} />
       <Route path="/settings/notes" element={<Private><NotesPage /></Private>} />
     </Routes>

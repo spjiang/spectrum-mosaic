@@ -180,7 +180,10 @@ export default function DeliveriesPage() {
                 <Button
                   size="small"
                   type="primary"
-                  onClick={() => download(`/api/deliveries/${d.id}/download`, `delivery-${d.id}.zip`)}
+                  onClick={() => {
+                    message.info("开始下载，请在浏览器下载栏查看");
+                    download(`/api/deliveries/${d.id}/download`, "");
+                  }}
                 >
                   下载
                 </Button>

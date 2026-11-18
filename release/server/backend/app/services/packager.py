@@ -95,12 +95,14 @@ def build_delivery_zip(
         )
         (staging / name).write_text(text, encoding="utf-8")
 
-    start_sh = templates / "start.sh"
-    if not start_sh.exists():
-        raise FileNotFoundError(f"缺少 {start_sh}")
-    dst_start = staging / "start.sh"
-    shutil.copy2(start_sh, dst_start)
-    dst_start.chmod(0o755)
+    for name in ("start.sh", "start.ps1", "start.cmd"):
+        src = templates / name
+        if not src.exists():
+            raise FileNotFoundError(f"缺少 {src}")
+        dst = staging / name
+        shutil.copy2(src, dst)
+        if name.endswith(".sh"):
+            dst.chmod(0o755)
 
     docs_src = _workspace() / "release" / "docs"
     docs_dst = staging / "docs"

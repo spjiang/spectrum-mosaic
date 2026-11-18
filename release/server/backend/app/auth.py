@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 from sqlalchemy import select
@@ -35,14 +35,18 @@ def create_access_token(username: str, settings: Settings) -> str:
 
 
 def get_current_admin(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Admin:
-    if creds is None or not creds.credentials:
+    raw = creds.credentials if creds is not None and creds.credentials else ""
+    if not raw:
+        raw = (request.query_params.get("token") or "").strip()
+    if not raw:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
     try:
-        data = jwt.decode(creds.credentials, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        data = jwt.decode(raw, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
         username = str(data.get("sub") or "")
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已失效") from exc

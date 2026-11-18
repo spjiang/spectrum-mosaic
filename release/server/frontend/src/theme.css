@@ -299,3 +299,39 @@ body,
 .mosaic-manual-body th {
   background: #f8fafc;
 }
+
+.lease-claims-table {
+  width: 100%;
+}
+
+.lease-claims-table .ant-table-content,
+.lease-claims-table .ant-table-body {
+  overflow: visible !important;
+}
+
+.lease-claims-table table {
+  width: 100% !important;
+  table-layout: auto !important;
+}
+
+.lease-claims-table .ant-table-cell {
+  white-space: normal !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
+.lease-claims-full {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.lease-claims-link.ant-btn {
+  height: auto;
+  padding: 0;
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
