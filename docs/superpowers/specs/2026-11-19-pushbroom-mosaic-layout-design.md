@@ -8,7 +8,7 @@
 
 - 推扫拼图是独立服务、独立镜像，单独发版。框幅拼图的 `backend`、`worker` 镜像不因推扫改动而重建。
 - 本阶段只在本机跑。不改 `release/`，不改 `docker-compose.198.yml`，不改客户 compose 模板和启动脚本，不推送远端。
-- 客户前端镜像由 `release/build/build_worker.sh` 直接从 `mosaic/server/frontend` 构建。这个目录里的 `nginx.conf` 本阶段不改；菜单代码若要进前端，必须在没有推扫服务时自动隐藏（见第 5 节）。
+- 客户前端镜像由 `release/build/build_worker.sh` 直接从 `mosaic/server/frontend` 构建。这个目录里的 `nginx.conf` 本阶段不改；侧栏改分组会随下次发版带出，所以「推扫拼图」必须在没有推扫服务时自动隐藏（见第 5 节）。
 - 输入是原始 DN：`figspec.hdr`、`figspec.spe`、`figspec.gps`。第一版成果是地理编码 DN 立方体，不做暗电流、白板、反射率和 DSM。
 
 ## 2. 放在哪里
@@ -67,9 +67,9 @@ mosaic/server/pushbroom/
       runner.py               同时只跑一个任务；计算在子进程里，取消时杀子进程
   migrations/
     001_init.sql              schema pushbroom，表 pushbroom.jobs 等。服务启动时自己执行
-  web/                        推扫页面（Vite + React），构建后由本镜像在 /pushbroom/ 提供
+  web/                        推扫页面（Vite + React），构建后由本镜像在 /pushbroom/app/ 提供，平台用 iframe 嵌入
     package.json
-    vite.config.ts            base: /pushbroom/
+    vite.config.ts            base: /pushbroom/app/
     src/
   dev/
     nginx.frontend.conf       仅本机：整份替换前端容器的 default.conf，多一段 /pushbroom/ 反代
@@ -120,10 +120,43 @@ mosaic/server/data/
 - `docker-compose.pushbroom.yml` 新增 `pushbroom` 服务（端口 8100），并给现有 `frontend` 容器额外挂载 `pushbroom/dev/nginx.frontend.conf` 覆盖 `default.conf`。原 `frontend/nginx.conf` 不改。
 - 访问 `http://localhost:9080/pushbroom/` 进入推扫页面，接口走 `/pushbroom/api/`。和平台同源，登录后浏览器里的 token 直接可用。
 
-框幅前端加菜单放到最后一步，条件是：
+### 侧栏按拼图类型分组
 
-- 菜单只在 `GET /pushbroom/api/health` 返回推扫服务自己的 JSON 时显示。客户现场没有这个容器时，nginx 会把这个地址落到 `index.html`，判断为不可用，菜单不出现。
-- 第一版不改后端 `rbac.py` 的菜单表，按现有「能新建处理」的角色显示。要进角色管理时再加菜单键。
+```text
+框幅拼图
+  新建处理        /execute
+  处理方案        /profiles
+  处理记录        /jobs
+  拼接线处理      /seam
+  增量拼图
+    测区管理      /incremental
+推扫拼图          推扫服务在线时才显示
+  新建推扫        /pushbroom/new
+  推扫记录        /pushbroom/jobs
+辅助工具
+  影像查看        /inspect
+  使用文档        /cli
+系统管理
+  计算节点、系统监控、系统配置
+组织管理
+  用户管理、角色管理、权限管理、操作审计
+```
+
+改动点：
+
+- `frontend/src/roles.ts`：分组改为「框幅拼图、推扫拼图、辅助工具、系统管理、组织管理」。分组允许带一层子组，「增量拼图」是「框幅拼图」下的子组，里面只有「测区管理」。现有菜单键 `execute`、`profiles`、`jobs`、`seam`、`incremental` 不改名，已保存的角色授权不受影响。
+- `frontend/src/components/AppShell.tsx`：按子组生成三层菜单；展开状态包含子组。
+- `frontend/src/pages/Roles.tsx`：角色授权按同样的分组列出。
+- 新增菜单键 `pushbroom_new`、`pushbroom_jobs`。后端 `app/services/rbac.py` 的 `MENU_KEYS` 加上这两个，否则角色管理里勾上也会被清掉。默认授给能新建处理的角色（管理员、操作员）。
+
+### 推扫页面怎么嵌进来
+
+推扫页面由推扫镜像提供，挂在 `/pushbroom/app/`。主前端的 `/pushbroom/new`、`/pushbroom/jobs` 只是外壳路由：左侧仍是平台侧栏，内容区用 iframe 加载 `/pushbroom/app/new`、`/pushbroom/app/jobs`。两边同源，iframe 里直接读平台登录后的 token。这样推扫页面改版只换推扫镜像，不必重发平台前端。
+
+### 没有推扫服务时
+
+- 「推扫拼图」整组只在 `GET /pushbroom/api/health` 返回推扫服务自己的 JSON（带 `service: "pushbroom"`）时显示。客户现场没有这个容器时，nginx 会把这个地址落到 `index.html`，判断为不可用，整组不出现，直接访问 `/pushbroom/*` 也回到首页。
+- 框幅拼图、增量拼图的功能和接口不变，只是侧栏位置变了。
 
 ## 6. 本机命令
 
@@ -154,3 +187,4 @@ python -m pb_mosaic run   --input /data/input/pushbroom/FigSpec_260414_134505 \
 - `scripts/test.sh` 只用 `tests/fixtures` 就能跑通，不依赖 33 GiB 原始数据。
 - `check` 对 0414、0419、0429 两架通过，对 `FigSpec_260410_142436` 拒收并写明头文件和 gps 的问题。
 - 带叠加文件时，`/pushbroom/` 页面能用平台账号登录后的 token 调接口；停掉 `pushbroom` 容器后，平台其它页面不受影响。
+- 侧栏是「框幅拼图 › 增量拼图 › 测区管理」三层；原有角色的菜单授权不变。不起推扫服务时看不到「推扫拼图」。
