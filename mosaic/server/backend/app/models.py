@@ -175,6 +175,45 @@ class IncrementalFile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
+class PushbroomJob(Base):
+    """推扫拼图任务。计算在独立的推扫 worker 上跑，不进 job_runs。"""
+
+    __tablename__ = "pushbroom_jobs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    seq: Mapped[int] = mapped_column(
+        BigInteger, unique=True, nullable=False, server_default=text("nextval('pushbroom_jobs_seq')")
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32))
+    run_attempt: Mapped[int] = mapped_column(Integer, default=1)
+    input_dir: Mapped[str] = mapped_column(Text)
+    output_dir: Mapped[str] = mapped_column(Text)
+    params: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 提交时快速核对得到的架次信息：行列波段、字节数、gps 条数
+    flight: Mapped[dict] = mapped_column(JSONB, default=dict)
+    current_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    stage_progress: Mapped[float] = mapped_column(Float, default=0.0)
+    global_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stage_timings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    products: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PushbroomJobLog(Base):
+    __tablename__ = "pushbroom_job_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("pushbroom_jobs.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    level: Mapped[str] = mapped_column(String(16), default="info")
+    message: Mapped[str] = mapped_column(Text)
+
+
 class IncrementalRound(Base):
     """一轮增量拼图，对应一条现有处理任务。"""
 

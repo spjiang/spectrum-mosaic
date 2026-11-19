@@ -17,6 +17,14 @@ QUEUE_JOBS = "mosaic.jobs"
 QUEUE_CONTROL = "mosaic.control"
 QUEUE_PROGRESS = "mosaic.progress"
 QUEUE_EVENTS = "mosaic.events"
+MOSAIC_QUEUES = (QUEUE_JOBS, QUEUE_CONTROL, QUEUE_PROGRESS, QUEUE_EVENTS, f"{QUEUE_JOBS}.dlq")
+
+# 推扫 worker 专用。框幅 worker 不声明也不消费这些队列。
+PB_QUEUE_JOBS = "pushbroom.jobs"
+PB_QUEUE_CONTROL = "pushbroom.control"
+PB_QUEUE_PROGRESS = "pushbroom.progress"
+PB_QUEUE_EVENTS = "pushbroom.events"
+PUSHBROOM_QUEUES = (PB_QUEUE_JOBS, PB_QUEUE_CONTROL, PB_QUEUE_PROGRESS, PB_QUEUE_EVENTS, f"{PB_QUEUE_JOBS}.dlq")
 
 _RQ_CACHE: tuple[float, str] = (0.0, "unknown")
 _RQ_LOCK = threading.Lock()
@@ -45,11 +53,11 @@ class MQPublisher:
         self.url = url or get_settings().rabbitmq_url
         self._lock = threading.Lock()
 
-    def _open(self):
+    def _open(self, queues: tuple[str, ...] = MOSAIC_QUEUES):
         conn = pika.BlockingConnection(_amqp_params(self.url))
         try:
             ch = conn.channel()
-            for q in (QUEUE_JOBS, QUEUE_CONTROL, QUEUE_PROGRESS, QUEUE_EVENTS, f"{QUEUE_JOBS}.dlq"):
+            for q in queues:
                 ch.queue_declare(queue=q, durable=True)
             return conn, ch
         except Exception:
@@ -59,13 +67,13 @@ class MQPublisher:
                 pass
             raise
 
-    def _run(self, fn) -> Any:
+    def _run(self, fn, queues: tuple[str, ...] = MOSAIC_QUEUES) -> Any:
         last: Exception | None = None
         for attempt in range(2):
             conn = None
             try:
                 with self._lock:
-                    conn, ch = self._open()
+                    conn, ch = self._open(queues)
                     try:
                         return fn(ch)
                     finally:
@@ -98,13 +106,19 @@ class MQPublisher:
                 properties=pika.BasicProperties(delivery_mode=2, content_type="application/json"),
             )
 
-        self._run(_do)
+        self._run(_do, PUSHBROOM_QUEUES if queue in PUSHBROOM_QUEUES else MOSAIC_QUEUES)
 
     def publish_job(self, payload: dict[str, Any]) -> None:
         self.publish(QUEUE_JOBS, payload)
 
     def publish_control(self, payload: dict[str, Any]) -> None:
         self.publish(QUEUE_CONTROL, payload)
+
+    def publish_pushbroom_job(self, payload: dict[str, Any]) -> None:
+        self.publish(PB_QUEUE_JOBS, payload)
+
+    def publish_pushbroom_control(self, payload: dict[str, Any]) -> None:
+        self.publish(PB_QUEUE_CONTROL, payload)
 
     def purge_jobs(self) -> None:
         self._run(lambda ch: ch.queue_purge(QUEUE_JOBS))
@@ -160,7 +174,7 @@ def _probe_worker(url: str) -> str:
     return "error: 没有 Worker 在听 mosaic.jobs"
 
 
-def _probe_queue_stats(url: str) -> dict[str, int]:
+def _probe_queue_stats(url: str, queue: str = QUEUE_JOBS) -> dict[str, int]:
     params = pika.URLParameters(url)
     params.socket_timeout = 1.0
     params.blocked_connection_timeout = 1.0
@@ -171,7 +185,7 @@ def _probe_queue_stats(url: str) -> dict[str, int]:
     conn = pika.BlockingConnection(params)
     try:
         ch = conn.channel()
-        declared = ch.queue_declare(queue=QUEUE_JOBS, durable=True)
+        declared = ch.queue_declare(queue=queue, durable=True)
         return {
             "consumers": int(declared.method.consumer_count),
             "messages": int(declared.method.message_count),
@@ -180,9 +194,9 @@ def _probe_queue_stats(url: str) -> dict[str, int]:
         conn.close()
 
 
-def queue_stats(url: str | None = None) -> dict[str, int | None]:
+def queue_stats(url: str | None = None, queue: str = QUEUE_JOBS) -> dict[str, int | None]:
     u = url or get_settings().rabbitmq_url
-    fut = _PROBE_EXECUTOR.submit(_probe_queue_stats, u)
+    fut = _PROBE_EXECUTOR.submit(_probe_queue_stats, u, queue)
     try:
         return fut.result(timeout=_PROBE_TIMEOUT_S)
     except Exception:  # noqa: BLE001
@@ -238,12 +252,20 @@ class FakeMQPublisher:
     def __init__(self) -> None:
         self.jobs: list[dict] = []
         self.controls: list[dict] = []
+        self.pushbroom_jobs: list[dict] = []
+        self.pushbroom_controls: list[dict] = []
 
     def publish_job(self, payload: dict[str, Any]) -> None:
         self.jobs.append(payload)
 
     def publish_control(self, payload: dict[str, Any]) -> None:
         self.controls.append(payload)
+
+    def publish_pushbroom_job(self, payload: dict[str, Any]) -> None:
+        self.pushbroom_jobs.append(payload)
+
+    def publish_pushbroom_control(self, payload: dict[str, Any]) -> None:
+        self.pushbroom_controls.append(payload)
 
     def purge_jobs(self) -> None:
         self.jobs.clear()

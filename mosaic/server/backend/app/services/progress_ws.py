@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.services import jobs as jobsvc
-from app.services.mq import MQPublisher, QUEUE_EVENTS, QUEUE_PROGRESS
+from app.services import pushbroom as pbsvc
+from app.services.mq import MQPublisher, PB_QUEUE_EVENTS, PB_QUEUE_PROGRESS, QUEUE_EVENTS, QUEUE_PROGRESS
 from app.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -97,6 +98,10 @@ def start_consumers(loop: asyncio.AbstractEventLoop) -> None:
 
     threading.Thread(target=_consume_loop, args=(QUEUE_PROGRESS, on_progress), daemon=True).start()
     threading.Thread(target=_consume_loop, args=(QUEUE_EVENTS, on_event), daemon=True).start()
+    if get_settings().pushbroom_enabled:
+        # 推扫页面按轮询刷新，这里只落库，不走 WebSocket
+        threading.Thread(target=_consume_loop, args=(PB_QUEUE_PROGRESS, pbsvc.apply_progress), daemon=True).start()
+        threading.Thread(target=_consume_loop, args=(PB_QUEUE_EVENTS, pbsvc.apply_event), daemon=True).start()
 
 
 def _job_dict(job) -> dict:

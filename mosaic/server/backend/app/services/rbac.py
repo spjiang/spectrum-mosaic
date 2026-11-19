@@ -9,6 +9,8 @@ ROLES = ("admin", "configurator", "executor", "viewer")
 MENU_KEYS = (
     "execute",
     "incremental",
+    "pushbroom_new",
+    "pushbroom_jobs",
     "profiles",
     "jobs",
     "seam",
@@ -29,7 +31,17 @@ PUBLIC_MENUS = ("cli", "seam")
 DEFAULT_MENUS: dict[str, list[str]] = {
     "admin": list(MENU_KEYS),
     "configurator": ["profiles", "jobs", "seam", "settings", "inspect", "cli"],
-    "executor": ["execute", "incremental", "profiles", "jobs", "seam", "inspect", "cli"],
+    "executor": [
+        "execute",
+        "incremental",
+        "pushbroom_new",
+        "pushbroom_jobs",
+        "profiles",
+        "jobs",
+        "seam",
+        "inspect",
+        "cli",
+    ],
     "viewer": ["profiles", "jobs", "seam", "inspect", "cli"],
 }
 
@@ -52,6 +64,36 @@ def _ensure_public(keys: list[str]) -> list[str]:
     if "execute" in out and "incremental" not in out:
         out.append("incremental")
     return out
+
+
+SEEDED_KEY = "rbac_menus_seeded"
+# 后加的菜单：已保存过菜单的角色只要能新建处理，升级时补一次。
+# 之后管理员在角色页去掉也不会再被补回。
+GRANT_WITH_EXECUTE = ("pushbroom_new", "pushbroom_jobs")
+
+
+def seed_new_menus(db: Session) -> list[str]:
+    marker = db.get(SystemSetting, SEEDED_KEY)
+    done = set(marker.value.get("keys") or []) if marker is not None and isinstance(marker.value, dict) else set()
+    pending = [k for k in GRANT_WITH_EXECUTE if k not in done]
+    if not pending:
+        return []
+    row = db.get(SystemSetting, RBAC_KEY)
+    if row is not None and isinstance(row.value, dict):
+        updated = dict(row.value)
+        for role in ROLES:
+            saved = updated.get(role)
+            if role == "admin" or not isinstance(saved, list) or "execute" not in saved:
+                continue
+            updated[role] = list(saved) + [k for k in pending if k not in saved]
+        row.value = updated
+    value = {"keys": sorted(done | set(pending))}
+    if marker is None:
+        db.add(SystemSetting(key=SEEDED_KEY, value=value))
+    else:
+        marker.value = value
+    db.commit()
+    return pending
 
 
 def default_mapping() -> dict[str, list[str]]:

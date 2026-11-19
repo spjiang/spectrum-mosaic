@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     hold_queue_while_awaiting: bool = False
     # compose 里 Worker 容器执行主程序，backend 不再在容器内探测本机 python
     cli_probe: bool = True
+    # 推扫拼图。关闭时菜单不显示、接口不受理；需要另起推扫 worker 镜像
+    pushbroom_enabled: bool = False
+    pushbroom_input_root: str = "/data/input/pushbroom"
+    pushbroom_output_root: str = "/data/output/pushbroom"
 
     def data_root_list(self) -> list[str]:
         return [p.strip() for p in self.data_roots.split(",") if p.strip()]
