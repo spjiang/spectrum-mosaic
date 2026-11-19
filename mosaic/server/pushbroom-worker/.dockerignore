@@ -1,0 +1,7 @@
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.cmp_*.npz
+tests
+scripts
+*.md
