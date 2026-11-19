@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,7 @@ from app.services.system_settings import (
     KEY_CLOCK_TOLERANCE_HOURS,
     KEY_LEASE_HOURS,
     KEY_LEASE_INTERVAL_HOURS,
+    KEY_LICENSE_SERVER_URL,
     get_lease_hours,
     get_lease_interval_hours,
     list_settings,
@@ -55,6 +58,20 @@ def _validate_value(key: str, value: str) -> str:
         return _validate_positive_hours(text, "租约有效期")
     if key == KEY_LEASE_INTERVAL_HOURS:
         return _validate_positive_hours(text, "租约领取间隔")
+    if key == KEY_LICENSE_SERVER_URL:
+        parsed = urlparse(text)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+        ):
+            raise HTTPException(status_code=400, detail="许可服务器地址须为 http://主机:端口，不要带路径")
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{parsed.hostname}{port}"
     if not text:
         raise HTTPException(status_code=400, detail="配置值不能为空")
     return text

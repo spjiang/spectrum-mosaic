@@ -1,4 +1,4 @@
-﻿# Windows 一键启动，对应 start.sh。
+# Windows 一键启动，对应 start.sh。
 # 在交付包根目录执行: powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
@@ -87,11 +87,12 @@ function Get-HostMachineId {
 
 function Get-HostMachineIdFromDocker {
     foreach ($image in @("postgres:16-alpine", "rabbitmq:3.13-management-alpine")) {
-        & docker image inspect $image 1>$null 2>$null
-        if ($LASTEXITCODE -ne 0) { continue }
+        # 镜像还没导入时 inspect 会写到错误流。在 Stop 下这会中断整个脚本。
         $prev = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
+            & docker image inspect $image 1>$null 2>$null
+            if ($LASTEXITCODE -ne 0) { continue }
             $raw = & docker run --rm -v /etc/machine-id:/host/machine-id:ro --entrypoint cat $image /host/machine-id 2>$null | Out-String
             if ($LASTEXITCODE -eq 0) {
                 $id = Read-MachineIdText $raw
@@ -194,13 +195,10 @@ if (Test-Path -LiteralPath "images\load-images.sh") {
                 if ($ref) {
                     $got = (docker image inspect --format "{{.Architecture}}" $ref).Trim()
                     Write-Host ">>> arch check $ref got=$got want=$want"
-                    if ($got -ne $want) {
-                        throw "$name 加载后架构为 $got，期望 $want。请换正确架构的交付包。"
-                    }
+                if ($got -ne $want) {
+                    throw "$name 加载后架构为 $got，期望 $want。请换正确架构的交付包。"
                 }
             }
-            if (-not $script:FingerprintShown) {
-                Show-MachineFingerprint (Get-HostMachineIdFromDocker) | Out-Null
             }
         }
     }

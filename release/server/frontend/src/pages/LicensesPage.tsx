@@ -102,11 +102,14 @@ export default function LicensesPage() {
           {
             title: "机器",
             dataIndex: "machine_id",
-            ellipsis: true,
             render: (v: string) =>
               v ? (
-                <Typography.Text copyable={{ text: v }} style={{ fontFamily: "ui-monospace, monospace" }}>
-                  {v.slice(0, 8)}…
+                <Typography.Text
+                  copyable={{ text: v }}
+                  className="lease-claims-full"
+                  style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
+                >
+                  {v}
                 </Typography.Text>
               ) : (
                 "未绑定"

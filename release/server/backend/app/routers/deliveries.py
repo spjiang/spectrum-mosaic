@@ -62,7 +62,7 @@ def create_delivery(
             include_image_tar=body.include_image_tar,
             db=db,
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     row = Delivery(

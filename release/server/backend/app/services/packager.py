@@ -11,7 +11,12 @@ from app.config import Settings
 from app.models import Customer, License, Release
 from app.services.image_arch import assert_tar_arch
 from app.services.release_images import resolve_worker_image
-from app.services.system_settings import format_hours, get_clock_tolerance_hours, get_lease_interval_hours
+from app.services.system_settings import (
+    format_hours,
+    get_clock_tolerance_hours,
+    get_lease_interval_hours,
+    get_license_server_url,
+)
 
 # 与 build_runner 产出、load-images.sh 一致
 _IMAGE_TARS = (
@@ -66,9 +71,13 @@ def build_delivery_zip(
 
     tolerance_hours = "1"
     interval_hours = "6"
+    license_server_url = ""
     if db is not None:
         tolerance_hours = format_hours(get_clock_tolerance_hours(db, customer=customer))
         interval_hours = format_hours(get_lease_interval_hours(db, customer=customer))
+        license_server_url = get_license_server_url(db)
+    if (license_row.machine_id or "").strip() and not license_server_url:
+        raise ValueError("绑定许可打包须先在全局配置填写许可服务器地址")
 
     compose_src = templates / "customer-compose.yml"
     gpu_compose_src = templates / "customer-compose.gpu.yml"
@@ -98,6 +107,7 @@ def build_delivery_zip(
             .replace("{{CUSTOMER}}", customer.name)
             .replace("{{LICENSE_CLOCK_TOLERANCE_HOURS}}", tolerance_hours)
             .replace("{{LICENSE_LEASE_CHECK_INTERVAL_HOURS}}", interval_hours)
+            .replace("{{LICENSE_SERVER_URL}}", license_server_url)
         )
         (staging / name).write_text(text, encoding="utf-8")
 

@@ -37,7 +37,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 
 页面默认 http://localhost:9080 （以 `.env` 中 `FRONTEND_PORT` 为准）。worker 启动时会校验许可；过期、签名无效、机器指纹不符或系统时间异常回拨时进程退出（详见 `docs/拼图服务私有部署操作手册.md`）。
 
-`start.sh` 或 `start.ps1` 会打印本机 `machine_id`。绑定许可须把该值交给供应商写入 `.lic`，并在 `.env` 填写 `LICENSE_SERVER_URL`（发版台地址）。未写 `machine_id` 的旧许可仍按离线方式校验。
+`start.sh` 或 `start.ps1` 会打印本机 `machine_id`。绑定许可须把该值交给供应商写入 `.lic`。`LICENSE_SERVER_URL` 已写在 `.env.example`，首次启动会复制到 `.env`。未写 `machine_id` 的旧许可仍按离线方式校验。
 
 ## 3. 操作手册
 

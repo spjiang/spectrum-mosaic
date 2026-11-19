@@ -60,7 +60,7 @@ export default function SystemConfigPage() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="这里是默认值。客户档案里留空时使用这些值；客户单独填写后优先用客户的值。租约有效期在下一次领取时生效。领取间隔和回拨容差写入新交付包。"
+        message="这里是默认值。客户档案里留空时使用这些值；客户单独填写后优先用客户的值。租约有效期在下一次领取时生效。许可服务器地址、领取间隔和回拨容差写入新交付包。"
       />
       <Form
         form={form}
@@ -105,7 +105,7 @@ export default function SystemConfigPage() {
                 row.updated_at ? `上次更新 ${dayjs(row.updated_at).format("YYYY-MM-DD HH:mm:ss")}` : undefined
               }
             >
-              <Input style={{ maxWidth: 320 }} />
+              <Input style={{ maxWidth: row.key === "license_server_url" ? 520 : 320 }} />
             </Form.Item>
             <Alert
               type="warning"

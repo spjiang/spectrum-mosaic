@@ -1,24 +1,36 @@
 import { useEffect, useState } from "react";
-import { Button, Card, Space, Typography, message } from "antd";
-import { DownloadOutlined, FileMarkdownOutlined, FilePdfOutlined } from "@ant-design/icons";
+import { Button, Card, Space, Tabs, Typography, message } from "antd";
+import { DownloadOutlined, FileMarkdownOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, download } from "../api/client";
 
+type ManualDoc = {
+  key: string;
+  title: string;
+  filename: string;
+  markdown: string;
+};
+
 type ManualMeta = {
   title: string;
-  markdown: string;
-  has_pdf: boolean;
+  docs: ManualDoc[];
 };
 
 export default function ManualPage() {
   const [meta, setMeta] = useState<ManualMeta | null>(null);
+  const [active, setActive] = useState("deploy");
 
   useEffect(() => {
     api<ManualMeta>("/api/manual")
-      .then(setMeta)
+      .then((data) => {
+        setMeta(data);
+        if (data.docs[0]) setActive(data.docs[0].key);
+      })
       .catch((e) => message.error(String(e)));
   }, []);
+
+  const current = meta?.docs.find((doc) => doc.key === active) ?? meta?.docs[0];
 
   return (
     <Card
@@ -32,22 +44,15 @@ export default function ManualPage() {
         </Space>
       }
       extra={
-        <Space wrap>
-          <Button
-            icon={<FileMarkdownOutlined />}
-            onClick={() => download("/api/manual/download?format=md", "操作手册.md")}
-          >
-            下载 Markdown
-          </Button>
+        current ? (
           <Button
             type="primary"
-            icon={<FilePdfOutlined />}
-            disabled={!meta?.has_pdf}
-            onClick={() => download("/api/manual/download?format=pdf", "操作手册.pdf")}
+            icon={<FileMarkdownOutlined />}
+            onClick={() => download(`/api/manual/download?doc=${current.key}`, current.filename)}
           >
-            下载 PDF
+            下载{current.title}
           </Button>
-        </Space>
+        ) : null
       }
     >
       {!meta ? (
@@ -56,12 +61,22 @@ export default function ManualPage() {
         <>
           <div className="mosaic-manual-actions">
             <Typography.Text type="secondary">
-              <DownloadOutlined /> 打交付包时会自动附带 `docs/操作手册.md` 与 `docs/操作手册.pdf`
+              <DownloadOutlined /> 打交付包时附带这两份 Markdown
             </Typography.Text>
           </div>
-          <article className="mosaic-manual-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{meta.markdown}</ReactMarkdown>
-          </article>
+          <Tabs
+            activeKey={current?.key}
+            onChange={setActive}
+            items={meta.docs.map((doc) => ({
+              key: doc.key,
+              label: doc.title,
+              children: (
+                <article className="mosaic-manual-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{doc.markdown}</ReactMarkdown>
+                </article>
+              ),
+            }))}
+          />
         </>
       )}
     </Card>

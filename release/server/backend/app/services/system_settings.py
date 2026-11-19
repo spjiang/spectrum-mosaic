@@ -10,6 +10,7 @@ from app.models import Customer, SystemSetting
 KEY_CLOCK_TOLERANCE_HOURS = "license_clock_tolerance_hours"
 KEY_LEASE_HOURS = "license_lease_hours"
 KEY_LEASE_INTERVAL_HOURS = "license_lease_interval_hours"
+KEY_LICENSE_SERVER_URL = "license_server_url"
 
 DEFAULT_LEASE_HOURS = 72.0
 DEFAULT_LEASE_INTERVAL_HOURS = 6.0
@@ -35,6 +36,13 @@ SETTING_SEEDS: list[dict[str, str]] = [
         "label": "租约领取间隔（小时）",
         "description": "客户 worker 运行期间自动向发版台领取租约的间隔。每次启动也会领取一次。应小于租约有效期。",
         "used_by": "客户 worker：ms_mosaic.license_check.lease_check_interval_seconds（环境变量 LICENSE_LEASE_CHECK_INTERVAL_HOURS）；打交付包时写入 docker-compose.yml → worker.environment",
+    },
+    {
+        "key": KEY_LICENSE_SERVER_URL,
+        "value": "http://123.56.26.229:8180",
+        "label": "许可服务器地址",
+        "description": "客户绑定许可领取租约的发版台根地址，不要带路径。打交付包时写入 .env.example 的 LICENSE_SERVER_URL，并作为 docker-compose.yml 的默认值。",
+        "used_by": "客户 worker：ms_mosaic.license_check.ensure_online_lease（环境变量 LICENSE_SERVER_URL）；打交付包时写入 .env.example 与 docker-compose.yml",
     },
 ]
 
@@ -110,6 +118,10 @@ def get_lease_interval_hours(db: Session, *, customer: Customer | None = None) -
         if parsed is not None:
             return parsed
     return _positive_hours(db, KEY_LEASE_INTERVAL_HOURS, DEFAULT_LEASE_INTERVAL_HOURS)
+
+
+def get_license_server_url(db: Session) -> str:
+    return get_setting_value(db, KEY_LICENSE_SERVER_URL, "").strip().rstrip("/")
 
 
 def format_hours(hours: float) -> str:

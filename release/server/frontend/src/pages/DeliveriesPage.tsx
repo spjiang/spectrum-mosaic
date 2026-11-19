@@ -324,6 +324,7 @@ export default function DeliveriesPage() {
       <Modal
         title="生成交付包"
         open={open}
+        width={640}
         confirmLoading={saving}
         onCancel={() => setOpen(false)}
         onOk={() => form.submit()}
@@ -369,7 +370,14 @@ export default function DeliveriesPage() {
           <Form.Item name="license_id" label="许可" rules={[{ required: true, message: "请选择许可" }]}>
             <Select
               placeholder="有效许可"
-              options={filteredLicenses.map((l) => ({ value: l.id, label: `${l.license_id.slice(0, 8)}…` }))}
+              popupMatchSelectWidth={false}
+              dropdownStyle={{ minWidth: 420 }}
+              options={filteredLicenses.map((l) => ({ value: l.id, label: l.license_id }))}
+              optionRender={(opt) => (
+                <span className="lease-claims-full" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
+                  {opt.label}
+                </span>
+              )}
             />
           </Form.Item>
           <Form.Item name="include_image_tar" valuePropName="checked">
