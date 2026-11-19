@@ -252,7 +252,8 @@ def group_match_jobs(pair_jobs: list) -> list[list[tuple[int, tuple]]]:
     for job in pair_jobs:
         degree[job[0]] += 1
         degree[job[1]] += 1
-    buckets: dict = defaultdict(list)
+    # 不能标成 dict。客户镜像用 Cython 编译本模块，dict 注解会拒绝 defaultdict。
+    buckets = defaultdict(list)
     for orig, job in enumerate(pair_jobs):
         i, j = job[0], job[1]
         if (degree[i], -i) >= (degree[j], -j):

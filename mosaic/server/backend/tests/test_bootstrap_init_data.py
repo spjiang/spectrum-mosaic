@@ -29,6 +29,20 @@ def test_ensure_worker_tree_owns_children_not_stop(tmp_path: Path):
     assert root.stat().st_mode & 0o777 == 0o700
 
 
+def test_ensure_worker_tree_chmod_when_owner_stays_root(tmp_path: Path, monkeypatch):
+    def noop_chown(_path, _uid, _gid):
+        return None
+
+    monkeypatch.setattr("app.services.paths.os.chown", noop_chown)
+    root = tmp_path / "data"
+    root.mkdir()
+    leaf = root / "output" / "runs" / "1530" / "log"
+    ensure_worker_tree(leaf, stop=root, uid=10001, gid=10001)
+    assert leaf.stat().st_uid != 10001
+    assert leaf.stat().st_mode & 0o777 == 0o777
+    assert (root / "output").stat().st_mode & 0o777 == 0o777
+
+
 def test_ensure_worker_tree_falls_back_when_chown_denied(tmp_path: Path, monkeypatch):
     def deny(_path, _uid, _gid):
         raise PermissionError("denied")

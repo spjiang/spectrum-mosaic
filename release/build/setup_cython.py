@@ -29,5 +29,9 @@ if not exts:
 
 setup(
     name="ms_mosaic_customer",
-    ext_modules=cythonize(exts, language_level="3", compiler_directives={"boundscheck": False}),
+    ext_modules=cythonize(
+        exts,
+        language_level="3",
+        compiler_directives={"boundscheck": False, "annotation_typing": False},
+    ),
 )

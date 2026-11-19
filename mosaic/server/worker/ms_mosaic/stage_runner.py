@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,8 @@ from ms_mosaic.gpu import set_job_gpu
 from ms_mosaic.memory import set_oom_backoff
 from ms_mosaic.pipeline import run_mosaic
 from ms_mosaic.progress import NullReporter, ProgressReporter, global_percent_for, stage_index
+
+log = logging.getLogger("ms_mosaic.stage_runner")
 
 
 def _should_run(stage: str, start: str, stop: str | None) -> bool:
@@ -205,8 +209,10 @@ def _run_stages_body(
             flatten_edge_band_m=_as_float(params.get("flatten_edge_band_m")),
         )
     except Exception as exc:  # noqa: BLE001
-        reporter.event("failed", error=str(exc))
-        return {"status": "failed", "error": str(exc)}
+        detail = traceback.format_exc()
+        log.error("任务失败: %s\n%s", exc, detail)
+        reporter.event("failed", error=detail)
+        return {"status": "failed", "error": detail}
 
     status = result.get("status") or "succeeded"
     if status == "awaiting_continue":

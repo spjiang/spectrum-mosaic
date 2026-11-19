@@ -19,7 +19,7 @@ from app.presets import RGB_PREVIEW_VALUES
 from app.services.mq import MQPublisher
 from app.services.resolution import apply_resolution_choice, needs_resolution_choice
 from app.services.params import assert_param_values
-from app.services.paths import detach_derived_dirs, stamp_run_output_dir, validate_paths
+from app.services.paths import detach_derived_dirs, prepare_job_dirs, stamp_run_output_dir, validate_paths
 from app.services.stage_steps import persist_stage_steps
 from app.services.worker_env import apply_worker_env
 from app.services.worker_inspect import heartbeat_holds_job
@@ -304,6 +304,13 @@ def create_job(
     paths = resolve_paths(snap, input_dir, output_dir)
     for k, v in paths.items():
         snap[k] = v
+    prepare_job_dirs(
+        paths["output_dir"],
+        paths["log_dir"],
+        paths["cache_dir"],
+        paths["process_dir"],
+        paths["products_dir"],
+    )
 
     queued = db.scalar(select(JobRun).where(JobRun.status == "queued"))
     job = JobRun(

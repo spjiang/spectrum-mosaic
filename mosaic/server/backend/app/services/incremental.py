@@ -25,7 +25,7 @@ from app.config import Settings
 from app.models import IncrementalFile, IncrementalProject, IncrementalRound, JobRun, User
 from app.services.jobs import append_run_log, assert_single_running, create_job, resolve_paths
 from app.services.mq import MQPublisher
-from app.services.paths import detach_derived_dirs, stamp_run_output_dir, validate_paths
+from app.services.paths import detach_derived_dirs, prepare_job_dirs, stamp_run_output_dir, validate_paths
 
 log = logging.getLogger("uvicorn.error")
 
@@ -464,6 +464,13 @@ def _rerun_same_job(
     paths = resolve_paths(snap, project.input_dir, output_dir)
     for key, value in paths.items():
         snap[key] = value
+    prepare_job_dirs(
+        paths["output_dir"],
+        paths["log_dir"],
+        paths["cache_dir"],
+        paths["process_dir"],
+        paths["products_dir"],
+    )
     job.params_snapshot = snap
     job.input_dir = paths["input_dir"]
     job.output_dir = paths["output_dir"]

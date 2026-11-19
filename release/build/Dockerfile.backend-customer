@@ -7,4 +7,5 @@ COPY mosaic/server/backend/app ./app
 # 结构 init.sql + 种子 init-data.sql + 存量 migrations
 COPY mosaic/server/db /db
 ENV PYTHONUNBUFFERED=1
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 新建任务目录的默认权限受 umask 影响。000 让 worker（uid 10001）能写入 root 刚建的目录。
+CMD ["sh", "-c", "umask 000 && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

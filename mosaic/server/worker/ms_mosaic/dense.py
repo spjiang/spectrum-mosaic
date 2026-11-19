@@ -341,7 +341,14 @@ def _sgm_aggregate(cost: np.ndarray, p1: float, p2: float, xp=np) -> np.ndarray:
     shifts = ((0, 1), (0, -1), (1, 1), (1, -1))
     layer_idx = xp.arange(n_z)
     jump = xp.abs(layer_idx[:, None] - layer_idx[None, :])
-    penalty = xp.where(jump == 0, 0.0, xp.where(jump == 1, p1, p2))
+    # 惩罚必须跟代价体同精度。Python 浮点是 float64，写进 float32 时
+    # NumPy 会降精度，CuPy 直接抛错，显卡路径就会整段退回 CPU。
+    dtype = cost.dtype
+    penalty = xp.where(
+        jump == 0,
+        xp.zeros((), dtype),
+        xp.where(jump == 1, xp.asarray(p1, dtype=dtype), xp.asarray(p2, dtype=dtype)),
+    )
 
     for axis, step in shifts:
         agg = cost.copy()
@@ -369,6 +376,7 @@ def _sgm_aggregate(cost: np.ndarray, p1: float, p2: float, xp=np) -> np.ndarray:
 # 这些进程里的半全局聚合仍走显卡。窗口相关仍在 CPU。
 GPU_DENSE_PROCS_PER_CARD = 4
 _gpu_aggregate_failed = False
+_gpu_aggregate_error = ""
 
 
 def _dense_gpu_devices(label: str, workers, gray_bytes: int, log) -> tuple[list[int], int]:
@@ -384,6 +392,14 @@ def _dense_gpu_devices(label: str, workers, gray_bytes: int, log) -> tuple[list[
     if not devices:
         if log is not None:
             log(describe_gpu(label, choice))
+        return [], procs
+    ready_error = _gpu_aggregate_ready(int(devices[0]))
+    if ready_error:
+        if log is not None:
+            log(
+                f"{label}：半全局聚合无法使用 GPU {devices[0]}（{ready_error}），"
+                f"改为 {procs} 个 CPU 进程"
+            )
         return [], procs
     used = min(procs, GPU_DENSE_PROCS_PER_CARD * len(devices))
     if log is not None:
@@ -402,14 +418,35 @@ def _pick_dense_device(devices: list[int] | None) -> int | None:
 
 
 # 本进程最近一块的耗时。子进程把这块带回主进程，进度行才知道是哪张卡。
-_last_agg = {"gpu": None, "copy_to": 0.0, "calc": 0.0, "copy_back": 0.0}
+_last_agg = {"gpu": None, "copy_to": 0.0, "calc": 0.0, "copy_back": 0.0, "error": ""}
 
 
-def _stamp_agg(gpu: int | None, copy_to: float, calc: float, copy_back: float) -> None:
+def _stamp_agg(
+    gpu: int | None,
+    copy_to: float,
+    calc: float,
+    copy_back: float,
+    error: str = "",
+) -> None:
     _last_agg["gpu"] = gpu
     _last_agg["copy_to"] = copy_to
     _last_agg["calc"] = calc
     _last_agg["copy_back"] = copy_back
+    _last_agg["error"] = error
+
+
+def _gpu_aggregate_ready(device: int) -> str | None:
+    """试跑一小块。失败时返回异常文本，调用方改用全部 CPU 进程，不再卡在每卡 4 个。"""
+    try:
+        import cupy as cp
+
+        cost = cp.zeros((4, 6, 6), dtype=cp.float32)
+        with cp.cuda.Device(int(device)):
+            _sgm_aggregate(cost, SGM_P1, SGM_P2, cp)
+            cp.cuda.Stream.null.synchronize()
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 def format_dense_gpu_progress(totals: dict) -> str:
@@ -431,26 +468,39 @@ def format_dense_gpu_progress(totals: dict) -> str:
 def _dense_progress_note():
     """主进程累计各卡耗时。每块都记，进度行每 10 块打一次累计。"""
     totals: dict = {}
+    error = ""
 
     def note(result):
+        nonlocal error
         info = result[3]
         key = info.get("gpu")
         slot = totals.setdefault(key, [0.0, 0.0, 0.0])
         slot[0] += float(info.get("copy_to") or 0.0)
         slot[1] += float(info.get("calc") or 0.0)
         slot[2] += float(info.get("copy_back") or 0.0)
-        return format_dense_gpu_progress(totals)
+        if info.get("error"):
+            error = str(info["error"])
+        text = format_dense_gpu_progress(totals)
+        if error:
+            text += f"。显卡聚合失败（{error}），已改用 CPU"
+        return text
 
     return note
 
 
 def _aggregate_cost(cost: np.ndarray, p1: float, p2: float, device: int | None) -> np.ndarray:
     """半全局聚合。显卡走同一套递推；失败则退回 CPU，选层结果不变。"""
-    global _gpu_aggregate_failed
+    global _gpu_aggregate_failed, _gpu_aggregate_error
     if device is None or _gpu_aggregate_failed:
         started = time.perf_counter()
         out = _sgm_aggregate(cost, p1, p2)
-        _stamp_agg(None, 0.0, time.perf_counter() - started, 0.0)
+        _stamp_agg(
+            None,
+            0.0,
+            time.perf_counter() - started,
+            0.0,
+            error=_gpu_aggregate_error if _gpu_aggregate_failed else "",
+        )
         return out
     try:
         import cupy as cp
@@ -470,11 +520,13 @@ def _aggregate_cost(cost: np.ndarray, p1: float, p2: float, device: int | None) 
             copy_back = time.perf_counter() - started
         _stamp_agg(int(device), copy_to, calc, copy_back)
         return out
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         _gpu_aggregate_failed = True
+        if not _gpu_aggregate_error:
+            _gpu_aggregate_error = f"{type(exc).__name__}: {exc}"
         started = time.perf_counter()
         out = _sgm_aggregate(cost, p1, p2)
-        _stamp_agg(None, 0.0, time.perf_counter() - started, 0.0)
+        _stamp_agg(None, 0.0, time.perf_counter() - started, 0.0, error=_gpu_aggregate_error)
         return out
 
 
@@ -947,7 +999,7 @@ def _dense_setup(payload: dict):
 
 def _dense_fn(ctx: dict, window: tuple[int, int, int, int]):
     row0, col0, rows, cols = window
-    _stamp_agg(None, 0.0, 0.0, 0.0)
+    _stamp_agg(None, 0.0, 0.0, 0.0, error=_gpu_aggregate_error)
     tile_z, tile_conf, tile_views = sweep_tile(
         ctx["grid"],
         window,

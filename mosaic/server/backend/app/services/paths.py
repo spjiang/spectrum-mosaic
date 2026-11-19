@@ -57,8 +57,8 @@ def ensure_worker_tree(
 ) -> None:
     """创建 path，并把 stop 之下的每一层交给 worker。
 
-    stop 本身不动（通常是 start.sh 准备好的 /data）。目录模式 0755，只有属主可写。
-    没有 chown 权限时，仅把这些子目录改成 0777，避免试用账号无法落盘。
+    stop 本身不动（通常是 /data）。能把属主改成 worker 时用 0755。
+    Windows 绑定挂载常忽略 chown，属主仍是 root 时改为 0777，否则 worker 写不了任务目录。
     """
     path.mkdir(parents=True, exist_ok=True)
     current = path.resolve()
@@ -76,9 +76,21 @@ def ensure_worker_tree(
     for directory in reversed(chain):
         try:
             os.chown(directory, uid, gid)
-            directory.chmod(0o755)
         except PermissionError:
             directory.chmod(0o777)
+            continue
+        if directory.stat().st_uid == uid:
+            directory.chmod(0o755)
+        else:
+            directory.chmod(0o777)
+
+
+def prepare_job_dirs(*paths: str, stop: Path | None = None) -> None:
+    """任务目录在投递 worker 之前建好，并允许 uid 10001 写入。"""
+    boundary = stop or Path("/data")
+    for raw in paths:
+        if raw:
+            ensure_worker_tree(Path(raw), stop=boundary)
 
 
 def trial_dirs(username: str) -> tuple[str, str]:

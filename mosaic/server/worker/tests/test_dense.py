@@ -281,6 +281,29 @@ def test_sgm_aggregate_respects_strong_local_evidence():
     assert int(np.argmin(agg[:, 6, 6])) == 1
 
 
+class _StrictFloat32(np.ndarray):
+    """CuPy 拒绝把 float64 写进 float32；NumPy 会悄悄降精度，所以这里单独卡住。"""
+
+    def __new__(cls, array):
+        return np.asarray(array, dtype=np.float32).view(cls)
+
+    def __setitem__(self, key, value):
+        value = np.asarray(value)
+        if value.dtype.itemsize > self.dtype.itemsize:
+            raise TypeError(f"Cannot cast {value.dtype} to {self.dtype}")
+        super().__setitem__(key, value)
+
+    def copy(self):
+        return _StrictFloat32(np.array(self, copy=True))
+
+
+def test_sgm_aggregate_does_not_store_float64_into_float32():
+    cost = _StrictFloat32(np.ones((4, 5, 6), np.float32))
+    cost[1] = np.float32(0.0)
+    agg = _sgm_aggregate(cost, 0.06, 0.35)
+    assert int(np.argmin(agg[:, 2, 2])) == 1
+
+
 def test_subpixel_z_finds_parabola_vertex():
     z_values = np.linspace(-1.0, 1.0, 5)
     # 顶点刻意放在第 2、3 层之间
@@ -577,6 +600,7 @@ def test_dense_gpu_caps_contexts_at_four_per_card(monkeypatch):
             [i % 2 for i in range(n)],
         ),
     )
+    monkeypatch.setattr("ms_mosaic.dense._gpu_aggregate_ready", lambda device: None)
     logs: list[str] = []
     devices, n_workers = _dense_gpu_devices("密集匹配", 32, 1000, logs.append)
     assert devices == [0, 1]
@@ -598,9 +622,52 @@ def test_dense_gpu_one_card_caps_at_four_processes(monkeypatch):
             [0] * n,
         ),
     )
+    monkeypatch.setattr("ms_mosaic.dense._gpu_aggregate_ready", lambda device: None)
     devices, n_workers = _dense_gpu_devices("密集匹配", 32, 1000, None)
     assert devices == [0]
     assert n_workers == 4
+
+
+def test_dense_gpu_aggregate_failure_keeps_cpu_worker_count(monkeypatch):
+    """显卡聚合抛错时不能把进程留在每卡 4 个上，否则退回 CPU 后比纯 CPU 还慢。"""
+    from ms_mosaic.dense import _dense_gpu_devices
+    from ms_mosaic.gpu import GpuChoice
+
+    monkeypatch.setattr("ms_mosaic.parallel.resolve_workers", lambda workers, per_worker_mb=None: 11)
+    monkeypatch.setattr(
+        "ms_mosaic.gpu.assign_devices",
+        lambda stage, n: (
+            GpuChoice(device=0, budget_bytes=1, name="RTX 4070 Ti SUPER", reason=""),
+            [0] * n,
+        ),
+    )
+    monkeypatch.setattr(
+        "ms_mosaic.dense._gpu_aggregate_ready",
+        lambda device: "TypeError: Cannot cast float64 to float32",
+    )
+    logs: list[str] = []
+    devices, n_workers = _dense_gpu_devices("密集匹配", 11, 1000, logs.append)
+    assert devices == []
+    assert n_workers == 11
+    assert len(logs) == 1
+    assert "Cannot cast float64 to float32" in logs[0]
+    assert "11 个 CPU 进程" in logs[0]
+
+
+def test_dense_progress_reports_gpu_fallback_reason():
+    from ms_mosaic.dense import _dense_progress_note
+
+    note = _dense_progress_note()
+    text = note((None, None, None, {
+        "gpu": None,
+        "copy_to": 0.0,
+        "calc": 1.0,
+        "copy_back": 0.0,
+        "error": "TypeError: Cannot cast float64 to float32",
+    }))
+    assert "CPU 累计计算 1.0 秒" in text
+    assert "Cannot cast float64 to float32" in text
+    assert "已改用 CPU" in text
 
 
 def test_dense_without_gpu_keeps_the_memory_worker_count(monkeypatch):

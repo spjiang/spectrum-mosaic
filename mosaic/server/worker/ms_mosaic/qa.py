@@ -74,8 +74,8 @@ def band_rms_px(block: Block, at) -> dict[str, float | None]:
     if not counts or not sq:
         return {band: global_rms for band in block.band_order() if band in block.cameras}
     by_index = {im.index: im for im in block.images}
-    band_n: dict[str, int] = defaultdict(int)
-    band_sq: dict[str, float] = defaultdict(float)
+    band_n = defaultdict(int)
+    band_sq = defaultdict(float)
     for idx, n in counts.items():
         im = by_index.get(int(idx))
         if im is None:
@@ -323,7 +323,7 @@ def connected_sequences(matches: Iterable[PairMatches], indices: Sequence[int]) 
 
     for pm in matches:
         union(int(pm.i), int(pm.j))
-    groups: dict[int, list[int]] = defaultdict(list)
+    groups = defaultdict(list)
     for i in parent:
         groups[find(i)].append(i)
     seqs = [sorted(v) for v in groups.values()]
@@ -485,7 +485,7 @@ def build_quality_payload(
     feat_max = _image_tag(by_index[kp_items[max_i][0]], str(max_kp)) if max_i >= 0 else "-"
     feat_min = _image_tag(by_index[kp_items[min_i][0]], str(min_kp)) if min_i >= 0 else "-"
 
-    pair_count: dict[int, int] = defaultdict(int)
+    pair_count = defaultdict(int)
     max_two_view = 0
     for pm in matches:
         n = len(pm)

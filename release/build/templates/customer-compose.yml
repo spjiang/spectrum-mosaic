@@ -38,6 +38,8 @@ services:
     image: ${BACKEND_IMAGE:-spectrum-mosaic-backend:{{VERSION}}-{{ARCH}}}
     platform: linux/{{ARCH}}
     pull_policy: never
+    # 旧后端镜像没有建目录时的授权。umask 000 保证之后新建的任务目录 worker 能写。
+    entrypoint: ["sh", "-c", "umask 000 && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mosaic}:${POSTGRES_PASSWORD:-mosaic_secret}@postgres:5432/${POSTGRES_DB:-mosaic_visual}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/

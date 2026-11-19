@@ -100,6 +100,8 @@ else
   docker compose -f docker-compose.yml up -d
 fi
 docker compose ps
+echo ">>> 放开 data 目录，供 worker 写入"
+docker compose exec -T backend chmod -R a+rwX /data
 
 FRONTEND_PORT=9080
 line=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | head -1 || true)

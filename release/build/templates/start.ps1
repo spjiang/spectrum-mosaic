@@ -250,6 +250,11 @@ if ($gpuFile -and (Test-HostNvidia)) {
     Invoke-Checked docker compose -f docker-compose.yml up -d
 }
 docker compose ps
+Write-Host ">>> 放开 data 目录，供 worker 写入"
+docker compose exec -T backend chmod -R a+rwX /data
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "未能调整 /data 权限。worker 可能无法写入新建的任务目录。"
+}
 
 $frontendPort = "9080"
 if (Test-Path -LiteralPath ".env") {
