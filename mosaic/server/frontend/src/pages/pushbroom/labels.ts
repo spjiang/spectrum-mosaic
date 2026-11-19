@@ -3,10 +3,10 @@ import type { PushbroomFlight, PushbroomJob } from "../../api";
 /** 与推扫 worker 的 pb_mosaic.stages 保持一致 */
 export const PB_STAGES: { id: string; label: string }[] = [
   { id: "P0_check", label: "核对三件套" },
-  { id: "P1_trajectory", label: "轨迹插值" },
+  { id: "P1_trajectory", label: "轨迹与时间" },
   { id: "P2_strips", label: "切航带" },
-  { id: "P3_resample", label: "航带重采样" },
-  { id: "P4_merge", label: "镶嵌" },
+  { id: "P3_align", label: "航带配准" },
+  { id: "P4_mosaic", label: "重采样镶嵌" },
   { id: "P5_products", label: "写成果" },
   { id: "P6_report", label: "报告" },
 ];

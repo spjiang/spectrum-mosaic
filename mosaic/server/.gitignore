@@ -6,3 +6,4 @@ frontend/dist/
 *.pyc
 .DS_Store
 data/.worker/
+data/.pushbroom-worker/

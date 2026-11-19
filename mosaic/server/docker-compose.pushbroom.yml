@@ -1,0 +1,35 @@
+# 本地开发：推扫拼图。叠加在 docker-compose.yml 上使用，只给 backend 加开关和数据挂载，其余服务不动：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.pushbroom.yml up -d --build backend pushbroom-worker
+#
+# 架次目录默认取仓库里的 docs/需求/无人机数据（每个子目录一个 FigSpec 架次），
+# 可用 DATASET_PUSHBROOM 指到别处。容器里只读挂在 /data/input/pushbroom。
+name: server
+
+services:
+  backend:
+    environment:
+      PUSHBROOM_ENABLED: "true"
+    volumes:
+      - ${DATASET_PUSHBROOM:-../../docs/需求/无人机数据}:/data/input/pushbroom:ro
+
+  pushbroom-worker:
+    build: ./pushbroom-worker
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
+      PB_INPUT_ROOTS: /data/input
+      PB_OUTPUT_ROOTS: /data/output
+      # 算法自身的内存预算；要比 mem_limit 小，留出解释器和页缓存
+      PB_MAX_MEMORY_GB: ${PB_MAX_MEMORY_GB:-8}
+    volumes:
+      # 开发时直接挂源码，改完 docker compose restart pushbroom-worker 即生效
+      - ./pushbroom-worker/pb_mosaic:/app/pb_mosaic:ro
+      - ./data:/data
+      - ${DATASET_PUSHBROOM:-../../docs/需求/无人机数据}:/data/input/pushbroom:ro
+    mem_limit: ${PB_MEM_LIMIT:-12g}
+    # 停机时 worker 会杀掉正在跑的任务并回报「服务停止」，需要几秒
+    stop_grace_period: 30s
+    init: true
+    depends_on:
+      rabbitmq:
+        condition: service_healthy

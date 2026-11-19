@@ -328,6 +328,8 @@ export default function PushbroomJobsPage() {
         rowKey="id"
         loading={loading}
         dataSource={rows}
+        tableLayout="fixed"
+        scroll={{ x: admin ? 1240 : 1130 }}
         pagination={{
           current: page,
           pageSize,
@@ -345,6 +347,7 @@ export default function PushbroomJobsPage() {
           {
             title: "任务",
             dataIndex: "title",
+            width: 220,
             ellipsis: true,
             render: (_: unknown, r: PushbroomJob) => (
               <Button type="link" style={{ padding: 0 }} onClick={() => openJob(r.id)}>
@@ -359,7 +362,8 @@ export default function PushbroomJobsPage() {
           { title: "耗时", width: 120, render: (_: unknown, r: PushbroomJob) => formatDuration(elapsedSeconds(r)) },
           {
             title: "操作",
-            width: 200,
+            width: 180,
+            fixed: "right" as const,
             render: (_: unknown, r: PushbroomJob) => (
               <Space size={0}>
                 <Button type="link" onClick={() => openJob(r.id)}>
