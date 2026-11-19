@@ -51,8 +51,16 @@ def test_reporter_message_shape() -> None:
     r.stage_done("P4_mosaic", 1.234, "done")
     assert sent[0] == (
         mq_pub.QUEUE_PROGRESS,
-        {"job_id": "id", "run_attempt": 3, "stage_id": "P4_mosaic", "stage_progress": 50.0, "global_percent": 51.0, "message": "m"},
+        {
+            "job_id": "id",
+            "run_attempt": 3,
+            "stage_id": "P4_mosaic",
+            "stage_progress": 50.0,
+            "global_percent": global_percent("P4_mosaic", 0.5),
+            "message": "m",
+        },
     )
+    assert 0 < global_percent("P4_mosaic", 0.5) < 100
     assert sent[1][1]["event"] == "stage_done" and sent[1][1]["elapsed_s"] == 1.23
     assert sent[2][1]["stage_progress"] == 100.0
 

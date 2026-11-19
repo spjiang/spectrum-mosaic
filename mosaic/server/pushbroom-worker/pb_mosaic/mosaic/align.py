@@ -4,7 +4,7 @@
 1. 每条航带单独用一个波段成图，有重叠的航带对做带通滤波后的
    归一化互相关（NCC），保留前几个相关峰作为候选平移。
    镶嵌时重叠区取离各自中线最近的航带，看得见的接缝只在相邻航带中间。
-   航带内有随旁向位置变化的残余形变（整条平移消不掉），所以只在接缝两侧
+   狭缝剪切（见 refine.py）让错位随旁向位置变化，整条平移消不掉，所以只在接缝两侧
    一窄条里量：量到的就是接缝处要的平移，相关性也比全重叠区高得多。
    不形成接缝的航带对（隔一条的同向航带）只用全重叠区量，权重很低，仅用于连通。
 2. 最小二乘解每条航带的平移量（b − a = 平移），按相关性加权，
@@ -136,26 +136,51 @@ def center_distance(geom: StripGeometry, grid: OutputGrid) -> np.ndarray:
     return _render(geom, grid, None)[1]
 
 
+@dataclass
+class StripRaster:
+    """一条航带在格网上的最近邻采样。航带外 ok 为假，line/sample 为 nan。"""
+
+    img: np.ndarray
+    ok: np.ndarray
+    line: np.ndarray  # 航带内行号（浮点）
+    sample: np.ndarray  # 像元号（浮点）
+
+
+def sample_strip(geom: StripGeometry, grid: OutputGrid, plane: np.ndarray | None, line0: int = 0) -> StripRaster:
+    """plane[k] 是原始第 line0 + k 行；plane 为 None 时只算几何。"""
+    shape = (grid.height, grid.width)
+    out = StripRaster(
+        img=np.zeros(shape, dtype=np.float32),
+        ok=np.zeros(shape, dtype=bool),
+        line=np.full(shape, np.nan),
+        sample=np.full(shape, np.nan),
+    )
+    box = strip_boxes([geom], grid)[0]
+    if box.r0 >= box.r1 or box.c0 >= box.c1:
+        return out
+    qx, qy = np.meshgrid(grid.col_x(np.arange(box.c0, box.c1)), grid.row_y(np.arange(box.r0, box.r1)))
+    li, si, good = geom.invert(qx.ravel(), qy.ravel())
+    if plane is not None:
+        lk = np.clip(np.rint(li), 0, geom.n - 1).astype(np.int64) + geom.strip.line_start - line0
+        sk = np.clip(np.rint(si), 0, geom.sensor.samples - 1).astype(np.int64)
+        good &= (lk >= 0) & (lk < plane.shape[0])
+        sub = np.zeros(qx.size, dtype=np.float32)
+        sub[good] = plane[lk[good], sk[good]]
+        out.img[box.r0 : box.r1, box.c0 : box.c1] = sub.reshape(qx.shape)
+    win = (slice(box.r0, box.r1), slice(box.c0, box.c1))
+    out.ok[win] = good.reshape(qx.shape)
+    out.line[win] = np.where(good, li, np.nan).reshape(qx.shape)
+    out.sample[win] = np.where(good, si, np.nan).reshape(qx.shape)
+    return out
+
+
 def _render(
     geom: StripGeometry, grid: OutputGrid, plane: np.ndarray | None, line0: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
-    box = strip_boxes([geom], grid)[0]
-    img = np.zeros((grid.height, grid.width), dtype=np.float32)
-    dist = np.full(img.shape, np.inf, dtype=np.float32)
-    if box.r0 >= box.r1 or box.c0 >= box.c1:
-        return img, dist
-    qx, qy = np.meshgrid(grid.col_x(np.arange(box.c0, box.c1)), grid.row_y(np.arange(box.r0, box.r1)))
-    li, si, good = geom.invert(qx.ravel(), qy.ravel())
-    d = np.abs(si - geom.sensor.center_px) * geom.sensor.gsd_cross_m
-    if plane is not None:
-        li = np.clip(np.rint(li), 0, geom.n - 1).astype(np.int64) + geom.strip.line_start - line0
-        si = np.clip(np.rint(si), 0, geom.sensor.samples - 1).astype(np.int64)
-        good &= (li >= 0) & (li < plane.shape[0])
-        sub = np.zeros(qx.size, dtype=np.float32)
-        sub[good] = plane[li[good], si[good]]
-        img[box.r0 : box.r1, box.c0 : box.c1] = sub.reshape(qx.shape)
-    dist[box.r0 : box.r1, box.c0 : box.c1] = np.where(good, d, np.inf).reshape(qx.shape)
-    return img, dist
+    r = sample_strip(geom, grid, plane, line0)
+    with np.errstate(invalid="ignore"):
+        dist = np.where(r.ok, np.abs(r.sample - geom.sensor.center_px) * geom.sensor.gsd_cross_m, np.inf)
+    return r.img, dist.astype(np.float32)
 
 
 def bandpass(x: np.ndarray, m: np.ndarray) -> np.ndarray:
@@ -173,9 +198,15 @@ def bandpass(x: np.ndarray, m: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class Peak:
-    drow: int
-    dcol: int
+    drow: float  # subpixel=False 时为整数
+    dcol: float
     ncc: float
+
+
+def _parabola(m: float, c: float, p: float) -> float:
+    """三点抛物线顶点相对中点的偏移，限制在 ±0.5。"""
+    den = m - 2 * c + p
+    return float(np.clip(0.5 * (m - p) / den, -0.5, 0.5)) if den < 0 else 0.0
 
 
 def ncc_search(
@@ -187,10 +218,12 @@ def ncc_search(
     *,
     min_cover: float = 0.3,
     n_peaks: int = 1,
+    subpixel: bool = False,
 ) -> tuple[list[Peak], int]:
     """tpl 平移 (drow, dcol) 后与 ref 的归一化互相关；只在两边都有数据处计算。
 
     返回按相关性从高到低的前 n_peaks 个局部极大值（不含搜索边界上的），以及模板像元数。
+    subpixel 时按峰两侧的相关值做抛物线插值。
     """
     from scipy.ndimage import maximum_filter
     from scipy.signal import fftconvolve
@@ -223,7 +256,13 @@ def ncc_search(
     peak[:, [0, -1]] = False
     pr, pc = np.nonzero(peak)
     order = np.argsort(ncc[pr, pc])[::-1][:n_peaks]
-    out = [Peak(int(sr0 + pr[k] - r0), int(sc0 + pc[k] - c0), float(ncc[pr[k], pc[k]])) for k in order]
+    out = []
+    for k in order:
+        r, c = pr[k], pc[k]
+        dr = _parabola(ncc[r - 1, c], ncc[r, c], ncc[r + 1, c]) if subpixel else 0.0
+        dc = _parabola(ncc[r, c - 1], ncc[r, c], ncc[r, c + 1]) if subpixel else 0.0
+        drow, dcol = sr0 + r - r0, sc0 + c - c0
+        out.append(Peak(drow + dr if subpixel else int(drow), dcol + dc if subpixel else int(dcol), float(ncc[r, c])))
     return out, int(tm.sum())
 
 
@@ -311,7 +350,7 @@ def _select(pairs: list[PairShift], ids: list[int], params: AlignParams) -> dict
             p.reason = (
                 f"与其它航带对的结果不一致（残差 {p.residual_m:.2f} m）"
                 if p.seam
-                else f"不形成接缝，与接缝配准结果相差 {p.residual_m:.2f} m（航带内旁向残余形变），未采用"
+                else f"不形成接缝，与接缝配准结果相差 {p.residual_m:.2f} m（狭缝剪切所致，由精配准处理），整条平移不采用"
             )
     return offsets
 

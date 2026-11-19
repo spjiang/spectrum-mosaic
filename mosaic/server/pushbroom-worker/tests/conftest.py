@@ -14,6 +14,14 @@ from synth import SynthFlight, write_flight  # noqa: E402
 REAL_DATA = Path(os.environ.get("PB_REAL_DATA", Path(__file__).resolve().parents[4] / "docs/需求/无人机数据"))
 
 
+@pytest.fixture(autouse=True)
+def _no_deployment_sensor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """宿主机上的 PB_SENSOR_* 不能影响用例。"""
+    for name in list(os.environ):
+        if name.startswith("PB_SENSOR_"):
+            monkeypatch.delenv(name)
+
+
 @pytest.fixture(scope="session")
 def synth_flight(tmp_path_factory: pytest.TempPathFactory) -> SynthFlight:
     return write_flight(tmp_path_factory.mktemp("input") / "FigSpec_SYNTH")

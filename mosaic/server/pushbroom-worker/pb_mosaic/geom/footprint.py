@@ -1,4 +1,8 @@
-"""一条航带在地面上的几何：逐行投影中心、方向，正算地面点，反算行列号。"""
+"""一条航带在地面上的几何：逐行投影中心、方向，正算地面点，反算行列号。
+
+狭缝与航迹不严格垂直时（偏流、安装偏角），离中线 d 米的像元沿航向错开 shear·d 米。
+shear 由航带间精配准逐条估计，见 pb_mosaic.mosaic.refine。
+"""
 
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ class StripGeometry:
     hx: np.ndarray  # 航迹方向单位向量
     hy: np.ndarray
     step: np.ndarray  # 每行沿航向的米数
+    shear: float = 0.0  # 弧度，向航迹右侧每米沿航向前移的米数
     _table: tuple | None = field(default=None, repr=False)
 
     @property
@@ -37,12 +42,26 @@ class StripGeometry:
             return self
         return replace(self, px=self.px + dx, py=self.py + dy, _table=None)
 
+    def corrected(self, dx: float, dy: float, dshear: float) -> "StripGeometry":
+        """平移 (dx, dy) 并把剪切增加 dshear。"""
+        moved = self.translated(dx, dy)
+        return replace(moved, shear=moved.shear + dshear) if dshear else moved
+
+    def cross_m(self, sample: np.ndarray) -> np.ndarray:
+        """像元号 → 离狭缝中心的旁向米数，航迹右侧为正。"""
+        return self.sensor.sign * (np.asarray(sample, dtype=np.float64) - self.sensor.center_px) * self.sensor.gsd_cross_m
+
+    def heading_at(self, local_line: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        _, _, hx, hy = self._at(np.asarray(local_line, dtype=np.float64))
+        return hx, hy
+
     def ground(self, local_line: np.ndarray, sample: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         i = np.asarray(local_line, dtype=np.float64)
         cx, cy, hx, hy = self._at(i)
-        d = self.sensor.sign * (np.asarray(sample, dtype=np.float64) - self.sensor.center_px) * self.sensor.gsd_cross_m
+        d = self.cross_m(sample)
+        a = self.shear * d
         # 右侧方向 r = (hy, -hx)
-        return cx + d * hy, cy - d * hx
+        return cx + d * hy + a * hx, cy - d * hx + a * hy
 
     def _at(self, i: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         i = np.clip(i, 0.0, self.n - 1.0)
@@ -90,6 +109,8 @@ class StripGeometry:
             ic = np.clip(i, 0.0, self.n - 1.0)
             cx, cy, hx, hy = self._at(ic)
             err = (qx - cx) * hx + (qy - cy) * hy
+            if self.shear:
+                err = err - self.shear * ((qx - cx) * hy - (qy - cy) * hx)
             i = np.where((i >= 0) & (i <= self.n - 1), ic + err / np.interp(ic, idx, du), i)
         cx, cy, hx, hy = self._at(np.clip(i, 0.0, self.n - 1.0))
         cross = (qx - cx) * hy - (qy - cy) * hx

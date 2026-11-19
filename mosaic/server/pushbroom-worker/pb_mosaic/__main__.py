@@ -2,6 +2,7 @@
 
   python -m pb_mosaic check --input /data/input/pushbroom/FigSpec_260414_134505
   python -m pb_mosaic run --input ... --output /data/output/pushbroom/dev-0414 [--gsd 0.05] [--bands 1-10,150]
+  python -m pb_mosaic calibrate --input 架次1 [--input 架次2 ...]   安装参数自检，给出 PB_SENSOR_* 建议值
 """
 
 from __future__ import annotations
@@ -86,6 +87,36 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _calibrate(args: argparse.Namespace) -> int:
+    from pb_mosaic.geom.calibration import combine
+    from pb_mosaic.geom.sensor import ENV_KEYS, SensorError
+    from pb_mosaic.ingest.flight import FlightError
+    from pb_mosaic.pipeline import PipelineError, calibrate_flight
+
+    params = json.loads(args.params) if args.params else {}
+    flights, checks, names = [], [], []
+    for path in args.input:
+        try:
+            r = calibrate_flight(path, params)
+        except (PipelineError, FlightError, SensorError) as exc:
+            flights.append({"flight": path.name, "error": str(getattr(exc, "errors", None) or exc)})
+            continue
+        r["flight"] = path.name
+        checks.append(r["calibration"])
+        names.append(path.name)
+        r["calibration"] = r["calibration"].as_dict()
+        flights.append(r)
+    best = combine(checks, names)
+    out: dict = {"flights": flights, "combined": best}
+    if best.get("usable"):
+        out["env"] = [
+            f"{ENV_KEYS['along_offset_m']}={best['along_offset_m']}",
+            f"{ENV_KEYS['boresight_px']}={best['boresight_px']}",
+        ]
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0 if best.get("usable") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m pb_mosaic", description="推扫高光谱拼图")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -98,9 +129,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--bands", type=_parse_bands, help="输出波段，1 起始，例如 1-10,150")
     r.add_argument("--no-align", action="store_true", help="不做航带间配准")
     r.add_argument("--params", help="任务参数 JSON，与队列消息的 params 相同")
+    k = sub.add_parser("calibrate", help="用往返航带自检安装参数（沿航向偏移、狭缝中心），可给多个架次")
+    k.add_argument("--input", type=Path, action="append", required=True)
+    k.add_argument("--params", help="传感器参数 JSON，例如 {\"sample_sign\": -1}")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    return _check(args) if args.cmd == "check" else _run(args)
+    return {"check": _check, "run": _run, "calibrate": _calibrate}[args.cmd](args)
 
 
 if __name__ == "__main__":

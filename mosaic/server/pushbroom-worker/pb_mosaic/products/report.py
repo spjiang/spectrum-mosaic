@@ -13,8 +13,10 @@ ASSUMPTIONS = (
     "按平地、垂直下视投影，未使用地形；地面起伏会带来旁向位置误差，约为 起伏高差 × 旁向距离 / 航高。",
     "未使用 gps 文件中的姿态列：用 0414 架次检验，加入后航带间错位反而变大，判断相机在增稳云台上。",
     "单点 GPS 的绝对位置误差为米级；航带间配准只消除航带之间的相对错位，不提高整体绝对精度。",
-    "航带配准为整条平移，在接缝两侧各 4 米内量取；航带内另有随旁向位置变化的残余形变（约 1 米量级），"
-    "接缝处已对齐，离接缝远的位置仍可能相对 GPS 偏移这个量级。",
+    "航带配准分两步：先在接缝两侧各 4 米内量整条平移；再把全部重叠区切块，逐条估计平移细化量和狭缝剪切"
+    "（狭缝与航迹不垂直，离中线越远沿航向错开越多，往返方向相反）。全体航带共同的剪切从重叠区量不出来，"
+    "按往返两个方向平均剪切互为相反数处理。",
+    "传感器标定自检由往返航带的整体错开反推，受各航带 GPS 误差影响，航带越多越可靠；单架次结果仅供复核。",
     "重采样为最近邻，每个成果像元的全部波段来自同一个原始像元，DN 不做插值、匀色或混合。",
     "重叠区取离狭缝中心最近的航带，接缝落在相邻航带中间。",
     "DN 为 0 表示无数据（data ignore value = 0），原始 DN 恰为 0 的像元与无数据无法区分。",
@@ -97,14 +99,14 @@ def render_markdown(r: dict[str, Any]) -> str:
     if strips:
         out.append("## 航带")
         out.append("")
-        out.append("| 航带 | 行范围 | 航向 | 长度 | 地速 | 配准修正（东, 北） | 成果像元 |")
-        out.append("| --- | --- | --- | --- | --- | --- | --- |")
+        out.append("| 航带 | 行范围 | 航向 | 长度 | 地速 | 配准修正（东, 北） | 狭缝剪切 | 成果像元 |")
+        out.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
         for s in strips:
             off = s.get("align_offset_east_north_m") or [0, 0]
             out.append(
                 f"| {s['index']} | {s['line_start']}–{s['line_end']} | {s['heading_deg']:.1f}° | "
                 f"{s['length_m']:.1f} m | {s['speed_mps']:.2f} m/s | {off[0]:+.2f}, {off[1]:+.2f} m | "
-                f"{s.get('mosaic_pixels', '—')} |"
+                f"{s.get('shear_deg', 0.0):+.2f}° | {s.get('mosaic_pixels', '—')} |"
             )
         out.append("")
 
@@ -126,6 +128,35 @@ def render_markdown(r: dict[str, Any]) -> str:
                     f"| {p['strips'][0]}–{p['strips'][1]} | {seam} | {p['overlap_m2']:.0f} m² | {p['ncc']:.2f} | "
                     f"{sh[0]:+.2f}, {sh[1]:+.2f} m | {res} | {'是' if p['used'] else '否'} | {p.get('reason') or ''} |"
                 )
+        out.append("")
+        refine = align.get("refine") or {}
+        if refine.get("note"):
+            out.append("### 精配准")
+            out.append("")
+            out.append(f"- {refine['note']}")
+            rp = refine.get("pairs") or []
+            if rp:
+                out.append("")
+                out.append("| 航带对 | 接缝 | 修正前块数 | 修正前错位中位 | 修正后块数 | 修正后错位中位 |")
+                out.append("| --- | --- | --- | --- | --- | --- |")
+                fmt = lambda v: "—" if v is None else f"{v:.2f} m"  # noqa: E731
+                for p in rp:
+                    out.append(
+                        f"| {p['strips'][0]}–{p['strips'][1]} | {'是' if p['seam'] else '—'} | {p['tiles_before']} | "
+                        f"{fmt(p['median_before_m'])} | {p['tiles_after']} | {fmt(p['median_after_m'])} |"
+                    )
+            out.append("")
+
+    cal = r.get("calibration")
+    if cal:
+        out.append("## 传感器标定自检")
+        out.append("")
+        out.append(f"- {cal.get('note', '')}")
+        if cal.get("shear_backward_deg") is not None:
+            diff = cal["shear_forward_deg"] - cal["shear_backward_deg"]
+            out.append(f"- 往返狭缝剪切相差 {diff:+.2f}°（偏流随航向翻转）")
+        if cal.get("warning"):
+            out.append(f"- **{cal['warning']}**")
         out.append("")
 
     grid = r.get("grid")

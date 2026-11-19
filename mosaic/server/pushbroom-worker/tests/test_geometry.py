@@ -7,7 +7,15 @@ from synth import RATE_HZ, SENSOR_PARAMS, SPEED, STRIP_S
 from pb_mosaic.geom.footprint import strip_geometry
 from pb_mosaic.geom.grid import default_gsd, grid_from_bounds
 from pb_mosaic.geom.line_clock import fit_line_clock
-from pb_mosaic.geom.sensor import SensorError, cross_gsd_from_header, sensor_from
+from pb_mosaic.geom.sensor import (
+    DEFAULT_ALONG_OFFSET_M,
+    DEFAULT_BORESIGHT_PX,
+    DEFAULT_SAMPLE_SIGN,
+    SensorError,
+    cross_gsd_from_header,
+    sensor_from,
+    sensor_sources,
+)
 from pb_mosaic.geom.strips import split_strips
 from pb_mosaic.geom.trajectory import build_trajectory, utm_epsg
 from pb_mosaic.ingest.envi import parse_header
@@ -141,11 +149,53 @@ def test_cross_gsd_from_header() -> None:
 def test_sensor_defaults_and_overrides() -> None:
     hdr = parse_header(HDR)
     s = sensor_from(hdr, {})
-    assert s.sign == -1
-    assert s.center_px == pytest.approx(479.5 - 49.0)
-    assert s.along_offset_m == 2.0
+    assert s.sign == DEFAULT_SAMPLE_SIGN == -1
+    assert s.center_px == pytest.approx(479.5 + DEFAULT_BORESIGHT_PX)
+    assert s.along_offset_m == DEFAULT_ALONG_OFFSET_M
     s2 = sensor_from(hdr, {"gsd_cross_m": 0.05, "sample_sign": 1, "boresight_px": 0, "along_offset_m": 0})
     assert (s2.gsd_cross_m, s2.sign, s2.center_px, s2.along_offset_m) == (0.05, 1, 479.5, 0.0)
+
+
+def test_sensor_deployment_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    hdr = parse_header(HDR)
+    monkeypatch.setenv("PB_SENSOR_BORESIGHT_PX", "-30.5")
+    monkeypatch.setenv("PB_SENSOR_ALONG_OFFSET_M", "1.2")
+    s = sensor_from(hdr, {})
+    assert s.center_px == pytest.approx(479.5 - 30.5) and s.along_offset_m == 1.2
+    # 任务参数优先于部署配置
+    assert sensor_from(hdr, {"along_offset_m": 0.4}).along_offset_m == 0.4
+    src = sensor_sources({"along_offset_m": 0.4})
+    assert src == {
+        "sample_sign": "builtin",
+        "along_offset_m": "task",
+        "boresight_px": "deployment",
+        "gsd_cross_m": "header",
+        "flight_height_m": "header",
+    }
+    monkeypatch.setenv("PB_SENSOR_BORESIGHT_PX", "abc")
+    with pytest.raises(SensorError, match="PB_SENSOR_BORESIGHT_PX"):
+        sensor_from(hdr, {})
+
+
+def test_shear_roundtrip_and_ground(synth_flight) -> None:
+    flight = check_flight(synth_flight.root)
+    traj = build_trajectory(flight.gps)
+    g0 = strip_geometry(traj, split_strips(traj)[1], sensor_from(flight.hdr, SENSOR_PARAMS))
+    g = g0.corrected(0.2, -0.1, np.radians(3.0))
+    assert g.shear == pytest.approx(np.radians(3.0)) and g0.shear == 0.0
+    i = np.array([300.0, 300.0])
+    s = np.array([0.0, 95.0])
+    x, y = g.ground(i, s)
+    x0, y0 = g0.ground(i, s)
+    hx, hy = g.heading_at(i)
+    along = (x - x0 - 0.2) * hx + (y - y0 + 0.1) * hy
+    # 离中线 d 米的像元沿航向前移 shear·d
+    assert along == pytest.approx(np.radians(3.0) * g.cross_m(s), abs=1e-6)
+    rng = np.random.default_rng(2)
+    li = rng.uniform(5, g.n - 6, 500)
+    si = rng.uniform(0, 95, 500)
+    i2, s2, ok = g.invert(*g.ground(li, si))
+    assert ok.all() and np.max(np.abs(i2 - li)) < 0.01 and np.max(np.abs(s2 - si)) < 0.01
 
 
 @pytest.mark.parametrize(
@@ -153,6 +203,9 @@ def test_sensor_defaults_and_overrides() -> None:
     [
         (HDR.replace("pixel size = 5.86\n", ""), {}, "pixel size"),
         (HDR, {"sample_sign": 2}, "sample_sign"),
+        (HDR, {"sample_sign": -1.5}, "sample_sign"),
+        (HDR, {"boresight_px": "左边"}, "必须是数字"),
+        (HDR, {"along_offset_m": True}, "必须是数字"),
         (HDR, {"gsd_cross_m": 50}, "不合理"),
     ],
 )

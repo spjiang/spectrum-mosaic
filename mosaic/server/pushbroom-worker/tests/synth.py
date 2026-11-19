@@ -103,21 +103,32 @@ def write_flight(
     *,
     texture: Texture | None = None,
     bias: tuple[float, float, float, float] | None = None,
+    shear_deg: tuple[float, float] = (0.0, 0.0),
+    sensor: dict | None = None,
     header_extra: str = "",
 ) -> SynthFlight:
-    """bias = (t0, t1, dx, dy)：t0–t1 秒内的定位整体偏 (dx, dy) 米，成像仍按真实位置。"""
+    """bias = (t0, t1, dx, dy)：t0–t1 秒内的定位整体偏 (dx, dy) 米，成像仍按真实位置。
+
+    shear_deg = (北飞, 南飞)：狭缝剪切，离中线 d 米的像元沿航向前移 tan(φ)·d 米。
+    sensor：成像用的真实安装参数（boresight_px、along_offset_m），默认与 SENSOR_PARAMS 相同。
+    """
     root.mkdir(parents=True, exist_ok=True)
     tex = texture or make_texture()
+    truth = {**SENSOR_PARAMS, **(sensor or {})}
     wt, _, _ = waypoints()
     duration = float(wt[-1])
     n_lines = int(duration * RATE_HZ) + 1
     t = np.arange(n_lines) / RATE_HZ
     x, y, hx, hy = position(t)
+    x = x + truth["along_offset_m"] * hx
+    y = y + truth["along_offset_m"] * hy
     s = np.arange(SAMPLES, dtype=np.float64)
-    center = (SAMPLES - 1) / 2.0
+    center = (SAMPLES - 1) / 2.0 + truth["boresight_px"]
     d = SIGN * (s - center) * GSD
-    gx = x[:, None] + d[None, :] * hy[:, None]
-    gy = y[:, None] - d[None, :] * hx[:, None]
+    phi = np.tan(np.radians(np.where(hy > 0, shear_deg[0], shear_deg[1])))
+    a = phi[:, None] * d[None, :]
+    gx = x[:, None] + d[None, :] * hy[:, None] + a * hx[:, None]
+    gy = y[:, None] - d[None, :] * hx[:, None] + a * hy[:, None]
     v = tex(gx, gy)
     cube = np.empty((n_lines, BANDS, SAMPLES), dtype="<u2")
     for b in range(BANDS):

@@ -34,6 +34,7 @@ def write_footprints(
         dx, dy = offsets.get(g.strip.index, (0.0, 0.0))
         props = dict(g.strip.as_dict())
         props["align_offset_east_north_m"] = [round(dx, 3), round(dy, 3)]
+        props["shear_deg"] = round(float(np.degrees(g.shear)), 3)
         if strip_pixels is not None:
             props["mosaic_pixels"] = int(strip_pixels.get(g.strip.index, 0))
         features.append(

@@ -21,6 +21,10 @@ services:
       PB_OUTPUT_ROOTS: /data/output
       # 算法自身的内存预算；要比 mem_limit 小，留出解释器和页缓存
       PB_MAX_MEMORY_GB: ${PB_MAX_MEMORY_GB:-8}
+      # 本机相机标定，用 ./pushbroom-worker/run.sh calibrate 得到；留空用内置 FS-60C 标定
+      PB_SENSOR_ALONG_OFFSET_M: ${PB_SENSOR_ALONG_OFFSET_M:-}
+      PB_SENSOR_BORESIGHT_PX: ${PB_SENSOR_BORESIGHT_PX:-}
+      PB_SENSOR_SAMPLE_SIGN: ${PB_SENSOR_SAMPLE_SIGN:-}
     volumes:
       # 开发时直接挂源码，改完 docker compose restart pushbroom-worker 即生效
       - ./pushbroom-worker/pb_mosaic:/app/pb_mosaic:ro

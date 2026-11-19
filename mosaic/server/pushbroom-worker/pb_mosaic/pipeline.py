@@ -18,14 +18,16 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from pb_mosaic import __version__
+from pb_mosaic.geom.calibration import CalibrationCheck, check_calibration
 from pb_mosaic.geom.footprint import StripGeometry, strip_geometry
 from pb_mosaic.geom.grid import OutputGrid, default_gsd, grid_from_bounds
-from pb_mosaic.geom.sensor import SensorError, sensor_from
+from pb_mosaic.geom.sensor import Sensor, SensorError, sensor_from, sensor_sources
 from pb_mosaic.geom.strips import split_strips
-from pb_mosaic.geom.trajectory import build_trajectory
+from pb_mosaic.geom.trajectory import Trajectory, build_trajectory
 from pb_mosaic.ingest.flight import Flight, FlightError, check_flight
 from pb_mosaic.mosaic.align import AlignParams, AlignResult, align_strips
 from pb_mosaic.mosaic.merge import Cancelled, write_mosaic
+from pb_mosaic.mosaic.refine import RefineParams, RefineResult, refine_strips
 from pb_mosaic.products.envi_out import write_mosaic_header
 from pb_mosaic.products.footprints import write_footprints, write_trajectory_csv
 from pb_mosaic.products.preview import RgbSink, rgb_positions, stretch_to_png
@@ -75,6 +77,7 @@ class JobParams:
     gsd_m: float | None = None
     bands: list[int] | None = None  # 1 起始
     align: bool = True
+    refine: bool = True
     sensor: dict[str, Any] = field(default_factory=dict)
     ignored: list[str] = field(default_factory=list)
 
@@ -96,8 +99,12 @@ class JobParams:
             if len(set(bands)) != len(bands):
                 raise PipelineError("波段序号有重复")
             p.bands = sorted(bands)
-        if "align" in raw:
-            p.align = bool(raw.pop("align"))
+        for key in ("align", "refine"):
+            if key in raw:
+                val = raw.pop(key)
+                if not isinstance(val, bool):
+                    raise PipelineError(f"{key} 只能是 true 或 false")
+                setattr(p, key, val)
         for key in SENSOR_KEYS:
             if raw.get(key) is not None:
                 p.sensor[key] = raw.pop(key)
@@ -105,7 +112,7 @@ class JobParams:
         return p
 
     def as_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"gsd_m": self.gsd_m, "bands": self.bands, "align": self.align}
+        out: dict[str, Any] = {"gsd_m": self.gsd_m, "bands": self.bands, "align": self.align, "refine": self.refine}
         out.update(self.sensor)
         return out
 
@@ -177,6 +184,115 @@ def _check_disk(out_dir: Path, need: int) -> None:
 
 def _product(path: Path, root: Path, kind: str, label: str) -> dict[str, Any]:
     return {"path": str(path.relative_to(root)), "kind": kind, "label": label, "bytes": path.stat().st_size}
+
+
+_SOURCE_LABELS = {"task": "任务参数", "deployment": "部署配置 PB_SENSOR_*", "builtin": "FS-60C 内置标定", "header": "头文件"}
+
+
+def describe_sources(sources: dict[str, str]) -> str:
+    groups: dict[str, list[str]] = {}
+    for key, src in sources.items():
+        groups.setdefault(src, []).append(key)
+    return "；".join(f"{_SOURCE_LABELS[s]}：{', '.join(groups[s])}" for s in _SOURCE_LABELS if s in groups)
+
+
+# 配准阶段内整条平移与精配准各占的进度
+RIGID_SHARE = 0.4
+
+
+@dataclass
+class Geometry:
+    """配准之后的航带几何：平移（整条 + 精配准）和逐条剪切都已加上。"""
+
+    geoms: list[StripGeometry]
+    alignment: AlignResult
+    refine: RefineResult
+    offsets: dict[int, tuple[float, float]]
+    calibration: CalibrationCheck
+
+    @property
+    def note(self) -> str:
+        return self.alignment.note if not self.refine.applied else f"{self.alignment.note}；{self.refine.note}"
+
+    def alignment_dict(self) -> dict[str, Any]:
+        d = self.alignment.as_dict()
+        d["rigid_offsets_east_north_m"] = d.pop("offsets_east_north_m")
+        d["offsets_east_north_m"] = {str(k): [round(v[0], 3), round(v[1], 3)] for k, v in self.offsets.items()}
+        d["refine"] = self.refine.as_dict()
+        return d
+
+
+def solve_geometry(
+    flight: Flight,
+    traj: Trajectory,
+    strips: list,
+    sensor: Sensor,
+    params: JobParams,
+    st: _Stage,
+    cancelled: Callable[[], bool] | None,
+) -> Geometry:
+    geoms = [strip_geometry(traj, s, sensor) for s in strips]
+    cube = flight.open_cube()
+    ab = _align_band(flight)
+    st.progress(0.0, f"用第 {ab + 1} 波段做航带间配准", force=True)
+
+    def read_band(l0: int, l1: int) -> np.ndarray:
+        return np.asarray(cube[l0:l1, ab, :])
+
+    alignment = align_strips(
+        geoms,
+        read_band,
+        traj.epsg,
+        AlignParams(enabled=params.align),
+        cancelled=cancelled,
+        progress=lambda f, m: st.progress(RIGID_SHARE * f, m, force=True),
+    )
+    geoms = [g.translated(*alignment.offsets[g.strip.index]) for g in geoms]
+    enabled = params.align and params.refine
+    if enabled and len(geoms) > 1 and not any(p.used for p in alignment.pairs):
+        refine = RefineResult(
+            corrections={g.strip.index: (0.0, 0.0, 0.0) for g in geoms},
+            note="整条平移没有可靠的航带重叠，未做精配准",
+        )
+    else:
+        refine = refine_strips(
+            geoms,
+            read_band,
+            traj.epsg,
+            RefineParams(enabled=enabled),
+            cancelled=cancelled,
+            progress=lambda f, m: st.progress(RIGID_SHARE + (1 - RIGID_SHARE) * f, m, force=True),
+        )
+    offsets = dict(alignment.offsets)
+    if refine.applied:
+        geoms = [g.corrected(*refine.corrections[g.strip.index]) for g in geoms]
+        offsets = {
+            s: (v[0] + refine.corrections[s][0], v[1] + refine.corrections[s][1]) for s, v in alignment.offsets.items()
+        }
+    linked = {s for p in alignment.pairs if p.used for s in (p.a, p.b)}
+    calibration = check_calibration(geoms, offsets, sensor, linked)
+    return Geometry(geoms, alignment, refine, offsets, calibration)
+
+
+def calibrate_flight(input_dir: Path, raw_params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """只做到配准，给出本架次的安装参数自检。命令行 calibrate 用。"""
+    params = JobParams.from_dict(raw_params)
+    flight = check_flight(input_dir)
+    traj = build_trajectory(flight.gps)
+    strips = split_strips(traj)
+    if not strips:
+        raise PipelineError("没有切出可用航带")
+    sensor = sensor_from(flight.hdr, params.sensor)
+    geo = solve_geometry(flight, traj, strips, sensor, params, _Stage(LogReporter(), {}, "P3_align"), None)
+    return {
+        "flight": flight.name,
+        "strips": len(strips),
+        "sensor": sensor.as_dict(),
+        "sensor_source": describe_sources(sensor_sources(params.sensor)),
+        "alignment": geo.note,
+        "refine": geo.refine.as_dict(),
+        "calibration": geo.calibration,
+    }
 
 
 def run(
@@ -271,33 +387,26 @@ def _run(
         raise PipelineError("没有切出可用航带：航迹全程在转弯、悬停，或直线段都短于 30 米")
     sensor = sensor_from(flight.hdr, params.sensor)
     report["sensor"] = sensor.as_dict()
-    report["sensor_source"] = (
-        f"任务参数（{', '.join(sorted(params.sensor))}），其余为 FS-60C 默认标定"
-        if params.sensor
-        else "FS-60C 默认标定（0414 架次往返航带自检）"
-    )
-    geoms = [strip_geometry(traj, s, sensor) for s in strips]
+    report["sensor_source"] = describe_sources(sensor_sources(params.sensor))
     st.done(f"{len(strips)} 条航带，共 {sum(s.lines for s in strips)} 行")
     check_cancel()
 
     st = _Stage(reporter, timings, "P3_align")
-    cube = flight.open_cube()
-    ab = _align_band(flight)
-    st.progress(0.0, f"用第 {ab + 1} 波段做航带间配准", force=True)
-    alignment: AlignResult = align_strips(
-        geoms,
-        lambda l0, l1: np.asarray(cube[l0:l1, ab, :]),
-        traj.epsg,
-        AlignParams(enabled=params.align),
-        cancelled=cancelled,
-        progress=lambda f, m: st.progress(f, m, force=True),
-    )
-    geoms = [g.translated(*alignment.offsets[g.strip.index]) for g in geoms]
-    report["alignment"] = alignment.as_dict()
-    st.done(alignment.note)
+    geo = solve_geometry(flight, traj, strips, sensor, params, st, cancelled)
+    geoms = geo.geoms
+    report["alignment"] = geo.alignment_dict()
+    report["calibration"] = geo.calibration.as_dict()
+    if geo.refine.note.startswith("精配准未采用"):
+        report["warnings"].append(geo.refine.note)
+        reporter.log(geo.refine.note, "warning")
+    if geo.calibration.warning:
+        report["warnings"].append(geo.calibration.warning)
+        reporter.log(geo.calibration.warning, "warning")
+    st.done(geo.note)
     check_cancel()
 
     st = _Stage(reporter, timings, "P4_mosaic")
+    cube = flight.open_cube()
     grid = _make_grid(geoms, sensor.gsd_cross_m, traj, params.gsd_m)
     report["grid"] = grid.as_dict()
     nb = flight.hdr.bands if band_idx is None else int(band_idx.size)
@@ -356,11 +465,12 @@ def _run(
     preview = stretch_to_png(sink.thumb, png)
     report["preview"] = preview
     footprints = prod / f"{stem}_footprints.geojson"
-    write_footprints(footprints, traj, geoms, alignment.offsets, stats.strip_pixels)
+    write_footprints(footprints, traj, geoms, geo.offsets, stats.strip_pixels)
     strips_out = []
     for g in geoms:
         d = g.strip.as_dict()
-        d["align_offset_east_north_m"] = [round(v, 3) for v in alignment.offsets[g.strip.index]]
+        d["align_offset_east_north_m"] = [round(v, 3) for v in geo.offsets[g.strip.index]]
+        d["shear_deg"] = round(float(np.degrees(g.shear)), 3)
         d["mosaic_pixels"] = int(stats.strip_pixels.get(g.strip.index, 0))
         strips_out.append(d)
     report["strips"] = strips_out
