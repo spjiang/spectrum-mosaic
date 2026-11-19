@@ -4,15 +4,15 @@ import { EditOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { LIST_PAGE } from "../listPage";
 import { useRbac } from "../rbac";
-import { MENU_CATALOG, ROLE_LABEL, ROLE_ORDER, rolesForMenu, type MenuDef } from "../roles";
+import { ROLE_LABEL, ROLE_ORDER, catalogFor, rolesForMenu, type MenuDef } from "../roles";
 
 export default function PermissionsPage() {
-  const { mapping, reload } = useRbac();
+  const { mapping, features, reload } = useRbac();
   const [editing, setEditing] = useState<MenuDef | null>(null);
   const [roles, setRoles] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
-  const rows = useMemo(() => MENU_CATALOG, []);
+  const rows = useMemo(() => catalogFor(features), [features]);
 
   return (
     <Card
@@ -32,7 +32,12 @@ export default function PermissionsPage() {
         pagination={LIST_PAGE}
         columns={[
           { title: "权限名称", dataIndex: "label", width: 160 },
-          { title: "所属模块", dataIndex: "group", width: 120 },
+          {
+            title: "所属模块",
+            dataIndex: "group",
+            width: 160,
+            render: (_: unknown, r: MenuDef) => (r.sub ? `${r.group} / ${r.sub}` : r.group),
+          },
           { title: "说明", dataIndex: "hint" },
           {
             title: "操作",

@@ -5,12 +5,12 @@ import { EditOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { LIST_PAGE } from "../listPage";
 import { useRbac } from "../rbac";
-import { MENU_CATALOG, MENU_GROUPS, ROLE_HINT, ROLE_LABEL, ROLE_ORDER, menusForRole } from "../roles";
+import { MENU_CATALOG, MENU_GROUPS, ROLE_HINT, ROLE_LABEL, ROLE_ORDER, catalogFor, menuAvailable, menusForRole } from "../roles";
 
 type Account = { roles: string[] };
 
 export default function RolesPage() {
-  const { mapping, reload: reloadRbac } = useRbac();
+  const { mapping, features, reload: reloadRbac } = useRbac();
   const [users, setUsers] = useState<Account[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [checked, setChecked] = useState<string[]>([]);
@@ -32,15 +32,17 @@ export default function RolesPage() {
 
   const treeData: DataNode[] = useMemo(
     () =>
-      MENU_GROUPS.map((g) => ({
-        key: g.siderKey,
-        title: g.id,
-        children: MENU_CATALOG.filter((m) => m.group === g.id).map((m) => ({
-          key: m.key,
-          title: m.label,
-        })),
-      })),
-    [],
+      MENU_GROUPS.map((g) => {
+        const own = catalogFor(features).filter((m) => m.group === g.id);
+        const leaf = (m: (typeof own)[number]) => ({ key: m.key, title: m.label });
+        const children: DataNode[] = own.filter((m) => !m.sub).map(leaf);
+        for (const sub of g.subgroups || []) {
+          const items = own.filter((m) => m.sub === sub.id).map(leaf);
+          if (items.length) children.push({ key: sub.siderKey, title: sub.id, children: items });
+        }
+        return { key: g.siderKey, title: g.id, children };
+      }).filter((g) => g.children.length > 0),
+    [features],
   );
 
   return (
@@ -102,7 +104,9 @@ export default function RolesPage() {
                   if (!editing || editing === "admin") return;
                   setSaving(true);
                   try {
-                    await api.updateRoleMenus(editing, checked);
+                    // 未开启的功能不在树里，已有授权原样带回，开启后不必重配
+                    const hidden = menusForRole(editing, mapping).filter((m) => !menuAvailable(m, features));
+                    await api.updateRoleMenus(editing, [...checked, ...hidden.map((m) => m.key)]);
                     await reloadRbac();
                     message.success("已保存");
                     setEditing(null);

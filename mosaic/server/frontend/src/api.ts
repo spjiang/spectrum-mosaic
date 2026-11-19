@@ -43,6 +43,17 @@ export function setToken(t: string | null) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+/** 接口报错。detail 保留后端原样，页面需要结构化信息（如架次核对结果）时用。 */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly detail?: unknown,
+  ) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers || {});
   const token = getToken();
@@ -59,13 +70,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
     let msg = text || res.statusText;
+    let detail: unknown;
     try {
       const j = JSON.parse(text);
+      detail = j.detail;
       if (typeof j.detail === "string") msg = j.detail;
+      else if (typeof j.detail?.message === "string") msg = j.detail.message;
     } catch {
       /* keep raw */
     }
-    throw new Error(msg);
+    throw new ApiError(msg, res.status, detail);
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("content-type") || "";
@@ -104,6 +118,59 @@ async function openAuthedFile(path: string, fallbackName: string) {
   }
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
+
+export type PushbroomStatus = {
+  enabled: boolean;
+  worker_online: boolean | null;
+  queue_messages: number | null;
+};
+
+export type PushbroomFlight = {
+  samples?: number;
+  lines?: number;
+  bands?: number;
+  spe_bytes?: number;
+  wavelength_min?: number | null;
+  wavelength_max?: number | null;
+  gps_records?: number;
+  duration_s?: number;
+};
+
+export type PushbroomCheck = {
+  input_dir: string;
+  name: string;
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  flight: PushbroomFlight;
+};
+
+export type PushbroomParams = { gsd_m?: number; bands?: number[] };
+
+export type PushbroomJob = {
+  id: string;
+  seq: number;
+  title: string;
+  created_by: string | null;
+  status: "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
+  run_attempt: number;
+  input_dir: string;
+  output_dir: string;
+  params: PushbroomParams;
+  flight: PushbroomFlight;
+  current_stage: string | null;
+  stage_progress: number;
+  global_percent: number;
+  message: string;
+  error_summary: string | null;
+  stage_timings: Record<string, number | null>;
+  created_at: string | null;
+  updated_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type PushbroomFile = { path: string; name: string; kind: string; size: number; modified_at: string };
 
 export type InspectBand = {
   name: string;
@@ -697,6 +764,37 @@ export const api = {
   incrementalDelete: (id: string) => request<void>(`/api/incremental/projects/${id}`, { method: "DELETE" }),
   incrementalScan: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}/scan`, { method: "POST" }),
   incrementalRun: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}/run`, { method: "POST" }),
+  pushbroomStatus: () => request<PushbroomStatus>("/api/pushbroom/status"),
+  pushbroomFlights: () =>
+    request<{ input_root: string; output_root: string; items: PushbroomCheck[] }>("/api/pushbroom/flights"),
+  pushbroomCheck: (inputDir: string) =>
+    request<PushbroomCheck>("/api/pushbroom/check", { method: "POST", body: JSON.stringify({ input_dir: inputDir }) }),
+  pushbroomCreate: (body: { input_dir: string; title?: string; params?: PushbroomParams }) =>
+    request<PushbroomJob>("/api/pushbroom/jobs", { method: "POST", body: JSON.stringify(body) }),
+  pushbroomJobs: (page = 1, pageSize = 20, status?: string) =>
+    request<{ items: PushbroomJob[]; total: number; page: number; page_size: number }>(
+      `/api/pushbroom/jobs?page=${page}&page_size=${pageSize}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  pushbroomJob: (id: string) => request<PushbroomJob>(`/api/pushbroom/jobs/${id}`),
+  pushbroomCancel: (id: string) => request<PushbroomJob>(`/api/pushbroom/jobs/${id}/cancel`, { method: "POST" }),
+  pushbroomRetry: (id: string) => request<PushbroomJob>(`/api/pushbroom/jobs/${id}/retry`, { method: "POST" }),
+  pushbroomDelete: (id: string, deleteFiles: boolean) =>
+    request<{ ok: boolean }>(`/api/pushbroom/jobs/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
+  pushbroomLogs: (id: string) => request<string>(`/api/pushbroom/jobs/${id}/logs`),
+  pushbroomFiles: (id: string) => request<{ items: PushbroomFile[] }>(`/api/pushbroom/jobs/${id}/files`),
+  /** 成果可能有几十 GB：换一个短期下载链接交给浏览器直接下载，不读进页面内存。 */
+  pushbroomDownload: async (id: string, path: string) => {
+    const { url } = await request<{ url: string }>(`/api/pushbroom/jobs/${id}/download-link`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  },
   rbac: () => request<{ menus: Record<string, string[]> }>("/api/rbac"),
   updateRoleMenus: (role: string, menus: string[]) =>
     request<{ menus: Record<string, string[]> }>(`/api/rbac/roles/${role}`, {

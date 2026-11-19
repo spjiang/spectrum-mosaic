@@ -23,6 +23,9 @@ import {
   ToolOutlined,
   AuditOutlined,
   EditOutlined,
+  ScanOutlined,
+  PlusCircleOutlined,
+  HistoryOutlined,
 } from "@ant-design/icons";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
@@ -46,6 +49,8 @@ import PermissionsPage from "../pages/Permissions";
 import AuditPage from "../pages/Audit";
 import IncrementalPage from "../pages/Incremental";
 import AreasPage from "../pages/Areas";
+import PushbroomNewPage from "../pages/pushbroom/PushbroomNew";
+import PushbroomJobsPage from "../pages/pushbroom/PushbroomJobs";
 import { PRODUCT, PRODUCT_TITLE } from "../product";
 import {
   canConfigure,
@@ -65,6 +70,8 @@ const { Sider, Header, Content } = Layout;
 const TITLE: Record<string, string> = {
   execute: "新建处理",
   incremental: "测区管理",
+  pushbroom_new: "新建推扫",
+  pushbroom_jobs: "推扫记录",
   profiles: "处理方案",
   jobs: "处理记录",
   seam: "拼接线处理",
@@ -82,6 +89,8 @@ const TITLE: Record<string, string> = {
 const MENU_ICON: Record<MenuKey, ReactNode> = {
   execute: <PlayCircleOutlined />,
   incremental: <CloudUploadOutlined />,
+  pushbroom_new: <PlusCircleOutlined />,
+  pushbroom_jobs: <HistoryOutlined />,
   profiles: <ProfileOutlined />,
   jobs: <UnorderedListOutlined />,
   seam: <EditOutlined />,
@@ -97,8 +106,8 @@ const MENU_ICON: Record<MenuKey, ReactNode> = {
 };
 
 const GROUP_ICON: Record<MenuGroup, ReactNode> = {
-  作业管理: <AppstoreOutlined />,
-  增量拼图: <CloudUploadOutlined />,
+  框幅拼图: <AppstoreOutlined />,
+  推扫拼图: <ScanOutlined />,
   辅助工具: <ToolOutlined />,
   系统管理: <SettingOutlined />,
   组织管理: <TeamOutlined />,
@@ -120,6 +129,13 @@ function Guard({ allow, children }: { allow: boolean; children: React.ReactNode 
   return <>{children}</>;
 }
 
+/** 推扫菜单取决于后端开关，开关读到之前不跳转也不渲染。 */
+function FeatureGuard({ allow, children }: { allow: boolean; children: React.ReactNode }) {
+  const { ready } = useRbac();
+  if (!ready) return null;
+  return <Guard allow={allow}>{children}</Guard>;
+}
+
 function AppShellBody({
   logout,
   username,
@@ -133,14 +149,18 @@ function AppShellBody({
   const nav = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const [about, setAbout] = useState(false);
-  const [openKeys, setOpenKeys] = useState<string[]>(MENU_GROUPS.filter((g) => !g.direct).map((g) => g.siderKey));
+  const [openKeys, setOpenKeys] = useState<string[]>(
+    MENU_GROUPS.filter((g) => !g.direct).flatMap((g) => [g.siderKey, ...(g.subgroups || []).map((s) => s.siderKey)]),
+  );
   const { activeJob } = useJobs();
-  const { mapping } = useRbac();
+  const { mapping, features } = useRbac();
   const conf = canConfigure(roles);
-  const visibleMenus = useMemo(() => menusForRoles(roles, mapping), [roles, mapping]);
+  const visibleMenus = useMemo(() => menusForRoles(roles, mapping, features), [roles, mapping, features]);
   const canMenu = (id: string) => visibleMenus.some((m) => m.key === id);
 
-  const key = loc.pathname.split("/")[1] || "execute";
+  const top = loc.pathname.split("/")[1] || "execute";
+  // 推扫页面是 /pushbroom/new、/pushbroom/jobs，菜单 key 带上第二段
+  const key = top === "pushbroom" ? `pushbroom_${loc.pathname.split("/")[2] || "jobs"}` : top;
   const pageTitle =
     key === "profiles" && loc.pathname.includes("/edit")
       ? "编辑处理方案"
@@ -165,7 +185,12 @@ function AppShellBody({
     });
     const items: MenuProps["items"] = [];
     for (const group of MENU_GROUPS) {
-      const children = visible.filter((m) => m.group === group.id).map(toItem);
+      const own = visible.filter((m) => m.group === group.id);
+      const children: NonNullable<MenuProps["items"]> = own.filter((m) => !m.sub).map(toItem);
+      for (const sub of group.subgroups || []) {
+        const subItems = own.filter((m) => m.sub === sub.id).map(toItem);
+        if (subItems.length) children.push({ key: sub.siderKey, label: sub.id, children: subItems });
+      }
       if (!children.length) continue;
       if (group.direct) {
         items.push(...children);
@@ -293,6 +318,22 @@ function AppShellBody({
                 <Guard allow={canMenu("incremental")}>
                   <IncrementalPage />
                 </Guard>
+              }
+            />
+            <Route
+              path="/pushbroom/new"
+              element={
+                <FeatureGuard allow={canMenu("pushbroom_new")}>
+                  <PushbroomNewPage />
+                </FeatureGuard>
+              }
+            />
+            <Route
+              path="/pushbroom/jobs"
+              element={
+                <FeatureGuard allow={canMenu("pushbroom_jobs")}>
+                  <PushbroomJobsPage />
+                </FeatureGuard>
               }
             />
             <Route path="/profiles" element={<ProfilesListPage />} />
