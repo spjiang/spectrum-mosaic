@@ -73,6 +73,7 @@ mosaic/server/pushbroom-worker/
     worker_main.py             听 pushbroom.jobs / pushbroom.control；任务在子进程里跑
     mq_pub.py                  回传 pushbroom.progress / pushbroom.events
     status.py                  心跳写 /data/.pushbroom-worker/status.json
+    license_check.py           与框幅 worker 同规则的许可校验，交付时启用
     ingest/
       envi.py                  解析 ENVI 头；按 BIL 内存映射 .spe，不整块读入
       gps.py                   解析 figspec.gps
@@ -202,7 +203,9 @@ docker compose -f docker-compose.yml -f docker-compose.pushbroom.yml exec pushbr
 
 - 前端、后端的推扫改动随平台正常发版，`PUSHBROOM_ENABLED` 默认关闭。
 - 新增 `release/build/Dockerfile.pushbroom-worker-customer` 和镜像 `spectrum-pushbroom-worker:<版本>-<架构>`；客户 compose 模板里是一个可选服务。
-- 推扫 worker 也要做许可校验。它不能导入 `ms_mosaic`，许可校验的共用方式到交付时再定。
+- 推扫 worker 按框幅 worker 的方式做许可校验：在 `pb_mosaic/license_check.py` 里实现同一套规则（签名、到期、机器指纹、时钟回拨、在线租约），使用同样的环境变量（`MOSAIC_REQUIRE_LICENSE`、`LICENSE_PATH`、`LICENSE_PUBLIC_KEY_PATH`、`LICENSE_SERVER_URL`、`HOST_MACHINE_ID_PATH` 等），共用同一份许可文件和公钥。启动时校验一次，运行中按租约间隔复查，失败就不再接任务。
+- 时钟记录和租约缓存用推扫自己的文件（`LICENSE_CLOCK_PATH=/data/.license/pushbroom-clock.json`、`LICENSE_LEASE_PATH=/data/.license/pushbroom-lease.json`），避免两个 worker 同时写同一个文件。
+- 本机开发时 `MOSAIC_REQUIRE_LICENSE` 不设，和现在的框幅 worker 一样不校验。
 
 ## 10. 验收
 
