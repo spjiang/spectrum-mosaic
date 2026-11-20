@@ -145,7 +145,50 @@ export type PushbroomCheck = {
   flight: PushbroomFlight;
 };
 
-export type PushbroomParams = { gsd_m?: number; bands?: number[] };
+export type PushbroomParams = {
+  gsd_m?: number;
+  bands?: number[];
+  along_offset_m?: number;
+  boresight_px?: number;
+};
+
+export type PushbroomCalibrationState = {
+  active: boolean;
+  builtin?: { along_offset_m: number; boresight_px: number };
+  along_offset_m?: number;
+  boresight_px?: number;
+  along_se_m?: number;
+  boresight_se_px?: number;
+  flights?: string[];
+  created_at?: string | null;
+  created_by?: string | null;
+};
+
+export type PushbroomCalibrationFlight = {
+  flight?: string;
+  error?: string;
+  calibration?: {
+    usable?: boolean;
+    along_suggested_m?: number | null;
+    along_se_m?: number | null;
+    boresight_suggested_px?: number | null;
+    boresight_se_px?: number | null;
+    note?: string;
+  };
+};
+
+export type PushbroomCalibrationRun = {
+  flights: PushbroomCalibrationFlight[];
+  combined: {
+    usable?: boolean;
+    note?: string;
+    along_offset_m?: number;
+    along_se_m?: number;
+    boresight_px?: number;
+    boresight_se_px?: number;
+  };
+  run_token?: string;
+};
 
 export type PushbroomJob = {
   id: string;
@@ -163,6 +206,7 @@ export type PushbroomJob = {
   global_percent: number;
   message: string;
   error_summary: string | null;
+  calibration_warning?: string | null;
   stage_timings: Record<string, number | null>;
   created_at: string | null;
   updated_at: string | null;
@@ -765,6 +809,20 @@ export const api = {
   incrementalScan: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}/scan`, { method: "POST" }),
   incrementalRun: (id: string) => request<IncrementalDetail>(`/api/incremental/projects/${id}/run`, { method: "POST" }),
   pushbroomStatus: () => request<PushbroomStatus>("/api/pushbroom/status"),
+  pushbroomCalibration: () => request<PushbroomCalibrationState>("/api/pushbroom/calibration"),
+  pushbroomCalibrate: (inputDirs: string[]) =>
+    request<PushbroomCalibrationRun>("/api/pushbroom/calibration/run", {
+      method: "POST",
+      body: JSON.stringify({ input_dirs: inputDirs }),
+    }),
+  pushbroomApplyCalibration: (body: {
+    along_offset_m: number;
+    boresight_px: number;
+    along_se_m: number;
+    boresight_se_px: number;
+    flights: string[];
+    run_token: string;
+  }) => request<PushbroomCalibrationState>("/api/pushbroom/calibration", { method: "POST", body: JSON.stringify(body) }),
   pushbroomFlights: () =>
     request<{ input_root: string; output_root: string; items: PushbroomCheck[] }>("/api/pushbroom/flights"),
   pushbroomCheck: (inputDir: string) =>

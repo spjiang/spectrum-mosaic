@@ -359,6 +359,9 @@ def main() -> int:
         threading.Thread(target=lease_supervisor, daemon=True, name="pb-license").start()
     threading.Thread(target=worker.consume_control, daemon=True, name="pb-control").start()
     threading.Thread(target=worker.consume_jobs, daemon=True, name="pb-jobs").start()
+    from pb_mosaic.calibrate_rpc import serve as serve_calibrate
+
+    threading.Thread(target=serve_calibrate, args=(url, worker.stop), daemon=True, name="pb-calibrate").start()
 
     def on_term(*_: Any) -> None:
         worker.stop.set()

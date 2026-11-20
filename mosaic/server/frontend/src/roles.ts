@@ -19,6 +19,7 @@ export type MenuKey =
   | "incremental"
   | "pushbroom_new"
   | "pushbroom_jobs"
+  | "pushbroom_calibration"
   | "profiles"
   | "jobs"
   | "seam"
@@ -84,6 +85,7 @@ export const MENU_CATALOG: MenuDef[] = [
   { key: "seam", label: "拼接线处理", path: "/seam", group: "框幅拼图", roles: ["admin", "configurator", "executor", "viewer"], hint: "新建拼接线处理，选择任务后进入处理" },
   { key: "pushbroom_new", label: "新建推扫", path: "/pushbroom/new", group: "推扫拼图", feature: "pushbroom", roles: ["admin", "executor"], hint: "选择推扫高光谱架次，核对后提交拼图" },
   { key: "pushbroom_jobs", label: "推扫记录", path: "/pushbroom/jobs", group: "推扫拼图", feature: "pushbroom", roles: ["admin", "executor"], hint: "查看推扫任务进度、日志与成果下载" },
+  { key: "pushbroom_calibration", label: "相机标定", path: "/pushbroom/calibration", group: "推扫拼图", feature: "pushbroom", roles: ["admin"], hint: "用往返航带标定相机安装，应用到之后的推扫任务" },
   { key: "worker", label: "计算节点", path: "/worker", group: "系统管理", roles: ["admin"], hint: "监控计算进程与任务队列" },
   { key: "health", label: "系统监控", path: "/health", group: "系统管理", roles: ["admin"], hint: "查看数据库、消息队列与计算服务状态" },
   { key: "settings", label: "系统配置", path: "/settings", group: "系统管理", roles: ["admin", "configurator"], hint: "配置数据路径等运行参数" },

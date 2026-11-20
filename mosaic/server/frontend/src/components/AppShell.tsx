@@ -26,6 +26,7 @@ import {
   ScanOutlined,
   PlusCircleOutlined,
   HistoryOutlined,
+  AimOutlined,
 } from "@ant-design/icons";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
@@ -51,6 +52,7 @@ import IncrementalPage from "../pages/Incremental";
 import AreasPage from "../pages/Areas";
 import PushbroomNewPage from "../pages/pushbroom/PushbroomNew";
 import PushbroomJobsPage from "../pages/pushbroom/PushbroomJobs";
+import PushbroomCalibrationPage from "../pages/pushbroom/PushbroomCalibration";
 import { PRODUCT, PRODUCT_TITLE } from "../product";
 import {
   canConfigure,
@@ -72,6 +74,7 @@ const TITLE: Record<string, string> = {
   incremental: "测区管理",
   pushbroom_new: "新建推扫",
   pushbroom_jobs: "推扫记录",
+  pushbroom_calibration: "相机标定",
   profiles: "处理方案",
   jobs: "处理记录",
   seam: "拼接线处理",
@@ -91,6 +94,7 @@ const MENU_ICON: Record<MenuKey, ReactNode> = {
   incremental: <CloudUploadOutlined />,
   pushbroom_new: <PlusCircleOutlined />,
   pushbroom_jobs: <HistoryOutlined />,
+  pushbroom_calibration: <AimOutlined />,
   profiles: <ProfileOutlined />,
   jobs: <UnorderedListOutlined />,
   seam: <EditOutlined />,
@@ -333,6 +337,14 @@ function AppShellBody({
               element={
                 <FeatureGuard allow={canMenu("pushbroom_jobs")}>
                   <PushbroomJobsPage />
+                </FeatureGuard>
+              }
+            />
+            <Route
+              path="/pushbroom/calibration"
+              element={
+                <FeatureGuard allow={canMenu("pushbroom_calibration")}>
+                  <PushbroomCalibrationPage />
                 </FeatureGuard>
               }
             />

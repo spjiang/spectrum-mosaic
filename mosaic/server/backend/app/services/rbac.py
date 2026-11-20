@@ -11,6 +11,7 @@ MENU_KEYS = (
     "incremental",
     "pushbroom_new",
     "pushbroom_jobs",
+    "pushbroom_calibration",
     "profiles",
     "jobs",
     "seam",

@@ -17,6 +17,7 @@ from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import PushbroomJob, User
 from app.services import pushbroom as svc
+from app.services import pushbroom_calibration as calibration
 from app.services.audit import record_audit
 from app.services.deps import get_mq
 from app.services.mq import PB_QUEUE_JOBS, MQPublisher, queue_stats
@@ -36,6 +37,9 @@ class PushbroomParams(BaseModel):
     gsd_m: float | None = Field(default=None, ge=0.01, le=2.0)
     # 1 起始的波段序号。不填输出全部波段
     bands: list[int] | None = None
+    # 只为拒绝任务里手填安装参数；真正的值由相机标定注入
+    along_offset_m: float | None = None
+    boresight_px: float | None = None
 
     @field_validator("bands")
     @classmethod
@@ -59,6 +63,19 @@ class JobCreate(BaseModel):
 
 class CheckBody(BaseModel):
     input_dir: str
+
+
+class CalibrationRunBody(BaseModel):
+    input_dirs: list[str] = Field(min_length=1, max_length=8)
+
+
+class CalibrationApplyBody(BaseModel):
+    along_offset_m: float
+    boresight_px: float
+    along_se_m: float
+    boresight_se_px: float
+    flights: list[str]
+    run_token: str
 
 
 DOWNLOAD_TICKET_SECONDS = 300
@@ -143,6 +160,43 @@ def status(
     return {"enabled": True, **_worker_state(settings)}
 
 
+@router.get("/calibration")
+def get_calibration(
+    db: Session = Depends(get_db),
+    _settings: Settings = Depends(require_enabled),
+    _user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    return calibration.public_state(db, calibration.latest_calibration(db))
+
+
+@router.post("/calibration/run")
+def run_calibration(
+    body: CalibrationRunBody,
+    settings: Settings = Depends(require_enabled),
+    _user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    input_root, _ = svc.roots_for(_user, settings, admin=True)
+    dirs: list[str] = []
+    for raw in body.input_dirs:
+        inp = svc.assert_input_allowed(raw, input_root, settings)
+        check = quick_check(inp)
+        if not check.ok:
+            raise HTTPException(400, {"message": f"{inp.name} 核对未通过", "check": check.as_dict()})
+        dirs.append(str(inp))
+    return calibration.run_calibrate(settings, dirs)
+
+
+@router.post("/calibration")
+def apply_calibration(
+    body: CalibrationApplyBody,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    row = calibration.apply_calibration(db, settings, user, body.model_dump())
+    return calibration.public_state(db, row)
+
+
 @router.get("/flights")
 def flights(
     settings: Settings = Depends(require_enabled),
@@ -172,6 +226,8 @@ def create_job(
     mq: MQPublisher = Depends(get_mq),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
+    if body.params.along_offset_m is not None or body.params.boresight_px is not None:
+        raise HTTPException(400, "安装参数由相机标定决定，不能在任务里填写")
     job = svc.create_job(
         db,
         settings,
@@ -213,7 +269,9 @@ def get_job(
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
     job = _owned(db, job_id, user)
-    return _job_out(job, _owner_name(db, job))
+    out = _job_out(job, _owner_name(db, job))
+    out["calibration_warning"] = svc.calibration_warning(job.output_dir)
+    return out
 
 
 @router.post("/jobs/{job_id}/cancel")

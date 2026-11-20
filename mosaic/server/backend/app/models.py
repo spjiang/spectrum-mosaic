@@ -214,6 +214,20 @@ class PushbroomJobLog(Base):
     message: Mapped[str] = mapped_column(Text)
 
 
+class PushbroomCalibration(Base):
+    """相机安装标定。生效的是 created_at 最新的一行。"""
+
+    __tablename__ = "pushbroom_calibrations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    along_offset_m: Mapped[float] = mapped_column(Float)
+    along_se_m: Mapped[float] = mapped_column(Float)
+    boresight_px: Mapped[float] = mapped_column(Float)
+    boresight_se_px: Mapped[float] = mapped_column(Float)
+    flights: Mapped[list] = mapped_column(JSONB, default=list)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
 class IncrementalRound(Base):
     """一轮增量拼图，对应一条现有处理任务。"""
 

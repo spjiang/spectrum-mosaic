@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import PushbroomJob, PushbroomJobLog, User
 from app.services.paths import prepare_job_dirs, stamp_run_output_dir, trial_dirs, validate_paths
+from app.services.pushbroom_calibration import latest_calibration, with_active_calibration
 from app.services.pushbroom_check import quick_check
 
 log = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ def create_job(
     bad = [b for b in params.get("bands") or [] if b > total_bands]
     if bad:
         raise HTTPException(400, f"波段序号超出范围（共 {total_bands} 个波段）：{bad}")
+    params = with_active_calibration(params, latest_calibration(db))
     out = stamp_run_output_dir(str(Path(output_root) / inp.name))
     validate_paths(settings, str(inp), out)
     job = PushbroomJob(
@@ -157,6 +159,22 @@ def create_job(
     append_log(db, job.id, f"已提交：{inp}", commit=False)
     _write_control(job, cancel=False)
     return _commit_and_publish(db, mq, job, user.username)
+
+
+def calibration_warning(output_dir: str) -> str | None:
+    """成果报告里的标定不符提示。没有报告时返回空。"""
+    path = Path(output_dir) / "report" / "report.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for item in data.get("warnings") or []:
+        text = str(item)
+        if "传感器标定" in text:
+            return text
+    return None
 
 
 def get_job(db: Session, job_id: uuid.UUID) -> PushbroomJob:

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -61,7 +61,17 @@ function JobProgress({ job }: { job: PushbroomJob }) {
   );
 }
 
-function JobDrawer({ jobId, onClose, onChanged }: { jobId: string | null; onClose: () => void; onChanged: () => void }) {
+function JobDrawer({
+  jobId,
+  admin,
+  onClose,
+  onChanged,
+}: {
+  jobId: string | null;
+  admin: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
   const [job, setJob] = useState<PushbroomJob | null>(null);
   const [files, setFiles] = useState<PushbroomFile[]>([]);
   const [logs, setLogs] = useState("");
@@ -119,6 +129,14 @@ function JobDrawer({ jobId, onClose, onChanged }: { jobId: string | null; onClos
       {job && (
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
           {job.error_summary && <Alert type="error" showIcon message="失败原因" description={job.error_summary} />}
+          {job.calibration_warning && (
+            <Alert
+              type="warning"
+              showIcon
+              message="本架次与当前标定不符，航带接缝可能错开。"
+              description={admin ? <Link to="/pushbroom/calibration">去标定</Link> : job.calibration_warning}
+            />
+          )}
           <Descriptions size="small" column={2} bordered>
             <Descriptions.Item label="状态">
               <StatusTag job={job} />
@@ -143,6 +161,12 @@ function JobDrawer({ jobId, onClose, onChanged }: { jobId: string | null; onClos
               {job.params.gsd_m ? `${(job.params.gsd_m * 100).toFixed(1)} cm` : "自动"}
             </Descriptions.Item>
             <Descriptions.Item label="输出波段">{formatBandList(job.params.bands)}</Descriptions.Item>
+            <Descriptions.Item label="沿航向偏移">
+              {job.params.along_offset_m != null ? `${job.params.along_offset_m.toFixed(2)} m（本任务标定）` : "内置"}
+            </Descriptions.Item>
+            <Descriptions.Item label="狭缝中心偏置">
+              {job.params.boresight_px != null ? `${job.params.boresight_px.toFixed(1)} 像元（本任务标定）` : "内置"}
+            </Descriptions.Item>
             <Descriptions.Item label="提交时间">{formatJobDateTime(job.created_at)}</Descriptions.Item>
             <Descriptions.Item label="耗时">{formatDuration(elapsedSeconds(job))}</Descriptions.Item>
           </Descriptions>
@@ -389,7 +413,7 @@ export default function PushbroomJobsPage() {
           },
         ]}
       />
-      <JobDrawer jobId={openId} onClose={() => openJob(null)} onChanged={quietReload} />
+      <JobDrawer jobId={openId} admin={admin} onClose={() => openJob(null)} onChanged={quietReload} />
     </Card>
   );
 }
