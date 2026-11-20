@@ -31,7 +31,7 @@ from pb_mosaic.mosaic.merge import Cancelled, write_mosaic
 from pb_mosaic.mosaic.refine import RefineParams, RefineResult, refine_strips
 from pb_mosaic.products.envi_out import write_mosaic_header
 from pb_mosaic.products.footprints import write_footprints, write_trajectory_csv
-from pb_mosaic.products.preview import RgbSink, rgb_positions, stretch_to_png
+from pb_mosaic.products.preview import RgbSink, rgb_positions, stretch_to_png, write_display_rgb
 from pb_mosaic.products.report import write_report
 from pb_mosaic.stages import LABELS, global_percent
 
@@ -428,6 +428,7 @@ def _run(
     spe = prod / f"{stem}_mosaic.spe"
     hdr_path = prod / f"{stem}_mosaic.hdr"
     tif = prod / f"{stem}_rgb.tif"
+    display_tif = prod / f"{stem}_rgb_display.tif"
     png = prod / f"{stem}_preview.png"
     positions = rgb_positions(flight.hdr, band_idx)
     sink = RgbSink(tif, grid, positions)
@@ -475,6 +476,7 @@ def _run(
     sink.finish()
     preview = stretch_to_png(sink.thumb, png)
     report["preview"] = preview
+    write_display_rgb(tif, display_tif, preview["stretch_dn"])
     footprints = prod / f"{stem}_footprints.geojson"
     write_footprints(footprints, traj, geoms, geo.offsets, stats.strip_pixels)
     strips_out = []
@@ -489,6 +491,7 @@ def _run(
         _product(spe, output_dir, "cube", "成果立方体（ENVI BIL，原始 DN）"),
         _product(hdr_path, output_dir, "header", "成果头文件"),
         _product(tif, output_dir, "rgb", "RGB GeoTIFF（原始 DN）"),
+        _product(display_tif, output_dir, "rgb_display", "RGB GeoTIFF（显示拉伸）"),
         _product(png, output_dir, "preview", "预览图"),
         _product(footprints, output_dir, "footprints", "航带足迹"),
     ]

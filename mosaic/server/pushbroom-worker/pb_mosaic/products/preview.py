@@ -1,4 +1,8 @@
-"""三波段预览：原始 DN 的 RGB GeoTIFF（逐块写，带金字塔），以及拉伸后的小 PNG。"""
+"""三波段预览：原始 DN 的 RGB GeoTIFF（逐块写，带金字塔），以及给人看的拉伸图。
+
+原始 DN 往往集中在低值、带一条亮尾。只做线性百分位拉伸时，中间调会压得很暗。
+显示用图在百分位裁切后再做伽马提亮，让土路接近亮色、植被中间调抬起来。
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,10 @@ from pb_mosaic.ingest.envi import EnviHeader
 from pb_mosaic.mosaic.merge import NODATA
 
 PREVIEW_MAX_PX = 2048
-STRETCH_PERCENT = (2.0, 98.0)
+# 略收高百分位，减轻屋顶/反光把拉伸上限抬飞
+STRETCH_PERCENT = (1.0, 99.0)
+# <1 提亮中间调，接近显示器对 DN 的观感
+STRETCH_GAMMA = 0.5
 # 没有默认波段时按波长挑：红、绿、蓝
 RGB_TARGET_NM = (640.0, 550.0, 460.0)
 OVERVIEW_LEVELS = (2, 4, 8, 16, 32, 64)
@@ -97,24 +104,85 @@ class RgbSink:
             self.tmp_path.unlink(missing_ok=True)
 
 
+def stretch_limits(samples: np.ndarray, valid: np.ndarray) -> list[list[float]]:
+    """每个通道在有效像元上取百分位上下限。samples 末维是通道。"""
+    ranges: list[list[float]] = []
+    for c in range(samples.shape[-1]):
+        if valid.any():
+            lo, hi = np.percentile(samples[..., c][valid].astype(np.float64), STRETCH_PERCENT)
+        else:
+            lo, hi = 0.0, 1.0
+        hi = max(float(hi), float(lo) + 1.0)
+        ranges.append([float(lo), hi])
+    return ranges
+
+
+def apply_stretch(channel: np.ndarray, lo: float, hi: float, *, gamma: float = STRETCH_GAMMA) -> np.ndarray:
+    """线性裁切到 0–1 后再伽马映射到 uint8。"""
+    x = np.clip((channel.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
+    return np.clip(255.0 * np.power(x, gamma), 0, 255).astype(np.uint8)
+
+
+def stretch_rgb(rgb: np.ndarray, valid: np.ndarray, ranges: list[list[float]] | None = None) -> tuple[np.ndarray, list[list[float]]]:
+    """HWC uint16/float → HWC uint8。ranges 为 None 时按 valid 重算。"""
+    if ranges is None:
+        ranges = stretch_limits(rgb, valid)
+    out = np.zeros(rgb.shape[:2] + (3,), dtype=np.uint8)
+    for c, (lo, hi) in enumerate(ranges):
+        out[:, :, c] = apply_stretch(rgb[:, :, c], lo, hi)
+    out[~valid] = 0
+    return out, ranges
+
+
 def stretch_to_png(thumb: np.ndarray, png_path: Path) -> dict:
-    """每个通道在有效像元里按 2%–98% 拉到 0–255，无数据透明。返回拉伸参数。"""
+    """缩略图写成 RGBA PNG。返回拉伸参数，供显示用 GeoTIFF 共用。"""
     from PIL import Image
 
     valid = np.any(thumb != NODATA, axis=2)
+    rgb, ranges = stretch_rgb(thumb, valid)
     out = np.zeros(thumb.shape[:2] + (4,), dtype=np.uint8)
-    ranges = []
-    for c in range(3):
-        ch = thumb[:, :, c].astype(np.float32)
-        if valid.any():
-            lo, hi = np.percentile(ch[valid], STRETCH_PERCENT)
-        else:
-            lo, hi = 0.0, 1.0
-        hi = max(hi, lo + 1.0)
-        out[:, :, c] = np.clip((ch - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
-        ranges.append([float(lo), float(hi)])
+    out[:, :, :3] = rgb
     out[:, :, 3] = np.where(valid, 255, 0)
     tmp = png_path.with_name(png_path.name + ".part")
     Image.fromarray(out).save(tmp, format="PNG", optimize=True)
     tmp.replace(png_path)
-    return {"stretch_dn": ranges, "width": int(out.shape[1]), "height": int(out.shape[0])}
+    return {
+        "stretch_dn": ranges,
+        "stretch_percent": list(STRETCH_PERCENT),
+        "stretch_gamma": STRETCH_GAMMA,
+        "width": int(out.shape[1]),
+        "height": int(out.shape[0]),
+    }
+
+
+def write_display_rgb(src_tif: Path, dst_tif: Path, ranges: list[list[float]]) -> dict:
+    """把原始 DN 的 uint16 RGB 按同一套拉伸写成 uint8 显示用 GeoTIFF。"""
+    import rasterio
+    from rasterio.enums import Resampling
+
+    tmp = dst_tif.with_name(dst_tif.name + ".part")
+    with rasterio.open(src_tif) as src:
+        profile = src.profile.copy()
+        profile.update(dtype="uint8", nodata=0, compress="deflate", predictor=2, count=3)
+        profile.pop("BIGTIFF", None)
+        big = src.width * src.height * 3 > 3_500_000_000
+        if big:
+            profile["BIGTIFF"] = "YES"
+        with rasterio.open(tmp, "w", **profile) as dst:
+            for _, window in src.block_windows(1):
+                block = np.transpose(src.read(window=window), (1, 2, 0))  # HWC
+                valid = np.any(block != NODATA, axis=2)
+                rgb, _ = stretch_rgb(block, valid, ranges)
+                dst.write(np.transpose(rgb, (2, 0, 1)), window=window)
+            levels = [lv for lv in OVERVIEW_LEVELS if max(src.width, src.height) / lv >= 256]
+            if levels:
+                dst.build_overviews(levels, Resampling.average)
+                dst.update_tags(ns="rio_overview", resampling="average")
+            dst.update_tags(
+                stretch_percent=f"{STRETCH_PERCENT[0]},{STRETCH_PERCENT[1]}",
+                stretch_gamma=str(STRETCH_GAMMA),
+                stretch_dn=";".join(f"{lo:.3f},{hi:.3f}" for lo, hi in ranges),
+                purpose="display",
+            )
+    tmp.replace(dst_tif)
+    return {"path": str(dst_tif), "stretch_dn": ranges, "stretch_gamma": STRETCH_GAMMA}

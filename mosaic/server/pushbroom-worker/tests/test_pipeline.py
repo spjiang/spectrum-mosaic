@@ -79,7 +79,7 @@ def test_report_and_products(clean) -> None:
     assert "2/2 条接缝参与配准" in r["alignment"]["note"]
     assert max(abs(v) for o in r["alignment"]["offsets_east_north_m"].values() for v in o) < 0.15
     kinds = [p["kind"] for p in result.products]
-    assert kinds == ["cube", "header", "rgb", "preview", "footprints", "report", "report"]
+    assert kinds == ["cube", "header", "rgb", "rgb_display", "preview", "footprints", "report", "report"]
     for p in result.products:
         f = out / p["path"]
         assert f.is_file() and f.stat().st_size == p["bytes"], p
@@ -120,6 +120,12 @@ def test_rgb_geotiff_and_preview(clean) -> None:
     assert np.array_equal(rgb[0], cube[:, 2, :]) and np.array_equal(rgb[2], cube[:, 0, :])
     with Image.open(next((out / "products").glob("*_preview.png"))) as im:
         assert im.mode == "RGBA" and max(im.size) <= 2048
+    display = next((out / "products").glob("*_rgb_display.tif"))
+    with rasterio.open(display) as ds:
+        assert ds.dtypes[0] == "uint8" and ds.count == 3
+        assert (ds.width, ds.height) == (g["width"], g["height"])
+    prev = result.report["preview"]
+    assert prev["stretch_gamma"] < 1.0 and len(prev["stretch_dn"]) == 3
 
 
 def test_footprints_geojson(clean) -> None:

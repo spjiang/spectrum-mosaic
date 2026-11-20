@@ -12,7 +12,7 @@ FigSpec 推扫高光谱（FS-60C）原始 DN 三件套 `figspec.hdr / figspec.sp
 | 切航带 | P2_strips | 航向稳定、速度正常的直线段，裁掉转弯和刹车 |
 | 航带配准 | P3_align | 整条平移（接缝带 NCC）→ 精配准（逐条狭缝剪切 + 平移细化）→ 传感器标定自检 |
 | 重采样镶嵌 | P4_mosaic | 成果格网逐块反算原始行列，最近邻取 DN，按 BIL 写盘 |
-| 写成果 | P5_products | ENVI 头（UTM map info）、RGB GeoTIFF 金字塔、预览、足迹 |
+| 写成果 | P5_products | ENVI 头（UTM map info）、原始 DN / 显示用 RGB GeoTIFF、预览、足迹 |
 | 报告 | P6_report | report.json / report.md，含配准明细和处理假设 |
 
 步骤编号与前端 `frontend/src/pages/pushbroom/labels.ts` 一致（有测试校验）。
@@ -21,8 +21,9 @@ FigSpec 推扫高光谱（FS-60C）原始 DN 三件套 `figspec.hdr / figspec.sp
 
 ```
 products/<架次>_mosaic.spe / .hdr     镶嵌立方体，原始 DN，uint16，0 = 无数据
-products/<架次>_rgb.tif               RGB GeoTIFF（默认波段，原始 DN），带金字塔
-products/<架次>_preview.png           2–98% 拉伸预览
+products/<架次>_rgb.tif               RGB GeoTIFF（默认波段，原始 DN），带金字塔；GIS 默认打开会偏暗
+products/<架次>_rgb_display.tif       显示用 8 位 RGB（1–99% 裁切 + 伽马 0.5），给人看、进 GIS
+products/<架次>_preview.png           与显示 GeoTIFF 同一套拉伸的预览
 products/<架次>_footprints.geojson    航带足迹（WGS84），含每条航带的配准平移和狭缝剪切
 process/trajectory.csv               逐条定位：时间、UTM、地速、航迹角、推算行号
 report/report.json / report.md       处理报告

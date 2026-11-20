@@ -383,8 +383,9 @@ Windows 上 `admin` 的架次即 `E:\spectrum-mosaic\data\input\pushbroom\<架�
 | 文件 | 内容 |
 | --- | --- |
 | `<架次>_mosaic.spe` / `.hdr` | 镶嵌后的高光谱立方体（ENVI 格式，带地理坐标），正式成果 |
-| `<架次>_rgb.tif` | 真彩色合成 GeoTIFF，可直接进 GIS |
-| `<架次>_preview.png` | 预览图，不作为成果 |
+| `<架次>_rgb.tif` | 真彩色合成 GeoTIFF，原始 DN（16 位）。GIS 默认打开会偏暗，分析用 |
+| `<架次>_rgb_display.tif` | 显示用 8 位 RGB（已拉伸），给人看、进 GIS 浏览 |
+| `<架次>_preview.png` | 预览图，与显示 GeoTIFF 同一套拉伸 |
 | `<架次>_footprints.geojson` | 各航带覆盖范围 |
 | `report.md` / `report.json` | 质量报告：航带、配准、精配准、传感器标定自检 |
 
