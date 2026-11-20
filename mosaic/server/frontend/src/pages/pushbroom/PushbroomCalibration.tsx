@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Descriptions, Modal, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Descriptions, Modal, Space, Tag, Typography, message } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { api, type PushbroomCalibrationRun, type PushbroomCalibrationState, type PushbroomCheck, type PushbroomStatus } from "../../api";
+import { formatBytes, formatDuration } from "./labels";
 
 function meters(value: number, se?: number) {
   const text = `${value.toFixed(2)} m`;
@@ -33,7 +34,7 @@ export default function PushbroomCalibrationPage() {
       const [st, cal, data] = await Promise.all([api.pushbroomStatus(), api.pushbroomCalibration(), api.pushbroomFlights()]);
       setStatus(st);
       setCurrent(cal);
-      setFlights(data.items.filter((item) => item.ok));
+      setFlights(data.items);
     } catch (err) {
       message.error((err as Error).message || String(err));
     } finally {
@@ -48,6 +49,13 @@ export default function PushbroomCalibrationPage() {
   const offline = status?.worker_online === false;
   const combined = run?.combined;
   const canApply = Boolean(combined?.usable && run?.run_token && combined.along_offset_m != null && combined.boresight_px != null);
+  const picked = flights.filter((item) => selected.includes(item.input_dir));
+
+  function toggle(flight: PushbroomCheck) {
+    if (!flight.ok || running) return;
+    setRun(null);
+    setSelected((cur) => (cur.includes(flight.input_dir) ? cur.filter((item) => item !== flight.input_dir) : [...cur, flight.input_dir]));
+  }
 
   async function start() {
     setRunning(true);
@@ -83,7 +91,7 @@ export default function PushbroomCalibrationPage() {
           setCurrent(next);
           setRun(null);
           setSelected([]);
-          message.success("已保存。之后新建的任务使用这组值，无需重启计算服务。");
+          message.success("已保存。之后新建的任务使用这组值。");
         } catch (err) {
           message.error((err as Error).message || String(err));
         } finally {
@@ -95,77 +103,95 @@ export default function PushbroomCalibrationPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      {offline && (
-        <Alert type="warning" showIcon message="推扫计算服务未在线" description="标定需要计算服务在线。请联系管理员启动推扫计算服务。" />
-      )}
-      <Card className="mosaic-panel" title="当前生效" extra={<Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>刷新</Button>}>
-        <Typography.Paragraph type="secondary">
-          这两个值描述相机相对定位点的安装，不是飞控参数。拆装或更换相机后重新标定。
+      {offline && <Alert type="warning" showIcon message="推扫计算服务未在线，现在不能标定" />}
+      <Card className="mosaic-panel" title="现在用的安装参数" extra={<Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>刷新</Button>}>
+        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+          这是相机相对定位点的安装，不是飞控参数。拆过相机或云台后，用下面的架次重新标定。
         </Typography.Paragraph>
         {current && !current.active && (
-          <Descriptions size="small" column={1} bordered>
+          <Descriptions size="small" column={3} bordered>
             <Descriptions.Item label="沿航向偏移">{meters(current.builtin?.along_offset_m ?? 1.7)}</Descriptions.Item>
             <Descriptions.Item label="狭缝中心偏置">{pixels(current.builtin?.boresight_px ?? -19)}</Descriptions.Item>
             <Descriptions.Item label="来源">尚未标定，使用内置值</Descriptions.Item>
           </Descriptions>
         )}
         {current?.active && (
-          <Descriptions size="small" column={1} bordered>
+          <Descriptions size="small" column={3} bordered>
             <Descriptions.Item label="沿航向偏移">{meters(current.along_offset_m ?? 0)}</Descriptions.Item>
             <Descriptions.Item label="狭缝中心偏置">{pixels(current.boresight_px ?? 0)}</Descriptions.Item>
             <Descriptions.Item label="来源">
-              相机标定
+              {current.created_by || "管理员"}
               {current.created_at ? ` · ${current.created_at.replace("T", " ").slice(0, 16)}` : ""}
-              {current.created_by ? ` · ${current.created_by}` : ""}
               {current.flights?.length ? ` · ${current.flights.join("、")}` : ""}
             </Descriptions.Item>
           </Descriptions>
         )}
       </Card>
 
-      <Card className="mosaic-panel" title="标定">
-        <Typography.Paragraph type="secondary">选择有往返航带的架次。每个架次大约 1 分钟，请留在本页。数字由标定算出，不能手填。</Typography.Paragraph>
-        <Table
-          rowKey="input_dir"
-          size="middle"
-          loading={loading}
-          dataSource={flights}
-          pagination={false}
-          locale={{ emptyText: "没有核对通过的架次" }}
-          rowSelection={{
-            selectedRowKeys: selected,
-            onChange: (keys) => {
-              setSelected(keys.map(String));
-              setRun(null);
-            },
-          }}
-          columns={[
-            { title: "架次", dataIndex: "name" },
-            { title: "目录", dataIndex: "input_dir", ellipsis: true },
-          ]}
-        />
-        <Button type="primary" style={{ marginTop: 16 }} disabled={offline || selected.length === 0} loading={running} onClick={() => start()}>
-          开始标定
-        </Button>
+      <Card className="mosaic-panel" title="1. 点选架次">
+        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+          点一行加入，再点一次取消。拆装前后的架次不要放在一起。每个架次大约 1 分钟。
+        </Typography.Paragraph>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {flights.map((flight) => {
+            const on = selected.includes(flight.input_dir);
+            return (
+              <div
+                key={flight.input_dir}
+                role="button"
+                tabIndex={flight.ok ? 0 : -1}
+                aria-disabled={!flight.ok}
+                onClick={() => toggle(flight)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") toggle(flight);
+                }}
+                style={{
+                  textAlign: "left",
+                  border: on ? "1px solid #1677ff" : "1px solid #f0f0f0",
+                  background: on ? "#e6f4ff" : "#fff",
+                  borderRadius: 8,
+                  padding: "12px 16px",
+                  cursor: flight.ok ? "pointer" : "not-allowed",
+                  opacity: flight.ok ? 1 : 0.55,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                  <Typography.Text strong>{on ? "已选 · " : ""}{flight.name}</Typography.Text>
+                  {flight.ok ? <Tag>{formatBytes(flight.flight.spe_bytes)} · {formatDuration(flight.flight.duration_s)}</Tag> : <Tag color="error">不能用来标定</Tag>}
+                </div>
+                {!flight.ok && <Typography.Text type="secondary">{flight.errors[0] || "核对未通过"}</Typography.Text>}
+              </div>
+            );
+          })}
+          {!loading && flights.length === 0 && <Typography.Text type="secondary">没有找到架次</Typography.Text>}
+        </div>
+        <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
+          <Button type="primary" disabled={offline || picked.length === 0} loading={running} onClick={() => start()}>
+            {picked.length === 0 ? "先点选架次" : `标定这 ${picked.length} 个架次`}
+          </Button>
+          {running && <Typography.Text type="secondary">正在计算，请留在本页</Typography.Text>}
+          {!running && picked.length > 0 && <Typography.Text type="secondary">{picked.map((item) => item.name).join("、")}</Typography.Text>}
+        </div>
       </Card>
 
       {run && (
-        <Card className="mosaic-panel" title="标定结果">
+        <Card className="mosaic-panel" title="2. 建议值">
           {combined?.usable ? (
-            <Space direction="vertical" style={{ width: "100%" }}>
-              <Descriptions size="small" column={1} bordered>
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <Alert type="success" showIcon message="这组架次可以标定。确认后，只影响之后新建的任务。" />
+              <Descriptions size="small" column={2} bordered>
                 <Descriptions.Item label="沿航向偏移">{meters(combined.along_offset_m ?? 0, combined.along_se_m)}</Descriptions.Item>
                 <Descriptions.Item label="狭缝中心偏置">{pixels(combined.boresight_px ?? 0, combined.boresight_se_px)}</Descriptions.Item>
               </Descriptions>
-              <FlightTable run={run} />
+              <ResultList run={run} />
               <Button type="primary" disabled={!canApply} loading={applying} onClick={apply}>
                 应用到之后的任务
               </Button>
             </Space>
           ) : (
-            <Space direction="vertical" style={{ width: "100%" }}>
-              <Alert type="warning" showIcon message="这组架次不能用来标定" description={combined?.note || "请换有往返航带、且安装状态相同的架次"} />
-              <FlightTable run={run} />
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <Alert type="warning" showIcon message="这组架次不能一起标定" description={combined?.note || "换有往返航带、且安装状态相同的架次"} />
+              <ResultList run={run} />
             </Space>
           )}
         </Card>
@@ -174,33 +200,21 @@ export default function PushbroomCalibrationPage() {
   );
 }
 
-function FlightTable({ run }: { run: PushbroomCalibrationRun }) {
+function ResultList({ run }: { run: PushbroomCalibrationRun }) {
   return (
-    <Table
-      size="small"
-      pagination={false}
-      rowKey={(row) => row.flight || row.error || "flight"}
-      dataSource={run.flights}
-      columns={[
-        { title: "架次", dataIndex: "flight", render: (name: string | undefined) => name || "—" },
-        {
-          title: "沿航向偏移",
-          render: (_: unknown, row: PushbroomCalibrationRun["flights"][number]) =>
-            row.calibration?.along_suggested_m == null ? "—" : meters(row.calibration.along_suggested_m, row.calibration.along_se_m ?? undefined),
-        },
-        {
-          title: "狭缝中心偏置",
-          render: (_: unknown, row: PushbroomCalibrationRun["flights"][number]) =>
-            row.calibration?.boresight_suggested_px == null
-              ? "—"
-              : pixels(row.calibration.boresight_suggested_px, row.calibration.boresight_se_px ?? undefined),
-        },
-        {
-          title: "结果",
-          render: (_: unknown, row: PushbroomCalibrationRun["flights"][number]) =>
-            row.error ? <Tag color="error">{row.error}</Tag> : row.calibration?.usable ? <Tag color="success">可用</Tag> : <Tag>不可用</Tag>,
-        },
-      ]}
-    />
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {run.flights.map((row) => (
+        <div key={row.flight || row.error} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <Typography.Text>{row.flight || "—"}</Typography.Text>
+          <Typography.Text type="secondary">
+            {row.error
+              ? row.error
+              : row.calibration?.usable
+                ? `${meters(row.calibration.along_suggested_m ?? 0, row.calibration.along_se_m ?? undefined)} · ${pixels(row.calibration.boresight_suggested_px ?? 0, row.calibration.boresight_se_px ?? undefined)}`
+                : "不可用"}
+          </Typography.Text>
+        </div>
+      ))}
+    </div>
   );
 }

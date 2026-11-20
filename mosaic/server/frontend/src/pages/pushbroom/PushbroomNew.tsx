@@ -1,24 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  Alert,
-  Button,
-  Card,
-  Descriptions,
-  Form,
-  Input,
-  InputNumber,
-  Radio,
-  Space,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from "antd";
+import { Alert, Button, Card, Form, Input, InputNumber, Radio, Space, Tag, Typography, message } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { ApiError, api, type PushbroomCheck, type PushbroomStatus } from "../../api";
-import { flightSize, formatBytes, formatDuration, parseBandList, wavelengthRange } from "./labels";
+import { flightSize, formatBytes, formatDuration, parseBandList } from "./labels";
 
 type FormValues = {
   title?: string;
@@ -34,53 +19,8 @@ function checkFromError(err: unknown): PushbroomCheck | null {
   return detail?.check ?? null;
 }
 
-function CheckResult({ check }: { check: PushbroomCheck }) {
-  const f = check.flight;
-  return (
-    <Space direction="vertical" style={{ width: "100%" }}>
-      {check.errors.length > 0 && (
-        <Alert
-          type="error"
-          showIcon
-          message="架次核对未通过，不能提交"
-          description={
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {check.errors.map((e) => (
-                <li key={e}>{e}</li>
-              ))}
-            </ul>
-          }
-        />
-      )}
-      {check.warnings.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          message={
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {check.warnings.map((w) => (
-                <li key={w}>{w}</li>
-              ))}
-            </ul>
-          }
-        />
-      )}
-      <Descriptions size="small" column={2} bordered>
-        <Descriptions.Item label="架次">{check.name}</Descriptions.Item>
-        <Descriptions.Item label="目录">
-          <Typography.Text copyable style={{ wordBreak: "break-all" }}>
-            {check.input_dir}
-          </Typography.Text>
-        </Descriptions.Item>
-        <Descriptions.Item label="影像尺寸">{flightSize(f)}</Descriptions.Item>
-        <Descriptions.Item label="波长范围">{wavelengthRange(f)}</Descriptions.Item>
-        <Descriptions.Item label="数据量">{formatBytes(f.spe_bytes)}</Descriptions.Item>
-        <Descriptions.Item label="定位">
-          {f.gps_records != null ? `${f.gps_records} 条，覆盖 ${formatDuration(f.duration_s)}` : "—"}
-        </Descriptions.Item>
-      </Descriptions>
-    </Space>
-  );
+function reasonOf(flight: PushbroomCheck): string {
+  return flight.errors[0] || flight.warnings[0] || "";
 }
 
 export default function PushbroomNewPage() {
@@ -88,13 +28,14 @@ export default function PushbroomNewPage() {
   const [form] = Form.useForm<FormValues>();
   const [status, setStatus] = useState<PushbroomStatus | null>(null);
   const [flights, setFlights] = useState<PushbroomCheck[]>([]);
-  const [inputRoot, setInputRoot] = useState("");
   const [outputRoot, setOutputRoot] = useState("");
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<PushbroomCheck | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const [checking, setChecking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [more, setMore] = useState(false);
   const gsdMode = Form.useWatch("gsd_mode", form);
   const bandMode = Form.useWatch("band_mode", form);
 
@@ -104,7 +45,6 @@ export default function PushbroomNewPage() {
       const [st, data] = await Promise.all([api.pushbroomStatus(), api.pushbroomFlights()]);
       setStatus(st);
       setFlights(data.items);
-      setInputRoot(data.input_root);
       setOutputRoot(data.output_root);
       setSelected((cur) => (cur ? data.items.find((x) => x.input_dir === cur.input_dir) ?? cur : null));
     } catch (err) {
@@ -127,6 +67,7 @@ export default function PushbroomNewPage() {
     setChecking(true);
     try {
       setSelected(await api.pushbroomCheck(path));
+      setManualOpen(false);
     } catch (err) {
       message.error((err as Error).message || String(err));
     } finally {
@@ -163,41 +104,10 @@ export default function PushbroomNewPage() {
     }
   }
 
-  const columns = useMemo(
-    () => [
-      { title: "架次", dataIndex: "name", ellipsis: true },
-      { title: "影像尺寸", render: (_: unknown, r: PushbroomCheck) => flightSize(r.flight) },
-      { title: "数据量", width: 110, render: (_: unknown, r: PushbroomCheck) => formatBytes(r.flight.spe_bytes) },
-      {
-        title: "时长",
-        width: 120,
-        render: (_: unknown, r: PushbroomCheck) => formatDuration(r.flight.duration_s),
-      },
-      {
-        title: "核对",
-        width: 110,
-        render: (_: unknown, r: PushbroomCheck) =>
-          r.ok ? (
-            <Tag color="success">可提交</Tag>
-          ) : (
-            <Tooltip title={r.errors.join("；")}>
-              <Tag color="error">不可用</Tag>
-            </Tooltip>
-          ),
-      },
-    ],
-    [],
-  );
-
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       {status?.worker_online === false && (
-        <Alert
-          type="warning"
-          showIcon
-          message="推扫计算服务未在线"
-          description="任务可以提交，会在队列里等待。请联系管理员启动推扫计算服务。"
-        />
+        <Alert type="warning" showIcon message="推扫计算服务未在线" description="任务可以提交，会在队列里等待。请联系管理员启动推扫计算服务。" />
       )}
       <Card
         className="mosaic-panel"
@@ -208,96 +118,134 @@ export default function PushbroomNewPage() {
           </Button>
         }
       >
-        <Typography.Paragraph type="secondary">
-          列出 <Typography.Text code>{inputRoot || "—"}</Typography.Text> 下含 figspec.hdr / .spe / .gps 的目录。
-          成果写到 <Typography.Text code>{outputRoot || "—"}</Typography.Text>/架次名/提交时间。
+        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+          点一行即可选中。成果写到 {outputRoot || "输出目录"}/架次名/提交时间。
         </Typography.Paragraph>
-        <Table
-          rowKey="input_dir"
-          size="middle"
-          loading={loading}
-          dataSource={flights}
-          columns={columns}
-          pagination={false}
-          locale={{ emptyText: "目录下没有找到推扫架次" }}
-          rowSelection={{
-            type: "radio",
-            selectedRowKeys: selected ? [selected.input_dir] : [],
-            onChange: (_keys, rows) => setSelected(rows[0] ?? null),
-          }}
-          onRow={(r) => ({ onClick: () => setSelected(r), style: { cursor: "pointer" } })}
-        />
-        <Space.Compact style={{ width: "100%", marginTop: 16 }}>
-          <Input
-            placeholder={`也可以直接填写架次目录，例如 ${inputRoot || "/data/input/pushbroom"}/FigSpec_xxx`}
-            value={manualPath}
-            onChange={(e) => setManualPath(e.target.value)}
-            onPressEnter={() => checkManual()}
-          />
-          <Button onClick={() => checkManual()} loading={checking}>
-            核对
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {flights.map((flight) => {
+            const active = selected?.input_dir === flight.input_dir;
+            const why = reasonOf(flight);
+            return (
+              <div
+                key={flight.input_dir}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelected(flight)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") setSelected(flight);
+                }}
+                style={{
+                  textAlign: "left",
+                  border: active ? "1px solid #1677ff" : "1px solid #f0f0f0",
+                  background: active ? "#e6f4ff" : "#fff",
+                  borderRadius: 8,
+                  padding: "12px 16px",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                  <Typography.Text strong>{flight.name}</Typography.Text>
+                  {flight.ok ? <Tag color="success">可提交</Tag> : <Tag color="error">不可用</Tag>}
+                </div>
+                <Typography.Text type="secondary">
+                  {flight.ok
+                    ? `${flightSize(flight.flight)} · ${formatBytes(flight.flight.spe_bytes)} · ${formatDuration(flight.flight.duration_s)}`
+                    : why || "核对未通过"}
+                </Typography.Text>
+              </div>
+            );
+          })}
+          {!loading && flights.length === 0 && <Typography.Text type="secondary">目录下没有找到推扫架次</Typography.Text>}
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Button type="link" style={{ padding: 0 }} onClick={() => setManualOpen((v) => !v)}>
+            {manualOpen ? "收起目录输入" : "列表里没有？填写目录"}
           </Button>
-        </Space.Compact>
+          {manualOpen && (
+            <Space.Compact style={{ width: "100%", marginTop: 8 }}>
+              <Input
+                placeholder="/data/input/pushbroom/FigSpec_xxx"
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                onPressEnter={() => checkManual()}
+              />
+              <Button onClick={() => checkManual()} loading={checking}>
+                核对并选中
+              </Button>
+            </Space.Compact>
+          )}
+        </div>
       </Card>
 
-      {selected && (
-        <Card className="mosaic-panel" title="核对结果">
-          <CheckResult check={selected} />
-        </Card>
-      )}
-
-      <Card className="mosaic-panel" title="拼图参数">
-        <Form<FormValues>
-          form={form}
-          layout="vertical"
-          initialValues={{ gsd_mode: "auto", band_mode: "all" }}
-          onFinish={submit}
-          style={{ maxWidth: 640 }}
-        >
-          <Form.Item name="title" label="任务名称" extra="不填则用架次名">
-            <Input maxLength={120} placeholder={selected?.name} />
-          </Form.Item>
-          <Form.Item name="gsd_mode" label="成果分辨率">
-            <Radio.Group>
-              <Radio value="auto">自动（按航高和相机估算）</Radio>
-              <Radio value="manual">指定</Radio>
-            </Radio.Group>
-          </Form.Item>
-          {gsdMode === "manual" && (
-            <Form.Item
-              name="gsd_cm"
-              label="地面分辨率（厘米/像元）"
-              rules={[{ required: true, message: "请填写分辨率" }]}
-            >
-              <InputNumber min={1} max={200} step={0.5} style={{ width: 200 }} addonAfter="cm" />
+      <Card className="mosaic-panel" title={selected ? `提交 ${selected.name}` : "提交"}>
+        {!selected && <Alert type="info" showIcon message="先在上面点一个架次" />}
+        {selected && !selected.ok && (
+          <Alert
+            type="error"
+            showIcon
+            message="这个架次不能提交"
+            description={
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {selected.errors.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            }
+          />
+        )}
+        {selected?.ok && (
+          <Form<FormValues> form={form} layout="vertical" initialValues={{ gsd_mode: "auto", band_mode: "all" }} onFinish={submit}>
+            <Typography.Paragraph type="secondary">
+              {flightSize(selected.flight)} · {formatBytes(selected.flight.spe_bytes)} · {formatDuration(selected.flight.duration_s)}
+            </Typography.Paragraph>
+            {selected.warnings.length > 0 && (
+              <Alert style={{ marginBottom: 16 }} type="warning" showIcon message={selected.warnings.join("；")} />
+            )}
+            <Form.Item name="title" label="任务名称" extra="不填就用架次名">
+              <Input maxLength={120} placeholder={selected.name} />
             </Form.Item>
-          )}
-          <Form.Item name="band_mode" label="输出波段" extra="全部波段时成果体积与原始数据相当，可只选需要的波段">
-            <Radio.Group>
-              <Radio value="all">全部波段</Radio>
-              <Radio value="pick">指定波段</Radio>
-            </Radio.Group>
-          </Form.Item>
-          {bandMode === "pick" && (
-            <Form.Item
-              name="bands_text"
-              label="波段序号"
-              extra={`从 1 开始，例如 1-10, 48, 150, 208${selected?.flight.bands ? `（共 ${selected.flight.bands} 个）` : ""}`}
-              rules={[{ required: true, message: "请填写波段序号" }]}
-            >
-              <Input placeholder="48, 150, 208" />
-            </Form.Item>
-          )}
-          <Form.Item style={{ marginBottom: 0 }}>
-            <Space>
-              <Button type="primary" htmlType="submit" loading={submitting} disabled={!selected?.ok}>
-                提交拼图
+            <Typography.Paragraph>
+              分辨率自动，输出全部波段。
+              <Button type="link" onClick={() => setMore((v) => !v)}>
+                {more ? "收起" : "要改分辨率或波段"}
               </Button>
-              {!selected && <Typography.Text type="secondary">请先选择一个架次</Typography.Text>}
-              {selected && !selected.ok && <Typography.Text type="danger">当前架次核对未通过</Typography.Text>}
-            </Space>
-          </Form.Item>
-        </Form>
+            </Typography.Paragraph>
+            {more && (
+              <>
+                <Form.Item name="gsd_mode" label="成果分辨率">
+                  <Radio.Group>
+                    <Radio value="auto">自动（按航高和相机估算）</Radio>
+                    <Radio value="manual">指定</Radio>
+                  </Radio.Group>
+                </Form.Item>
+                {gsdMode === "manual" && (
+                  <Form.Item name="gsd_cm" label="地面分辨率（厘米/像元）" rules={[{ required: true, message: "请填写分辨率" }]}>
+                    <InputNumber min={1} max={200} step={0.5} style={{ width: 200 }} addonAfter="cm" />
+                  </Form.Item>
+                )}
+                <Form.Item name="band_mode" label="输出波段" extra="全部波段时成果体积与原始数据相当">
+                  <Radio.Group>
+                    <Radio value="all">全部波段</Radio>
+                    <Radio value="pick">指定波段</Radio>
+                  </Radio.Group>
+                </Form.Item>
+                {bandMode === "pick" && (
+                  <Form.Item
+                    name="bands_text"
+                    label="波段序号"
+                    extra={`从 1 开始，例如 48, 150, 208${selected.flight.bands ? `（共 ${selected.flight.bands} 个）` : ""}`}
+                    rules={[{ required: true, message: "请填写波段序号" }]}
+                  >
+                    <Input placeholder="48, 150, 208" />
+                  </Form.Item>
+                )}
+              </>
+            )}
+            <Button type="primary" htmlType="submit" loading={submitting}>
+              提交这个架次
+            </Button>
+          </Form>
+        )}
       </Card>
     </Space>
   );
