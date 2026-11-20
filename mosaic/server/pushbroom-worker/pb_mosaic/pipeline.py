@@ -25,6 +25,7 @@ from pb_mosaic.geom.sensor import Sensor, SensorError, sensor_from, sensor_sourc
 from pb_mosaic.geom.strips import split_strips
 from pb_mosaic.geom.trajectory import Trajectory, build_trajectory
 from pb_mosaic.ingest.flight import Flight, FlightError, check_flight
+from pb_mosaic.license_check import LicenseError, enforce_license_or_raise
 from pb_mosaic.mosaic.align import AlignParams, AlignResult, align_strips
 from pb_mosaic.mosaic.merge import Cancelled, write_mosaic
 from pb_mosaic.mosaic.refine import RefineParams, RefineResult, refine_strips
@@ -274,8 +275,17 @@ def solve_geometry(
     return Geometry(geoms, alignment, refine, offsets, calibration)
 
 
+def _require_license() -> None:
+    """客户镜像里流水线入口自己验许可：绕过 worker 走命令行或直接调用，同样受限。"""
+    try:
+        enforce_license_or_raise()
+    except LicenseError as exc:
+        raise PipelineError(str(exc)) from exc
+
+
 def calibrate_flight(input_dir: Path, raw_params: dict[str, Any] | None = None) -> dict[str, Any]:
     """只做到配准，给出本架次的安装参数自检。命令行 calibrate 用。"""
+    _require_license()
     params = JobParams.from_dict(raw_params)
     flight = check_flight(input_dir)
     traj = build_trajectory(flight.gps)
@@ -303,6 +313,7 @@ def run(
     reporter: Reporter | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> RunResult:
+    _require_license()
     reporter = reporter or LogReporter()
     input_dir, output_dir = Path(input_dir), Path(output_dir)
     for sub in ("products", "process", "log", "report"):
