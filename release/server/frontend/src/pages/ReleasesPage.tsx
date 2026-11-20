@@ -180,7 +180,7 @@ export default function ReleasesPage() {
   function confirmBuild(row: Release) {
     Modal.confirm({
       title: "确认构建",
-      content: `开始构建版本 ${row.version}（linux/${row.arch}，离线全量：worker/backend/frontend + postgres/rabbitmq）？构建期间不可编辑或删除。`,
+      content: `开始构建版本 ${row.version}（linux/${row.arch}，离线全量：worker/推扫 worker/backend/frontend + postgres/rabbitmq）？构建期间不可编辑或删除。`,
       okText: "开始构建",
       cancelText: "取消",
       onOk: async () => {

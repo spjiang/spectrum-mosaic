@@ -20,6 +20,7 @@
 └── images/                   # 离线全量（推荐勾选）
     ├── load-images.sh
     ├── worker-image.tar
+    ├── pushbroom-worker-image.tar   # 推扫计算服务，版本含推扫时才有
     ├── backend-image.tar
     ├── frontend-image.tar
     ├── postgres-image.tar

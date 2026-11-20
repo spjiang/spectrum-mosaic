@@ -46,6 +46,22 @@ def worker_customer_dockerfile(context: Path, arch: str) -> Path:
     return context / "release" / "build" / name
 
 
+def pushbroom_customer_dockerfile(context: Path) -> Path:
+    """推扫 worker 只用 CPU，两种架构同一个 Dockerfile。"""
+    return context / "release" / "build" / "Dockerfile.pushbroom-customer"
+
+
+# 构建产物，最后逐个核对架构；与 packager / load-images.sh 一致
+IMAGE_TARS = (
+    "worker-image.tar",
+    "pushbroom-worker-image.tar",
+    "backend-image.tar",
+    "frontend-image.tar",
+    "postgres-image.tar",
+    "rabbitmq-image.tar",
+)
+
+
 def start_build(release_id: int) -> None:
     with _lock:
         threading.Thread(target=_run_build, args=(release_id,), daemon=True).start()
@@ -273,10 +289,14 @@ def _run_build(release_id: int) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         log_path = out_dir / "build.log"
         worker_tag = _image_tag(settings.worker_image_repo, rel.version, arch)
+        pushbroom_tag = _image_tag(settings.pushbroom_worker_image_repo, rel.version, arch)
         backend_tag = _image_tag(settings.backend_image_repo, rel.version, arch)
         frontend_tag = _image_tag(settings.frontend_image_repo, rel.version, arch)
         image_manifest = build_image_manifest(
-            worker=worker_tag, backend=backend_tag, frontend=frontend_tag
+            worker=worker_tag,
+            pushbroom_worker=pushbroom_tag,
+            backend=backend_tag,
+            frontend=frontend_tag,
         )
         rel.status = "running"
         rel.error_message = ""
@@ -290,10 +310,11 @@ def _run_build(release_id: int) -> None:
 
         context = _workspace()
         worker_df = worker_customer_dockerfile(context, arch)
+        pushbroom_df = pushbroom_customer_dockerfile(context)
         backend_df = context / "release" / "build" / "Dockerfile.backend-customer"
         frontend_ctx = context / "mosaic" / "server" / "frontend"
         frontend_df = frontend_ctx / "Dockerfile"
-        for p in (worker_df, backend_df, frontend_df):
+        for p in (worker_df, pushbroom_df, backend_df, frontend_df):
             if not p.exists():
                 raise RuntimeError(f"找不到 Dockerfile: {p}")
 
@@ -303,12 +324,14 @@ def _run_build(release_id: int) -> None:
 
         client = docker.from_env()
         worker_tar = out_dir / "worker-image.tar"
+        pushbroom_tar = out_dir / "pushbroom-worker-image.tar"
         backend_tar = out_dir / "backend-image.tar"
         frontend_tar = out_dir / "frontend-image.tar"
 
         with log_path.open("w", encoding="utf-8") as logf:
             logf.write(f"platform={platform}\n")
             logf.write(f"worker dockerfile={worker_df}\n")
+            logf.write(f"pushbroom worker dockerfile={pushbroom_df}\n")
             logf.write("=== full offline stack build ===\n")
 
             try:
@@ -324,6 +347,15 @@ def _run_build(release_id: int) -> None:
                 logf=logf,
             )
             worker_digest = _save_named_verified(client, worker_tag, worker_tar, arch, logf)
+
+            _build_image(
+                context=context,
+                dockerfile=pushbroom_df,
+                tag=pushbroom_tag,
+                platform=platform,
+                logf=logf,
+            )
+            _save_named_verified(client, pushbroom_tag, pushbroom_tar, arch, logf)
 
             _build_image(
                 context=context,
@@ -347,13 +379,7 @@ def _run_build(release_id: int) -> None:
                 _pull_and_save_dep(ref, platform, out_dir / tar_name, logf)
 
             # 最终再扫一遍全部 tar，防止遗漏
-            for name in (
-                "worker-image.tar",
-                "backend-image.tar",
-                "frontend-image.tar",
-                "postgres-image.tar",
-                "rabbitmq-image.tar",
-            ):
+            for name in IMAGE_TARS:
                 assert_tar_arch(out_dir / name, arch)
                 logf.write(f"FINAL_OK {name} arch={arch}\n")
 
@@ -362,6 +388,7 @@ def _run_build(release_id: int) -> None:
                 f"arch={arch}",
                 f"platform={platform}",
                 f"worker={worker_tag}",
+                f"pushbroom_worker={pushbroom_tag}",
                 f"backend={backend_tag}",
                 f"frontend={frontend_tag}",
                 *[f"dep={ref}" for ref, _ in _DEP_IMAGES],

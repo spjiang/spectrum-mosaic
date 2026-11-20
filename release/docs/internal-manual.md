@@ -29,6 +29,8 @@
 
 现在发给 Windows 带 NVIDIA 显卡的客户，选 **amd64**。这个架构的 worker 按 GPU 镜像构建（CUDA 12.2 + CuPy）。`arm64` 仍是 CPU 镜像。构建日志里应能看到 `Dockerfile.worker-customer-gpu`。状态变成成功后才能打交付包。失败在本页看日志。
 
+每次构建同时产出推扫 worker 镜像 `pushbroom-worker-image.tar`（`Dockerfile.pushbroom-customer`，只用 CPU，两种架构同一份），镜像清单里多一行 `spectrum-mosaic-pushbroom-worker:<版本>-<架构>`。用这类版本打的包默认开启推扫；客户不需要时，让对方把 `.env` 里 `PUSHBROOM_ENABLED`、`COMPOSE_PROFILES` 两行改成 `false` 和空，重新执行启动脚本。加推扫之前构建的老版本清单里没有这一行，打包时自动关闭推扫，也不要求这个 tar。
+
 **③ 客户档案**
 
 单位名称会写进许可和 zip 文件名。状态为停用的客户不能新签发。
@@ -128,6 +130,8 @@ POST http://123.56.26.229:8180/api/license/check
 
 启动入口 `worker_main.py` 和验签程序 `license_check.py` 仍是 Python。页面和任务接口也不做这层编译。
 
+推扫 worker 同样处理：`pb_mosaic` 的算法模块和验签程序按 `release/build/cython_modules_pushbroom.txt` 编成 `.so`，只留 `worker_main.py`、`job_child.py`、`__main__.py` 三个 `python -m` 入口和各 `__init__.py`。构建时逐个导入清单里的模块，并检查镜像里没有对应 `.py` 和字节码。`pb_mosaic` 新增模块必须加进清单，发版台单测会拦下漏加的。推扫流水线的入口自己也验许可，绕开 worker 直接用命令行或 Python 调用同样被拒。
+
 **2. 没有有效许可就不能算**
 
 许可是 JSON 加 Ed25519 签名。改任何一个字段，签名对不上，worker 拒绝启动。客户镜像设置 `MOSAIC_REQUIRE_LICENSE=1`。开发环境默认不强制验许可。
@@ -193,6 +197,7 @@ POST http://123.56.26.229:8180/api/license/check
 └── images/                      勾选全量时才有
     ├── load-images.sh
     ├── worker-image.tar
+    ├── pushbroom-worker-image.tar   版本含推扫时才有
     ├── backend-image.tar
     ├── frontend-image.tar
     ├── postgres-image.tar

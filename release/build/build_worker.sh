@@ -15,6 +15,7 @@ KEYS="$ROOT/release/keys"
 PUB="$KEYS/ed25519_public.pem"
 EMBED="$ROOT/release/build/.embed/license_public.pem"
 WORKER="spectrum-mosaic-worker:${VERSION}-${ARCH}"
+PUSHBROOM="spectrum-mosaic-pushbroom-worker:${VERSION}-${ARCH}"
 BACKEND="spectrum-mosaic-backend:${VERSION}-${ARCH}"
 FRONTEND="spectrum-mosaic-frontend:${VERSION}-${ARCH}"
 OUT="$ROOT/release/artifacts/releases/manual-${VERSION}-${ARCH}"
@@ -34,6 +35,10 @@ echo "=== build worker ($PLATFORM) df=$(basename "$WORKER_DF") ==="
 docker build --platform "$PLATFORM" -f "$WORKER_DF" -t "$WORKER" "$ROOT" | tee "$OUT/build.log"
 docker save -o "$OUT/worker-image.tar" "$WORKER"
 
+echo "=== build pushbroom worker ($PLATFORM) ==="
+docker build --platform "$PLATFORM" -f "$ROOT/release/build/Dockerfile.pushbroom-customer" -t "$PUSHBROOM" "$ROOT" | tee -a "$OUT/build.log"
+docker save -o "$OUT/pushbroom-worker-image.tar" "$PUSHBROOM"
+
 echo "=== build backend ($PLATFORM) ==="
 docker build --platform "$PLATFORM" -f "$ROOT/release/build/Dockerfile.backend-customer" -t "$BACKEND" "$ROOT" | tee -a "$OUT/build.log"
 docker save -o "$OUT/backend-image.tar" "$BACKEND"
@@ -52,6 +57,7 @@ cat > "$OUT/images.manifest" <<EOF
 arch=$ARCH
 platform=$PLATFORM
 worker=$WORKER
+pushbroom_worker=$PUSHBROOM
 backend=$BACKEND
 frontend=$FRONTEND
 dep=postgres:16-alpine

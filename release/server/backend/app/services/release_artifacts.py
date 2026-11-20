@@ -7,6 +7,7 @@ from typing import Any
 # name -> 磁盘文件名
 ARTIFACT_FILES: dict[str, str] = {
     "worker": "worker-image.tar",
+    "pushbroom_worker": "pushbroom-worker-image.tar",
     "backend": "backend-image.tar",
     "frontend": "frontend-image.tar",
     "postgres": "postgres-image.tar",
@@ -15,6 +16,7 @@ ARTIFACT_FILES: dict[str, str] = {
 
 ARTIFACT_ORDER: tuple[str, ...] = (
     "worker",
+    "pushbroom_worker",
     "backend",
     "frontend",
     "postgres",
@@ -23,6 +25,7 @@ ARTIFACT_ORDER: tuple[str, ...] = (
 
 ARTIFACT_LABELS: dict[str, str] = {
     "worker": "Worker",
+    "pushbroom_worker": "推扫 Worker",
     "backend": "Backend",
     "frontend": "Frontend",
     "postgres": "Postgres",

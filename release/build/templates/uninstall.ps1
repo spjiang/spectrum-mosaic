@@ -16,6 +16,10 @@ $composeArgs = @("-f", "docker-compose.yml")
 if (Test-Path -LiteralPath "docker-compose.gpu.yml") {
     $composeArgs += @("-f", "docker-compose.gpu.yml")
 }
+# 推扫 worker 在 profile 里，不点名时 down 不会处理它
+if (Select-String -LiteralPath "docker-compose.yml" -Pattern 'profiles: \["pushbroom"\]' -Quiet) {
+    $composeArgs += @("--profile", "pushbroom")
+}
 # 禁止追加 -v 或 --volumes，否则会清掉命名数据卷。
 & docker compose @composeArgs down --rmi all --remove-orphans
 if ($LASTEXITCODE -ne 0) {

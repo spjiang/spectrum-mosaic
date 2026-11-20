@@ -23,7 +23,13 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 
-for f in $required; do
+# 推扫 worker 只在构建了推扫的版本里有
+optional=""
+if [ -f pushbroom-worker-image.tar ]; then
+  optional="pushbroom-worker-image.tar"
+fi
+
+for f in $required $optional; do
   echo ">>> docker load -i $f"
   docker load -i "$f"
   if [ -f "${f}.arch" ]; then
@@ -31,6 +37,7 @@ for f in $required; do
     # 从 docker load 输出无法稳定拿 tag；按侧车期望的常见仓库名核对
     case "$f" in
       worker-image.tar)   ref=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^spectrum-mosaic-worker:' | head -1) ;;
+      pushbroom-worker-image.tar) ref=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^spectrum-mosaic-pushbroom-worker:' | head -1) ;;
       backend-image.tar)  ref=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^spectrum-mosaic-backend:' | head -1) ;;
       frontend-image.tar) ref=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^spectrum-mosaic-frontend:' | head -1) ;;
       postgres-image.tar) ref=postgres:16-alpine ;;
@@ -41,7 +48,7 @@ for f in $required; do
       got=$(docker image inspect --format '{{.Architecture}}' "$ref")
       echo ">>> arch check $ref got=$got want=$want"
       if [ "$got" != "$want" ]; then
-        echo "错误: $f 加载后架构为 $got，期望 $want。请换正确架构的交付包。" >&2
+        echo "错误: $f 加载后架构为 ${got}，期望 ${want}。请换正确架构的交付包。" >&2
         exit 1
       fi
     fi

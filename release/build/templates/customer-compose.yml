@@ -45,6 +45,8 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       DATA_ROOTS: /data
+      # 推扫拼图菜单与接口；须和下面 pushbroom-worker 一起开关（.env 里的 COMPOSE_PROFILES）
+      PUSHBROOM_ENABLED: ${PUSHBROOM_ENABLED:-false}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
@@ -78,6 +80,43 @@ services:
       - ./data:/data
       - ./licenses/{{LICENSE_FILE}}:/license/license.lic:ro
       - /etc/machine-id:/host/machine-id:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  # 推扫高光谱拼图（FigSpec 架次放在 data/input/pushbroom/ 下，一个子目录一个架次）。
+  # 只在 .env 里 COMPOSE_PROFILES 含 pushbroom 时启动；与 worker 共用同一份许可。
+  pushbroom-worker:
+    image: {{PUSHBROOM_IMAGE}}
+    platform: linux/{{ARCH}}
+    pull_policy: never
+    profiles: ["pushbroom"]
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mosaic}:${RABBITMQ_PASS:-mosaic_secret}@rabbitmq:5672/
+      PB_INPUT_ROOTS: /data/input
+      PB_OUTPUT_ROOTS: /data/output
+      PB_MAX_MEMORY_GB: ${PB_MAX_MEMORY_GB:-8}
+      # 本机相机标定，见部署手册「推扫相机标定」；留空用内置 FS-60C 标定
+      PB_SENSOR_ALONG_OFFSET_M: ${PB_SENSOR_ALONG_OFFSET_M:-}
+      PB_SENSOR_BORESIGHT_PX: ${PB_SENSOR_BORESIGHT_PX:-}
+      PB_SENSOR_SAMPLE_SIGN: ${PB_SENSOR_SAMPLE_SIGN:-}
+      MOSAIC_REQUIRE_LICENSE: "1"
+      LICENSE_PATH: /license/license.lic
+      LICENSE_PUBLIC_KEY_PATH: /app/license_public.pem
+      LICENSE_CLOCK_PATH: /data/.license/pushbroom-clock.json
+      LICENSE_CLOCK_TOLERANCE_HOURS: "{{LICENSE_CLOCK_TOLERANCE_HOURS}}"
+      LICENSE_LEASE_CHECK_INTERVAL_HOURS: "{{LICENSE_LEASE_CHECK_INTERVAL_HOURS}}"
+      LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-{{LICENSE_SERVER_URL}}}
+      LICENSE_LEASE_PATH: /data/.license/pushbroom-lease.json
+      HOST_MACHINE_ID_PATH: /host/machine-id
+    volumes:
+      - ./data:/data
+      - ./licenses/{{LICENSE_FILE}}:/license/license.lic:ro
+      - /etc/machine-id:/host/machine-id:ro
+    mem_limit: ${PB_MEM_LIMIT:-12g}
+    # 停机时会结束正在跑的任务并回报「服务停止」，需要几秒
+    stop_grace_period: 30s
+    init: true
     depends_on:
       rabbitmq:
         condition: service_healthy

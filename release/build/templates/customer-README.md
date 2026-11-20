@@ -41,8 +41,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 
 ## 3. 操作手册
 
-- `docs/拼图服务私有部署操作手册.md`：安装、启动、目录和许可
-- `docs/拼图服务WEB操作手册.md`：登录、新建处理、查看和下载成果
+- `docs/拼图服务私有部署操作手册.md`：安装、启动、目录、许可，推扫拼图的开关与相机标定（第 6 节）
+- `docs/拼图服务WEB操作手册.md`：登录、新建处理、查看和下载成果，推扫拼图（第 14 节）
+
+## 推扫拼图
+
+本包若含 `images/pushbroom-worker-image.tar`，`.env.example` 已开启推扫（`PUSHBROOM_ENABLED=true`、`COMPOSE_PROFILES=pushbroom`），页面出现「推扫拼图」菜单。FigSpec 架次整夹放在 `data/input/pushbroom/<架次>/`。推扫计算服务与 worker 共用同一份许可。关闭推扫、调内存、拆装相机后重新标定，见部署手册第 6 节。
 
 ## 4. 注意
 

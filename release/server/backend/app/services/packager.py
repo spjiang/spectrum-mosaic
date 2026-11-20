@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import Customer, License, Release
 from app.services.image_arch import assert_tar_arch
-from app.services.release_images import resolve_worker_image
+from app.services.release_images import (
+    PUSHBROOM_WORKER_REPO,
+    resolve_pushbroom_image,
+    resolve_worker_image,
+)
 from app.services.system_settings import (
     format_hours,
     get_clock_tolerance_hours,
@@ -26,6 +30,15 @@ _IMAGE_TARS = (
     "postgres-image.tar",
     "rabbitmq-image.tar",
 )
+# 只有构建了推扫 worker 的版本才有，见 resolve_pushbroom_image
+PUSHBROOM_TAR = "pushbroom-worker-image.tar"
+PUSHBROOM_PROFILE = "pushbroom"
+
+
+def image_tars(release: Release) -> tuple[str, ...]:
+    if resolve_pushbroom_image(release.image_name or ""):
+        return (*_IMAGE_TARS, PUSHBROOM_TAR)
+    return _IMAGE_TARS
 
 
 def _sha256_file(path: Path) -> str:
@@ -86,6 +99,7 @@ def build_delivery_zip(
     if not gpu_compose_src.exists():
         raise FileNotFoundError(f"缺少 {gpu_compose_src}")
     shutil.copy2(gpu_compose_src, staging / "docker-compose.gpu.yml")
+    pushbroom_image = resolve_pushbroom_image(release.image_name or "")
     for src, name in (
         (compose_src, "docker-compose.yml"),
         (readme_src, "README.md"),
@@ -103,6 +117,13 @@ def build_delivery_zip(
                     arch=arch,
                 ),
             )
+            # 老版本没有推扫镜像：compose 里仍写一个占位 tag，profile 不开就不会用到
+            .replace(
+                "{{PUSHBROOM_IMAGE}}",
+                pushbroom_image or f"{PUSHBROOM_WORKER_REPO}:{release.version}-{arch}",
+            )
+            .replace("{{PUSHBROOM_ENABLED}}", "true" if pushbroom_image else "false")
+            .replace("{{COMPOSE_PROFILES}}", PUSHBROOM_PROFILE if pushbroom_image else "")
             .replace("{{LICENSE_FILE}}", f"{license_row.license_id}.lic")
             .replace("{{CUSTOMER}}", customer.name)
             .replace("{{LICENSE_CLOCK_TOLERANCE_HOURS}}", tolerance_hours)
@@ -140,7 +161,7 @@ def build_delivery_zip(
         images.mkdir()
         missing: list[str] = []
         arch_errors: list[str] = []
-        for name in _IMAGE_TARS:
+        for name in image_tars(release):
             src = release_images / name
             if not src.exists():
                 missing.append(name)

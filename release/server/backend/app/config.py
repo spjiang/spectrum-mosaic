@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     release_build_root: str = "/release/build"
     product_name: str = "spectrum-mosaic"
     worker_image_repo: str = "spectrum-mosaic-worker"
+    pushbroom_worker_image_repo: str = "spectrum-mosaic-pushbroom-worker"
     backend_image_repo: str = "spectrum-mosaic-backend"
     frontend_image_repo: str = "spectrum-mosaic-frontend"
 

@@ -28,8 +28,8 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-echo ">>> 准备 data 目录与权限（worker uid=$WORKER_UID）"
-mkdir -p data/.license data/.worker data/input data/output pgdata
+echo ">>> 准备 data 目录与权限（worker uid=${WORKER_UID}）"
+mkdir -p data/.license data/.worker data/.pushbroom-worker data/input/pushbroom data/output pgdata
 echo ">>> 数据库目录 pgdata。不要删除，也不要并进 data 目录。"
 if chown -R "${WORKER_UID}:${WORKER_UID}" data 2>/dev/null; then
   echo ">>> data 属主已设为 ${WORKER_UID}:${WORKER_UID}"
@@ -46,6 +46,11 @@ if [ ! -f .env ]; then
     echo "错误: 缺少 .env 与 .env.example" >&2
     exit 1
   fi
+fi
+
+# 升级时沿用旧 .env，里面没有推扫开关
+if grep -q '^PUSHBROOM_ENABLED=' .env.example 2>/dev/null && ! grep -q '^PUSHBROOM_ENABLED=' .env; then
+  echo ">>> 本版本含推扫拼图，当前 .env 未开启。需要时把 .env.example 里 PUSHBROOM_ENABLED、COMPOSE_PROFILES 两行抄进 .env 后重新执行本脚本"
 fi
 
 images_ready=0
@@ -78,6 +83,11 @@ fi
 
 if [ ! -d licenses ] || [ -z "$(ls licenses/*.lic 2>/dev/null || true)" ]; then
   echo "警告: licenses/ 下未发现 .lic 文件，worker 可能无法启动" >&2
+fi
+
+# 推扫关掉后，compose 不会去停 profile 之外还在跑的推扫 worker
+if grep -q 'profiles: \["pushbroom"\]' docker-compose.yml && ! grep -qE '^COMPOSE_PROFILES=.*pushbroom' .env; then
+  docker compose --profile pushbroom rm -sf pushbroom-worker >/dev/null 2>&1 || true
 fi
 
 gpu_ok=0

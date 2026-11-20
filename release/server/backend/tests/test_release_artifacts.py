@@ -16,3 +16,15 @@ def test_list_artifacts_marks_missing(tmp_path: Path):
     assert resolve_artifact_file(row, "worker") == worker
     assert resolve_artifact_file(row, "postgres") is None
     assert resolve_artifact_file(row, "nope") is None
+
+
+def test_pushbroom_artifact_listed(tmp_path: Path):
+    worker = tmp_path / "worker-image.tar"
+    worker.write_bytes(b"abc")
+    pb = tmp_path / "pushbroom-worker-image.tar"
+    pb.write_bytes(b"abcd")
+    row = SimpleNamespace(version="0.2.0", arch="arm64", artifact_path=str(worker))
+    by_name = {i["name"]: i for i in list_artifacts(row)}
+    assert by_name["pushbroom_worker"]["available"] is True
+    assert by_name["pushbroom_worker"]["size_bytes"] == 4
+    assert resolve_artifact_file(row, "pushbroom_worker") == pb

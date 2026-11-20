@@ -121,10 +121,18 @@ d 米的像元沿航向错开 φ·d 米。φ 往返翻转（偏流），同向�
 | `PB_SENSOR_BORESIGHT_PX` | 空（内置 −19） | 本机标定：狭缝中心相对正中的像元数 |
 | `PB_SENSOR_SAMPLE_SIGN` | 空（内置 −1） | 像元方向，1 或 −1 |
 | `PB_SENSOR_GSD_CROSS_M` / `PB_SENSOR_FLIGHT_HEIGHT_M` | 空 | 旁向分辨率 / 航高；不填按头文件估算 |
-| `MOSAIC_REQUIRE_LICENSE` | 空 | 为真时启动校验许可并定期复查（与框幅 worker 同一套） |
+| `MOSAIC_REQUIRE_LICENSE` | 空 | 为真时启动校验许可并定期复查（与框幅 worker 同一套）；`pipeline.run`、`calibrate_flight` 入口也校验 |
 | `LICENSE_PATH` / `LICENSE_PUBLIC_KEY_PATH` / `LICENSE_SERVER_URL` / `HOST_MACHINE_ID_PATH` | | 同框幅 worker |
 | `LICENSE_CLOCK_PATH` | `/data/.license/pushbroom-clock.json` | 防回拨时钟，与框幅分开 |
 | `LICENSE_LEASE_PATH` | `/data/.license/pushbroom-lease.json` | 租约缓存，与框幅分开 |
+
+## 客户发版
+
+发版台每次构建同时产出 `pushbroom-worker-image.tar`（`release/build/Dockerfile.pushbroom-customer`）：
+算法模块按 `release/build/cython_modules_pushbroom.txt` 编成 `.so`，强制许可。**`pb_mosaic` 新增模块要加进这个清单**，
+否则会以源码交付（发版台单测会拦下）。客户 compose 里推扫 worker 在 profile `pushbroom` 下，由 `.env` 的
+`PUSHBROOM_ENABLED`、`COMPOSE_PROFILES` 开关；客户侧重新标定写 `.env` 的 `PB_SENSOR_*`，
+步骤见 `docs/操作文档/拼图服务私有部署操作手册.md` 第 6 节。
 
 ## 本地开发
 

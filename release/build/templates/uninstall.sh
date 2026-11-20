@@ -15,6 +15,10 @@ set -- -f docker-compose.yml
 if [ -f docker-compose.gpu.yml ]; then
   set -- "$@" -f docker-compose.gpu.yml
 fi
+# 推扫 worker 在 profile 里，不点名时 down 不会处理它
+if grep -q 'profiles: \["pushbroom"\]' docker-compose.yml; then
+  set -- "$@" --profile pushbroom
+fi
 
 # 禁止追加 -v 或 --volumes，否则会清掉命名数据卷。
 docker compose "$@" down --rmi all --remove-orphans

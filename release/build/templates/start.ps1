@@ -149,7 +149,7 @@ Invoke-Checked docker compose version | Out-Null
 Show-MachineFingerprint (Get-HostMachineId) | Out-Null
 
 Write-Host ">>> 准备 data 目录"
-foreach ($dir in @("data\.license", "data\.worker", "data\input", "data\output", "pgdata")) {
+foreach ($dir in @("data\.license", "data\.worker", "data\.pushbroom-worker", "data\input\pushbroom", "data\output", "pgdata")) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 Write-Host ">>> 数据库目录 pgdata。不要删除，也不要并进 data 目录。"
@@ -163,6 +163,13 @@ if (-not (Test-Path -LiteralPath ".env")) {
     Write-Host ">>> 已从 .env.example 生成 .env"
 }
 
+# 升级时沿用旧 .env，里面没有推扫开关
+if ((Test-Path -LiteralPath ".env.example") -and
+    (Select-String -LiteralPath ".env.example" -Pattern "^PUSHBROOM_ENABLED=" -Quiet) -and
+    -not (Select-String -LiteralPath ".env" -Pattern "^PUSHBROOM_ENABLED=" -Quiet)) {
+    Write-Host ">>> 本版本含推扫拼图，当前 .env 未开启。需要时把 .env.example 里 PUSHBROOM_ENABLED、COMPOSE_PROFILES 两行抄进 .env 后重新执行本脚本"
+}
+
 $required = @(
     "worker-image.tar",
     "backend-image.tar",
@@ -170,6 +177,8 @@ $required = @(
     "postgres-image.tar",
     "rabbitmq-image.tar"
 )
+# 推扫 worker 只在构建了推扫的版本里有
+$optional = @("pushbroom-worker-image.tar" | Where-Object { Test-Path -LiteralPath (Join-Path "images" $_) })
 if (Test-Path -LiteralPath "images\load-images.sh") {
     if (Test-LocalImagesReady) {
         Write-Host ">>> 镜像已在本机，跳过导入"
@@ -178,7 +187,7 @@ if (Test-Path -LiteralPath "images\load-images.sh") {
         if ($missing.Count -gt 0) {
             throw "缺少镜像文件: $($missing -join ', ')"
         }
-        foreach ($name in $required) {
+        foreach ($name in @($required + $optional)) {
             $tar = Join-Path "images" $name
             Write-Host ">>> docker load -i $name"
             Invoke-Checked docker load -i $tar
@@ -187,6 +196,7 @@ if (Test-Path -LiteralPath "images\load-images.sh") {
                 $want = (Get-Content -LiteralPath $archFile -Raw).Trim()
                 $ref = switch ($name) {
                     "worker-image.tar" { docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -like "spectrum-mosaic-worker:*" } | Select-Object -First 1 }
+                    "pushbroom-worker-image.tar" { docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -like "spectrum-mosaic-pushbroom-worker:*" } | Select-Object -First 1 }
                     "backend-image.tar" { docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -like "spectrum-mosaic-backend:*" } | Select-Object -First 1 }
                     "frontend-image.tar" { docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -like "spectrum-mosaic-frontend:*" } | Select-Object -First 1 }
                     "postgres-image.tar" { "postgres:16-alpine" }
@@ -229,6 +239,15 @@ function Test-HostNvidia {
 $lic = @(Get-ChildItem -LiteralPath "licenses" -Filter "*.lic" -ErrorAction SilentlyContinue)
 if ($lic.Count -eq 0) {
     Write-Warning "licenses\ 下未发现 .lic 文件，worker 可能无法启动"
+}
+
+# 推扫关掉后，compose 不会去停 profile 之外还在跑的推扫 worker
+if ((Select-String -LiteralPath "docker-compose.yml" -Pattern 'profiles: \["pushbroom"\]' -Quiet) -and
+    -not (Select-String -LiteralPath ".env" -Pattern "^COMPOSE_PROFILES=.*pushbroom" -Quiet)) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & docker compose --profile pushbroom rm -sf pushbroom-worker 1>$null 2>$null
+    $ErrorActionPreference = $prev
 }
 
 $gpuFile = Test-Path -LiteralPath "docker-compose.gpu.yml"

@@ -381,7 +381,7 @@ export default function DeliveriesPage() {
             />
           </Form.Item>
           <Form.Item name="include_image_tar" valuePropName="checked">
-            <Checkbox>包含离线全量镜像（worker/backend/frontend/postgres/rabbitmq）</Checkbox>
+            <Checkbox>包含离线全量镜像（worker/推扫 worker/backend/frontend/postgres/rabbitmq）</Checkbox>
           </Form.Item>
         </Form>
       </Modal>

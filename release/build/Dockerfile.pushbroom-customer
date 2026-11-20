@@ -1,0 +1,61 @@
+# 客户版推扫 worker：Cython 编译算法模块 + 强制离线许可（与框幅 worker 同一套许可）
+# 构建上下文必须是仓库根目录 spectrum-mosaic/
+FROM python:3.11-slim AS builder
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends g++ libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mosaic/server/pushbroom-worker/requirements.txt /build/requirements.txt
+RUN grep -v '^pytest' /build/requirements.txt > /build/requirements-runtime.txt \
+    && pip install --no-cache-dir -r /build/requirements-runtime.txt \
+    && pip install --no-cache-dir Cython==3.0.11 setuptools wheel
+
+COPY mosaic/server/pushbroom-worker/pb_mosaic /build/pushbroom/pb_mosaic
+COPY release/build /build/release/build
+
+RUN chmod +x /build/release/build/compile_in_image.sh \
+    && /build/release/build/compile_in_image.sh /build/pushbroom \
+        /build/release/build/cython_modules_pushbroom.txt pb_mosaic
+
+FROM python:3.11-slim
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/requirements-runtime.txt .
+RUN pip install --no-cache-dir -r requirements-runtime.txt
+
+COPY --from=builder /build/pushbroom/pb_mosaic ./pb_mosaic
+COPY --from=builder /build/release/build/cython_modules_pushbroom.txt /tmp/compiled.txt
+COPY release/build/.embed/license_public.pem /app/license_public.pem
+
+# 清单里的模块必须是 .so 且能导入，源码一个都不能留
+RUN useradd -m -u 10001 mosaic \
+    && mkdir -p /data/.license /data/.pushbroom-worker \
+    && chown -R mosaic:mosaic /app /data \
+    && python -B -c "import importlib, pathlib; \
+names = [l.strip() for l in open('/tmp/compiled.txt') if l.strip() and not l.startswith('#')]; \
+left = [n for n in names if pathlib.Path('pb_mosaic', n + '.py').exists()]; \
+assert not left, f'source must not ship: {left}'; \
+[importlib.import_module('pb_mosaic.' + n.replace('/', '.')) for n in names]; \
+import pb_mosaic.worker_main, pb_mosaic.job_child; \
+assert not list(pathlib.Path('pb_mosaic').rglob('*.pyc')), 'bytecode must not ship'" \
+    && rm /tmp/compiled.txt
+
+USER mosaic
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2 \
+    MOSAIC_REQUIRE_LICENSE=1 \
+    LICENSE_PATH=/license/license.lic \
+    LICENSE_PUBLIC_KEY_PATH=/app/license_public.pem
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import os,sys,time; d=os.environ.get('PUSHBROOM_WORKER_STATE_DIR','/data/.pushbroom-worker'); sys.exit(0 if time.time()-os.path.getmtime(d+'/status.json')<60 else 1)"
+
+CMD ["python", "-m", "pb_mosaic.worker_main"]

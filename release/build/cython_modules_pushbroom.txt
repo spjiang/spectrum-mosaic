@@ -1,0 +1,25 @@
+# 推扫 worker 编译成 .so 的模块（相对 pb_mosaic/）。
+# 不编译：worker_main、job_child、__main__ 由 python -m 启动，须保留 .py；各 __init__ 保留。
+pipeline
+stages
+jobfiles
+status
+mq_pub
+license_check
+geom/calibration
+geom/footprint
+geom/grid
+geom/line_clock
+geom/sensor
+geom/strips
+geom/trajectory
+ingest/envi
+ingest/flight
+ingest/gps
+mosaic/align
+mosaic/merge
+mosaic/refine
+products/envi_out
+products/footprints
+products/preview
+products/report
