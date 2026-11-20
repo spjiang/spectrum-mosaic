@@ -16,10 +16,11 @@ from pb_mosaic.ingest.envi import EnviHeader
 from pb_mosaic.mosaic.merge import NODATA
 
 PREVIEW_MAX_PX = 2048
-# 与常见 GIS「2% 裁切」一致；高百分位不要再收紧，否则土路更容易发白
-STRETCH_PERCENT = (2.0, 98.0)
-# <1 略提中间调。0.5 会整体发白；0.7 更接近厂商目视结果
-STRETCH_GAMMA = 0.7
+# 按厂商同架次目视结果标定：独立通道百分位 + 伽马 + 通道增益（压红、提绿）
+STRETCH_PERCENT = (1.0, 98.0)
+STRETCH_GAMMA = 0.8
+# R, G, B。植被 RGB 里绿应更突出；增益过平会发灰/发白
+DISPLAY_CHANNEL_GAIN = (0.90, 1.15, 1.05)
 # 没有默认波段时按波长挑：红、绿、蓝
 RGB_TARGET_NM = (640.0, 550.0, 460.0)
 OVERVIEW_LEVELS = (2, 4, 8, 16, 32, 64)
@@ -117,10 +118,17 @@ def stretch_limits(samples: np.ndarray, valid: np.ndarray) -> list[list[float]]:
     return ranges
 
 
-def apply_stretch(channel: np.ndarray, lo: float, hi: float, *, gamma: float = STRETCH_GAMMA) -> np.ndarray:
-    """线性裁切到 0–1 后再伽马映射到 uint8。"""
+def apply_stretch(
+    channel: np.ndarray,
+    lo: float,
+    hi: float,
+    *,
+    gamma: float = STRETCH_GAMMA,
+    gain: float = 1.0,
+) -> np.ndarray:
+    """线性裁切到 0–1 后伽马，再乘通道增益，映射到 uint8。"""
     x = np.clip((channel.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
-    return np.clip(255.0 * np.power(x, gamma), 0, 255).astype(np.uint8)
+    return np.clip(255.0 * np.power(x, gamma) * gain, 0, 255).astype(np.uint8)
 
 
 def stretch_rgb(rgb: np.ndarray, valid: np.ndarray, ranges: list[list[float]] | None = None) -> tuple[np.ndarray, list[list[float]]]:
@@ -129,7 +137,7 @@ def stretch_rgb(rgb: np.ndarray, valid: np.ndarray, ranges: list[list[float]] | 
         ranges = stretch_limits(rgb, valid)
     out = np.zeros(rgb.shape[:2] + (3,), dtype=np.uint8)
     for c, (lo, hi) in enumerate(ranges):
-        out[:, :, c] = apply_stretch(rgb[:, :, c], lo, hi)
+        out[:, :, c] = apply_stretch(rgb[:, :, c], lo, hi, gain=DISPLAY_CHANNEL_GAIN[c])
     out[~valid] = 0
     return out, ranges
 
@@ -150,6 +158,7 @@ def stretch_to_png(thumb: np.ndarray, png_path: Path) -> dict:
         "stretch_dn": ranges,
         "stretch_percent": list(STRETCH_PERCENT),
         "stretch_gamma": STRETCH_GAMMA,
+        "stretch_gain": list(DISPLAY_CHANNEL_GAIN),
         "width": int(out.shape[1]),
         "height": int(out.shape[0]),
     }
@@ -181,6 +190,7 @@ def write_display_rgb(src_tif: Path, dst_tif: Path, ranges: list[list[float]]) -
             dst.update_tags(
                 stretch_percent=f"{STRETCH_PERCENT[0]},{STRETCH_PERCENT[1]}",
                 stretch_gamma=str(STRETCH_GAMMA),
+                stretch_gain=",".join(str(g) for g in DISPLAY_CHANNEL_GAIN),
                 stretch_dn=";".join(f"{lo:.3f},{hi:.3f}" for lo, hi in ranges),
                 purpose="display",
             )

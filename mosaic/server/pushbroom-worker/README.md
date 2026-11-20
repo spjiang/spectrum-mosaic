@@ -22,7 +22,7 @@ FigSpec 推扫高光谱（FS-60C）原始 DN 三件套 `figspec.hdr / figspec.sp
 ```
 products/<架次>_mosaic.spe / .hdr     镶嵌立方体，原始 DN，uint16，0 = 无数据
 products/<架次>_rgb.tif               RGB GeoTIFF（默认波段，原始 DN），带金字塔；GIS 默认打开会偏暗
-products/<架次>_rgb_display.tif       显示用 8 位 RGB（2–98% 裁切 + 伽马 0.7），给人看、进 GIS
+products/<架次>_rgb_display.tif       显示用 8 位 RGB（1–98% + 伽马 0.8 + 通道增益），给人看、进 GIS
 products/<架次>_preview.png           与显示 GeoTIFF 同一套拉伸的预览
 products/<架次>_footprints.geojson    航带足迹（WGS84），含每条航带的配准平移和狭缝剪切
 process/trajectory.csv               逐条定位：时间、UTM、地速、航迹角、推算行号
