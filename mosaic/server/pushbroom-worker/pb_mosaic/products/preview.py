@@ -16,10 +16,10 @@ from pb_mosaic.ingest.envi import EnviHeader
 from pb_mosaic.mosaic.merge import NODATA
 
 PREVIEW_MAX_PX = 2048
-# 略收高百分位，减轻屋顶/反光把拉伸上限抬飞
-STRETCH_PERCENT = (1.0, 99.0)
-# <1 提亮中间调，接近显示器对 DN 的观感
-STRETCH_GAMMA = 0.5
+# 与常见 GIS「2% 裁切」一致；高百分位不要再收紧，否则土路更容易发白
+STRETCH_PERCENT = (2.0, 98.0)
+# <1 略提中间调。0.5 会整体发白；0.7 更接近厂商目视结果
+STRETCH_GAMMA = 0.7
 # 没有默认波段时按波长挑：红、绿、蓝
 RGB_TARGET_NM = (640.0, 550.0, 460.0)
 OVERVIEW_LEVELS = (2, 4, 8, 16, 32, 64)

@@ -9,10 +9,10 @@ from pb_mosaic.products.preview import STRETCH_GAMMA, apply_stretch, stretch_rgb
 
 
 def test_gamma_brightens_midtones() -> None:
-    # 线性后落在 0.1 的中间调，纯线性约 25，伽马 0.5 应抬到约 80
+    # 线性后落在 0.1 的中间调：纯线性约 25，伽马 0.7 应明显抬高，但不到发白
     linear = apply_stretch(np.array([[10.0]]), 0.0, 100.0, gamma=1.0)[0, 0]
     gamma = apply_stretch(np.array([[10.0]]), 0.0, 100.0, gamma=STRETCH_GAMMA)[0, 0]
-    assert linear < 30 and gamma > linear * 2
+    assert linear < 30 and linear * 1.3 < gamma < 80
 
 
 def test_skewed_dn_preview_not_crushed() -> None:
@@ -30,5 +30,6 @@ def test_skewed_dn_preview_not_crushed() -> None:
 
     out, _ = stretch_rgb(rgb, valid)
     mid = out[valid]
-    assert np.median(mid[:, 1]) > 75
-    assert mid[:, 1].mean() > 90
+    # 比纯线性亮，又不能抬到发白
+    assert 55 < np.median(mid[:, 1]) < 120
+    assert mid[:, 1].mean() < 140
