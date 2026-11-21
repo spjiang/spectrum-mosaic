@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -215,7 +215,7 @@ class PushbroomJobLog(Base):
 
 
 class PushbroomCalibration(Base):
-    """相机安装标定。生效的是 created_at 最新的一行。"""
+    """旧版单组相机标定。只在启动时迁移成安装配置，不再写入。"""
 
     __tablename__ = "pushbroom_calibrations"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -226,6 +226,49 @@ class PushbroomCalibration(Base):
     flights: Mapped[list] = mapped_column(JSONB, default=list)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PushbroomMountProfile(Base):
+    """推扫安装配置。架次按飞行日期选生效日期不晚于它的最近一组。"""
+
+    __tablename__ = "pushbroom_mount_profiles"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(Text, unique=True)
+    effective_from: Mapped[date] = mapped_column(Date, unique=True)
+    along_offset_m: Mapped[float] = mapped_column(Float)
+    along_se_m: Mapped[float] = mapped_column(Float)
+    boresight_px: Mapped[float] = mapped_column(Float)
+    boresight_se_px: Mapped[float] = mapped_column(Float)
+    flights: Mapped[list] = mapped_column(JSONB, default=list)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PushbroomFlightProfile(Base):
+    """单个架次手动指定的安装配置，键是架次目录名。"""
+
+    __tablename__ = "pushbroom_flight_profiles"
+    flight_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pushbroom_mount_profiles.id", ondelete="CASCADE")
+    )
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PushbroomCalibrationRun(Base):
+    """一次后台标定。status：running / done / failed。"""
+
+    __tablename__ = "pushbroom_calibration_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(16))
+    input_dirs: Mapped[list] = mapped_column(JSONB, default=list)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class IncrementalRound(Base):
