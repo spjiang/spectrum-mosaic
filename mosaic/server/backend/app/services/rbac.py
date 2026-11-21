@@ -9,9 +9,8 @@ ROLES = ("admin", "configurator", "executor", "viewer")
 MENU_KEYS = (
     "execute",
     "incremental",
-    "pushbroom_new",
-    "pushbroom_jobs",
-    "pushbroom_calibration",
+    "pushbroom_workbench",
+    "pushbroom_mounts",
     "profiles",
     "jobs",
     "seam",
@@ -26,6 +25,12 @@ MENU_KEYS = (
     "audit",
 )
 ADMIN_LOCK = ("users", "roles", "permissions", "audit")
+# 旧版推扫菜单键。已保存的角色菜单里遇到就换成新键。
+LEGACY_MENU_KEYS = {
+    "pushbroom_new": "pushbroom_workbench",
+    "pushbroom_jobs": "pushbroom_workbench",
+    "pushbroom_calibration": "pushbroom_mounts",
+}
 # 命令行说明对所有登录角色开放，已保存的菜单里缺了也要补回
 PUBLIC_MENUS = ("cli", "seam")
 
@@ -35,8 +40,7 @@ DEFAULT_MENUS: dict[str, list[str]] = {
     "executor": [
         "execute",
         "incremental",
-        "pushbroom_new",
-        "pushbroom_jobs",
+        "pushbroom_workbench",
         "profiles",
         "jobs",
         "seam",
@@ -50,7 +54,8 @@ DEFAULT_MENUS: dict[str, list[str]] = {
 def _clean_menus(keys: list[str]) -> list[str]:
     allowed = set(MENU_KEYS)
     out: list[str] = []
-    for key in keys:
+    for raw in keys:
+        key = LEGACY_MENU_KEYS.get(raw, raw)
         if key in allowed and key not in out:
             out.append(key)
     return out
@@ -70,12 +75,14 @@ def _ensure_public(keys: list[str]) -> list[str]:
 SEEDED_KEY = "rbac_menus_seeded"
 # 后加的菜单：已保存过菜单的角色只要能新建处理，升级时补一次。
 # 之后管理员在角色页去掉也不会再被补回。
-GRANT_WITH_EXECUTE = ("pushbroom_new", "pushbroom_jobs")
+GRANT_WITH_EXECUTE = ("pushbroom_workbench",)
 
 
 def seed_new_menus(db: Session) -> list[str]:
     marker = db.get(SystemSetting, SEEDED_KEY)
     done = set(marker.value.get("keys") or []) if marker is not None and isinstance(marker.value, dict) else set()
+    # 旧版推扫菜单补发过，就当工作台也补发过，避免管理员收回后又被补上
+    done |= {LEGACY_MENU_KEYS[k] for k in done if k in LEGACY_MENU_KEYS}
     pending = [k for k in GRANT_WITH_EXECUTE if k not in done]
     if not pending:
         return []

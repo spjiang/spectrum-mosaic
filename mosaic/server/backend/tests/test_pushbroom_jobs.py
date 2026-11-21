@@ -16,7 +16,7 @@ from app.services import pushbroom as svc
 from app.services import pushbroom_mounts as mounts
 from app.services.mq import FakeMQPublisher
 from app.services.pushbroom_check import FlightCheck
-from app.services.rbac import RBAC_KEY, SEEDED_KEY, seed_new_menus
+from app.services.rbac import RBAC_KEY, SEEDED_KEY, load_mapping, seed_new_menus
 
 
 def _job(tmp_path, **kwargs):
@@ -252,17 +252,24 @@ class _SettingsDb:
         pass
 
 
-def test_seed_grants_pushbroom_once_to_roles_that_can_execute():
+def test_seed_grants_workbench_once_to_roles_that_can_execute():
     db = _SettingsDb({RBAC_KEY: {"executor": ["execute", "jobs"], "viewer": ["jobs"]}})
-    assert seed_new_menus(db) == ["pushbroom_new", "pushbroom_jobs"]
+    assert seed_new_menus(db) == ["pushbroom_workbench"]
     saved = db.rows[RBAC_KEY].value
-    assert saved["executor"] == ["execute", "jobs", "pushbroom_new", "pushbroom_jobs"]
+    assert saved["executor"] == ["execute", "jobs", "pushbroom_workbench"]
     assert saved["viewer"] == ["jobs"]
     # 管理员之后收回，再启动不会补回来
     db.rows[RBAC_KEY].value = {"executor": ["execute", "jobs"], "viewer": ["jobs"]}
     assert seed_new_menus(db) == []
+    assert db.rows[SEEDED_KEY].value == {"keys": ["pushbroom_workbench"]}
+
+
+def test_seed_does_not_regrant_after_old_pushbroom_menus_were_seeded():
+    db = _SettingsDb(
+        {RBAC_KEY: {"executor": ["execute", "jobs"]}, SEEDED_KEY: {"keys": ["pushbroom_jobs", "pushbroom_new"]}}
+    )
+    assert seed_new_menus(db) == []
     assert db.rows[RBAC_KEY].value["executor"] == ["execute", "jobs"]
-    assert db.rows[SEEDED_KEY].value == {"keys": ["pushbroom_jobs", "pushbroom_new"]}
 
 
 def test_seed_without_saved_mapping_only_records_marker():
@@ -270,6 +277,17 @@ def test_seed_without_saved_mapping_only_records_marker():
     seed_new_menus(db)
     assert RBAC_KEY not in db.rows
     assert SEEDED_KEY in db.rows
+
+
+def test_saved_old_pushbroom_keys_are_renamed():
+    db = _SettingsDb(
+        {RBAC_KEY: {"executor": ["execute", "pushbroom_new", "pushbroom_jobs"], "configurator": ["pushbroom_calibration"]}}
+    )
+    mapping = load_mapping(db)
+    assert mapping["executor"].count("pushbroom_workbench") == 1
+    assert "pushbroom_new" not in mapping["executor"] and "pushbroom_jobs" not in mapping["executor"]
+    assert "pushbroom_mounts" in mapping["configurator"]
+    assert "pushbroom_workbench" in mapping["admin"] and "pushbroom_mounts" in mapping["admin"]
 
 
 def test_logs_are_in_beijing_time(tmp_path):
