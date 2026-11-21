@@ -1,0 +1,68 @@
+<h2>推扫拼图的页面怎么组织？</h2>
+<p class="subtitle">点选一个方向。三种都会修掉刚才列出的 bug，并按架次推荐安装配置；区别在于从哪里开始操作。</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>以架次为中心的一页工作台（推荐）</h3>
+      <p>左边是架次列表：每个架次标出属于哪组安装配置、跑过几次、最近一次的缩略图。点一个架次，右边显示这个架次的全部内容：提交按钮、历次任务、结果预览和下载。「新建」和「记录」合成一页，「安装配置」单独一页，只有管理员能看到。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>以任务为中心：记录页为主，新建用侧边抽屉</h3>
+      <p>进入后直接看到任务列表，最上方是正在运行的任务。点「新建推扫」从右边滑出抽屉，选架次并提交，不用离开列表。「安装配置」单独一页。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>保留三个页面，各自打磨</h3>
+      <p>菜单不动。新建页加入安装配置推荐和历史提示，记录页去掉横向滚动、用缩略图卡片，标定页改成配置管理。改动最小，但页面之间仍要来回跳。</p>
+    </div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">A：架次工作台</div>
+    <div class="mockup-body">
+      <div style="display:flex;gap:8px;min-height:260px">
+        <div style="width:38%;display:flex;flex-direction:column;gap:6px">
+          <div class="mock-input" style="width:auto">搜索架次</div>
+          <div class="placeholder" style="text-align:left;padding:6px;border:2px solid #1677ff">0414_134505_test<br><small>安装：0414 · 跑过 5 次 · ✅</small></div>
+          <div class="placeholder" style="text-align:left;padding:6px">0419_132008<br><small>安装：0419 以后 · 1 次</small></div>
+          <div class="placeholder" style="text-align:left;padding:6px">0429_134344<br><small>安装：0419 以后 · 1 次</small></div>
+          <div class="placeholder" style="text-align:left;padding:6px;opacity:.5">0410_142436<br><small>文件损坏，不能用</small></div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+          <div class="placeholder" style="text-align:left;padding:6px">0414_134505_test · 33 GB · 7 分 21 秒<br><small>安装配置：0414（1.78 m / −49.8 像元）</small> <button class="mock-button">提交拼图</button></div>
+          <div class="placeholder" style="height:110px">最近一次结果预览（大图，可缩放）</div>
+          <div class="placeholder" style="text-align:left;padding:6px"><small>历次任务：#17 ✅ 1分34秒 · #16 ✅ · #15 ✅ …</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">B：记录为主 + 新建抽屉</div>
+    <div class="mockup-body">
+      <div style="display:flex;gap:8px;min-height:260px">
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;justify-content:space-between"><span class="label">推扫记录</span><button class="mock-button">新建推扫</button></div>
+          <div class="placeholder" style="text-align:left;padding:6px">▶ #18 0419_132008 · 航带配准 42%</div>
+          <div class="placeholder" style="text-align:left;padding:6px">#17 0414_test ✅ [缩略图]</div>
+          <div class="placeholder" style="text-align:left;padding:6px">#16 0414_test ✅ [缩略图]</div>
+          <div class="placeholder" style="text-align:left;padding:6px">#13 0429_135339 ✅ [缩略图]</div>
+        </div>
+        <div style="width:40%;border-left:2px dashed #999;padding-left:8px;display:flex;flex-direction:column;gap:6px">
+          <span class="label">新建推扫（抽屉）</span>
+          <div class="mock-input" style="width:auto">选择架次 ▾</div>
+          <div class="placeholder" style="text-align:left;padding:6px"><small>推荐安装：0419 以后</small></div>
+          <button class="mock-button">提交</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

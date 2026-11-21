@@ -1,0 +1,127 @@
+<h2>推扫拼图工作台</h2>
+<p class="subtitle">左边选架次，右边处理这个架次。下面用的是现在服务器上的真实架次和任务。</p>
+
+<div class="mockup">
+  <div class="mockup-header">推扫拼图 · 宽屏</div>
+  <div class="mockup-body" style="padding:0">
+    <div style="display:flex;min-height:560px;font-size:13px">
+
+      <!-- 左：架次列表 -->
+      <div style="width:300px;border-right:1px solid #e5e7eb;padding:12px;display:flex;flex-direction:column;gap:8px;background:#fafbfc">
+        <div style="display:flex;gap:6px">
+          <div class="mock-input" style="flex:1;margin:0">搜索架次</div>
+          <button class="mock-button" style="padding:4px 8px">刷新</button>
+        </div>
+        <div style="display:flex;gap:6px;font-size:12px;color:#666">
+          <span style="padding:2px 8px;border-radius:10px;background:#1677ff;color:#fff">全部 6</span>
+          <span style="padding:2px 8px;border-radius:10px;background:#eee">运行中 0</span>
+          <span style="padding:2px 8px;border-radius:10px;background:#eee">未跑过 1</span>
+          <span style="padding:2px 8px;border-radius:10px;background:#eee">不可用 1</span>
+        </div>
+
+        <div style="border:2px solid #1677ff;background:#e6f4ff;border-radius:8px;padding:8px;display:flex;gap:8px">
+          <div style="width:40px;height:52px;background:#1f3b2c;border-radius:4px"></div>
+          <div style="flex:1">
+            <b>FigSpec_260414_134505_test</b><br>
+            <span style="color:#666">4月14日 13:45 · 33.2 GB</span><br>
+            <span style="font-size:12px;background:#f0f5ff;color:#1d39c4;padding:0 6px;border-radius:4px">0414 安装</span>
+            <span style="font-size:12px;color:#389e0d">✓ 跑过 5 次</span>
+          </div>
+        </div>
+
+        <div style="border:1px solid #eee;background:#fff;border-radius:8px;padding:8px;display:flex;gap:8px">
+          <div style="width:40px;height:52px;background:#1f3b2c;border-radius:4px"></div>
+          <div style="flex:1">
+            <b>FigSpec_260414_134505</b><br>
+            <span style="color:#666">4月14日 13:45 · 33.2 GB</span><br>
+            <span style="font-size:12px;background:#f0f5ff;color:#1d39c4;padding:0 6px;border-radius:4px">0414 安装</span>
+            <span style="font-size:12px;color:#389e0d">✓ 1 次</span>
+          </div>
+        </div>
+
+        <div style="border:1px solid #eee;background:#fff;border-radius:8px;padding:8px;display:flex;gap:8px">
+          <div style="width:40px;height:52px;background:#1f3b2c;border-radius:4px"></div>
+          <div style="flex:1">
+            <b>FigSpec_260419_132008</b><br>
+            <span style="color:#666">4月19日 13:20 · 33.5 GB</span><br>
+            <span style="font-size:12px;background:#fff7e6;color:#d46b08;padding:0 6px;border-radius:4px">内置（没有对应配置）</span>
+            <span style="font-size:12px;color:#389e0d">✓ 1 次</span>
+          </div>
+        </div>
+
+        <div style="border:1px solid #eee;background:#fff;border-radius:8px;padding:8px;display:flex;gap:8px">
+          <div style="width:40px;height:52px;background:#eee;border-radius:4px"></div>
+          <div style="flex:1">
+            <b>FigSpec_260429_135339</b><br>
+            <span style="color:#666">4月29日 13:53 · 6.3 GB</span><br>
+            <span style="font-size:12px;color:#999">还没跑过</span>
+          </div>
+        </div>
+
+        <div style="border:1px solid #eee;background:#fff;border-radius:8px;padding:8px;opacity:.55">
+          <b>FigSpec_260410_142436</b><br>
+          <span style="color:#cf1322;font-size:12px">不可用：hdr 不是文本文件，需重新拷贝</span>
+        </div>
+      </div>
+
+      <!-- 右：所选架次 -->
+      <div style="flex:1;padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div style="font-size:18px;font-weight:600">FigSpec_260414_134505_test</div>
+            <div style="color:#666">4月14日 13:45 飞行 · 7 分 21 秒 · 960 列 × 30962 行 × 600 波段 · 33.2 GB</div>
+            <div style="margin-top:4px">安装配置：<b>0414 安装</b>（沿航向 1.78 m，狭缝中心 −49.8 像元）<a style="color:#1677ff;margin-left:6px">改选</a></div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="mock-button" style="background:#fff;color:#333;border:1px solid #ddd">分辨率/波段 ▾</button>
+            <button class="mock-button">提交拼图</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px">
+          <div style="flex:1.4;border:1px solid #eee;border-radius:8px;overflow:hidden">
+            <div style="padding:6px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between">
+              <span><b>#17</b> 的结果 · 11月21日 10:29 · 1 分 34 秒 · ✅</span>
+              <span style="color:#1677ff">打包下载 · 全屏查看</span>
+            </div>
+            <div style="height:270px;background:#111827;display:flex;align-items:center;justify-content:center;color:#9ca3af">结果预览：滚轮缩放、拖动，点全屏</div>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+            <div class="label">历次任务</div>
+            <div style="border:2px solid #1677ff;border-radius:6px;padding:6px">#17 ✅ 11-21 10:29 · 1分34秒 · 0414 安装</div>
+            <div style="border:1px solid #eee;border-radius:6px;padding:6px">#16 ✅ 11-21 10:05 · 1分27秒</div>
+            <div style="border:1px solid #eee;border-radius:6px;padding:6px">#15 ✅ 11-21 09:30</div>
+            <div style="border:1px solid #eee;border-radius:6px;padding:6px">#14 ✅ 11-20 23:26</div>
+            <div style="border:1px solid #eee;border-radius:6px;padding:6px">#10 ✅ 11-20 22:26</div>
+            <div style="color:#666;font-size:12px">点一条，左边换成那一次的结果</div>
+          </div>
+        </div>
+
+        <div style="border:1px solid #eee;border-radius:8px">
+          <div style="display:flex;gap:16px;padding:6px 10px;border-bottom:1px solid #eee">
+            <b style="color:#1677ff">成果文件</b><span>处理参数</span><span>各步耗时</span><span>运行日志</span>
+          </div>
+          <div style="padding:8px 10px;color:#666">_mosaic.spe 20.2 GB · _rgb.tif 57 MB · _rgb_display.tif 38 MB · _preview.png · _footprints.geojson · report.json …（每个文件可单独下载，带 ? 说明）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:16px">
+  <div class="mockup-header">正在运行时，右上的结果区换成进度</div>
+  <div class="mockup-body">
+    <div style="display:flex;gap:6px;align-items:center;font-size:13px">
+      <span>#18 运行中 · 第 2 次运行</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#f6ffed;color:#389e0d">核对 0秒</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#f6ffed;color:#389e0d">轨迹 0秒</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#f6ffed;color:#389e0d">切航带 0秒</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#e6f4ff;color:#1677ff">航带配准 42%</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#f5f5f5;color:#999">镶嵌</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#f5f5f5;color:#999">写成果</span>
+      <span style="padding:2px 8px;border-radius:4px;background:#f5f5f5;color:#999">报告</span>
+      <button class="mock-button" style="background:#fff;color:#cf1322;border:1px solid #ffa39e;margin-left:auto">取消</button>
+    </div>
+    <p style="margin:8px 0 0;color:#666;font-size:13px">排队时显示「前面还有 N 个任务」；失败时显示失败原因和「重跑」。</p>
+  </div>
+</div>
