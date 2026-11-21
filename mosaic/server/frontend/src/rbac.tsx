@@ -12,12 +12,23 @@ type RbacState = {
   reload: () => Promise<void>;
 };
 
+const FEATURES_KEY = "mosaic_features";
+
+function cachedFeatures(): Features {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FEATURES_KEY) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
 const Ctx = createContext<RbacState | null>(null);
 
 export function RbacProvider({ children }: { children: ReactNode }) {
   const { token } = useAuth();
   const [mapping, setMapping] = useState<Record<string, string[]>>({});
-  const [features, setFeatures] = useState<Features>({});
+  const [features, setFeatures] = useState<Features>(cachedFeatures);
   const [ready, setReady] = useState(false);
 
   const reload = useCallback(async () => {
@@ -29,7 +40,9 @@ export function RbacProvider({ children }: { children: ReactNode }) {
     }
     const [menus, pushbroom] = await Promise.allSettled([api.rbac(), api.pushbroomStatus()]);
     setMapping(menus.status === "fulfilled" ? menus.value.menus || {} : {});
-    setFeatures({ pushbroom: pushbroom.status === "fulfilled" && pushbroom.value.enabled });
+    const next = { pushbroom: pushbroom.status === "fulfilled" && pushbroom.value.enabled };
+    localStorage.setItem(FEATURES_KEY, JSON.stringify(next));
+    setFeatures(next);
     setReady(true);
   }, [token]);
 

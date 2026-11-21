@@ -24,8 +24,6 @@ import {
   AuditOutlined,
   EditOutlined,
   ScanOutlined,
-  PlusCircleOutlined,
-  HistoryOutlined,
   AimOutlined,
 } from "@ant-design/icons";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -50,8 +48,7 @@ import PermissionsPage from "../pages/Permissions";
 import AuditPage from "../pages/Audit";
 import IncrementalPage from "../pages/Incremental";
 import AreasPage from "../pages/Areas";
-import PushbroomNewPage from "../pages/pushbroom/PushbroomNew";
-import PushbroomJobsPage from "../pages/pushbroom/PushbroomJobs";
+import PushbroomWorkbenchPage from "../pages/pushbroom/workbench/PushbroomWorkbench";
 import PushbroomCalibrationPage from "../pages/pushbroom/PushbroomCalibration";
 import { PRODUCT, PRODUCT_TITLE } from "../product";
 import {
@@ -72,9 +69,8 @@ const { Sider, Header, Content } = Layout;
 const TITLE: Record<string, string> = {
   execute: "新建处理",
   incremental: "测区管理",
-  pushbroom_new: "新建推扫",
-  pushbroom_jobs: "推扫记录",
-  pushbroom_calibration: "相机标定",
+  pushbroom_workbench: "推扫拼图",
+  pushbroom_mounts: "安装配置",
   profiles: "处理方案",
   jobs: "处理记录",
   seam: "拼接线处理",
@@ -92,9 +88,8 @@ const TITLE: Record<string, string> = {
 const MENU_ICON: Record<MenuKey, ReactNode> = {
   execute: <PlayCircleOutlined />,
   incremental: <CloudUploadOutlined />,
-  pushbroom_new: <PlusCircleOutlined />,
-  pushbroom_jobs: <HistoryOutlined />,
-  pushbroom_calibration: <AimOutlined />,
+  pushbroom_workbench: <ScanOutlined />,
+  pushbroom_mounts: <AimOutlined />,
   profiles: <ProfileOutlined />,
   jobs: <UnorderedListOutlined />,
   seam: <EditOutlined />,
@@ -140,6 +135,12 @@ function FeatureGuard({ allow, children }: { allow: boolean; children: React.Rea
   return <Guard allow={allow}>{children}</Guard>;
 }
 
+/** 旧的推扫记录地址：带上 ?job= 跳到工作台，工作台按任务找到架次。 */
+function LegacyPushbroomJobs() {
+  const { search } = useLocation();
+  return <Navigate to={`/pushbroom${search}`} replace />;
+}
+
 function AppShellBody({
   logout,
   username,
@@ -163,8 +164,8 @@ function AppShellBody({
   const canMenu = (id: string) => visibleMenus.some((m) => m.key === id);
 
   const top = loc.pathname.split("/")[1] || "execute";
-  // 推扫页面是 /pushbroom/new、/pushbroom/jobs，菜单 key 带上第二段
-  const key = top === "pushbroom" ? `pushbroom_${loc.pathname.split("/")[2] || "jobs"}` : top;
+  // 推扫：/pushbroom 是工作台，/pushbroom/mounts 是安装配置
+  const key = top === "pushbroom" ? (loc.pathname.split("/")[2] === "mounts" ? "pushbroom_mounts" : "pushbroom_workbench") : top;
   const pageTitle =
     key === "profiles" && loc.pathname.includes("/edit")
       ? "编辑处理方案"
@@ -325,29 +326,24 @@ function AppShellBody({
               }
             />
             <Route
-              path="/pushbroom/new"
+              path="/pushbroom"
               element={
-                <FeatureGuard allow={canMenu("pushbroom_new")}>
-                  <PushbroomNewPage />
+                <FeatureGuard allow={canMenu("pushbroom_workbench")}>
+                  <PushbroomWorkbenchPage />
                 </FeatureGuard>
               }
             />
+            <Route path="/pushbroom/new" element={<Navigate to="/pushbroom" replace />} />
+            <Route path="/pushbroom/jobs" element={<LegacyPushbroomJobs />} />
             <Route
-              path="/pushbroom/jobs"
+              path="/pushbroom/mounts"
               element={
-                <FeatureGuard allow={canMenu("pushbroom_jobs")}>
-                  <PushbroomJobsPage />
-                </FeatureGuard>
-              }
-            />
-            <Route
-              path="/pushbroom/calibration"
-              element={
-                <FeatureGuard allow={canMenu("pushbroom_calibration")}>
+                <FeatureGuard allow={canMenu("pushbroom_mounts")}>
                   <PushbroomCalibrationPage />
                 </FeatureGuard>
               }
             />
+            <Route path="/pushbroom/calibration" element={<Navigate to="/pushbroom/mounts" replace />} />
             <Route path="/profiles" element={<ProfilesListPage />} />
             <Route
               path="/profiles/new"

@@ -17,9 +17,8 @@ export const ROLE_HINT: Record<string, string> = {
 export type MenuKey =
   | "execute"
   | "incremental"
-  | "pushbroom_new"
-  | "pushbroom_jobs"
-  | "pushbroom_calibration"
+  | "pushbroom_workbench"
+  | "pushbroom_mounts"
   | "profiles"
   | "jobs"
   | "seam"
@@ -83,9 +82,8 @@ export const MENU_CATALOG: MenuDef[] = [
   { key: "profiles", label: "处理方案", path: "/profiles", group: "框幅拼图", roles: ["admin", "configurator", "executor", "viewer"], hint: "查看与维护处理参数方案" },
   { key: "jobs", label: "处理记录", path: "/jobs", group: "框幅拼图", roles: ["admin", "configurator", "executor", "viewer"], hint: "查看任务进度、结果与历史" },
   { key: "seam", label: "拼接线处理", path: "/seam", group: "框幅拼图", roles: ["admin", "configurator", "executor", "viewer"], hint: "新建拼接线处理，选择任务后进入处理" },
-  { key: "pushbroom_new", label: "新建推扫", path: "/pushbroom/new", group: "推扫拼图", feature: "pushbroom", roles: ["admin", "executor"], hint: "选择推扫高光谱架次，核对后提交拼图" },
-  { key: "pushbroom_jobs", label: "推扫记录", path: "/pushbroom/jobs", group: "推扫拼图", feature: "pushbroom", roles: ["admin", "executor"], hint: "查看推扫任务进度、日志与成果下载" },
-  { key: "pushbroom_calibration", label: "相机标定", path: "/pushbroom/calibration", group: "推扫拼图", feature: "pushbroom", roles: ["admin"], hint: "用往返航带标定相机安装，应用到之后的推扫任务" },
+  { key: "pushbroom_workbench", label: "推扫拼图", path: "/pushbroom", group: "推扫拼图", feature: "pushbroom", roles: ["admin", "executor"], hint: "选架次、提交拼图、看进度和结果、下载成果" },
+  { key: "pushbroom_mounts", label: "安装配置", path: "/pushbroom/mounts", group: "推扫拼图", feature: "pushbroom", roles: ["admin"], hint: "按生效日期管理相机安装配置，新建时用往返航带标定" },
   { key: "worker", label: "计算节点", path: "/worker", group: "系统管理", roles: ["admin"], hint: "监控计算进程与任务队列" },
   { key: "health", label: "系统监控", path: "/health", group: "系统管理", roles: ["admin"], hint: "查看数据库、消息队列与计算服务状态" },
   { key: "settings", label: "系统配置", path: "/settings", group: "系统管理", roles: ["admin", "configurator"], hint: "配置数据路径等运行参数" },
