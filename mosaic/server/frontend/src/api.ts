@@ -134,6 +134,8 @@ export type PushbroomFlight = {
   wavelength_max?: number | null;
   gps_records?: number;
   duration_s?: number;
+  /** GPS 第一条记录的时间，UTC ISO */
+  started_at?: string | null;
 };
 
 export type PushbroomCheck = {
@@ -145,11 +147,56 @@ export type PushbroomCheck = {
   flight: PushbroomFlight;
 };
 
+export type PushbroomMountSource = "manual" | "date" | "builtin";
+
+/** 架次对应的安装配置。builtin 时 id、name 为空，数值是内置值。 */
+export type PushbroomMountRef = {
+  id: string | null;
+  name: string | null;
+  source: PushbroomMountSource;
+  along_offset_m: number;
+  boresight_px: number;
+};
+
+export type PushbroomJobBrief = {
+  id: string;
+  seq: number;
+  status: PushbroomJob["status"];
+  global_percent: number;
+  current_stage: string | null;
+  finished_at: string | null;
+};
+
+export type PushbroomFlightItem = PushbroomCheck & {
+  mount: PushbroomMountRef;
+  job_count: number;
+  latest_job: PushbroomJobBrief | null;
+  /** 最近一次有预览的成功任务 */
+  preview_job_id: string | null;
+};
+
+export type PushbroomMount = {
+  id: string;
+  name: string;
+  /** YYYY-MM-DD，北京时间日期 */
+  effective_from: string;
+  along_offset_m: number;
+  along_se_m: number;
+  boresight_px: number;
+  boresight_se_px: number;
+  flights: string[];
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  matched: number;
+};
+
 export type PushbroomParams = {
   gsd_m?: number;
   bands?: number[];
   along_offset_m?: number;
   boresight_px?: number;
+  mount_profile?: { id?: string; name?: string; source: PushbroomMountSource };
 };
 
 export type PushbroomCalibrationState = {
@@ -190,6 +237,21 @@ export type PushbroomCalibrationRun = {
   run_token?: string;
 };
 
+export type PushbroomCalibrationTask = {
+  id: string;
+  status: "running" | "done" | "failed";
+  input_dirs: string[];
+  flights: string[];
+  result: Omit<PushbroomCalibrationRun, "run_token"> | null;
+  error: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+  /** 结果可用且不超过 30 分钟时才有 */
+  run_token?: string;
+  expires_at: string | null;
+};
+
 export type PushbroomJob = {
   id: string;
   seq: number;
@@ -209,6 +271,8 @@ export type PushbroomJob = {
   calibration_warning?: string | null;
   stage_timings: Record<string, number | null>;
   has_preview: boolean;
+  /** 排队时前面还有几个任务 */
+  queue_position: number | null;
   created_at: string | null;
   updated_at: string | null;
   started_at: string | null;
@@ -834,15 +898,17 @@ export const api = {
     run_token: string;
   }) => request<PushbroomCalibrationState>("/api/pushbroom/calibration", { method: "POST", body: JSON.stringify(body) }),
   pushbroomFlights: () =>
-    request<{ input_root: string; output_root: string; items: PushbroomCheck[] }>("/api/pushbroom/flights"),
+    request<{ input_root: string; output_root: string; items: PushbroomFlightItem[] }>("/api/pushbroom/flights"),
   pushbroomCheck: (inputDir: string) =>
-    request<PushbroomCheck>("/api/pushbroom/check", { method: "POST", body: JSON.stringify({ input_dir: inputDir }) }),
+    request<PushbroomFlightItem>("/api/pushbroom/check", { method: "POST", body: JSON.stringify({ input_dir: inputDir }) }),
   pushbroomCreate: (body: { input_dir: string; title?: string; params?: PushbroomParams }) =>
     request<PushbroomJob>("/api/pushbroom/jobs", { method: "POST", body: JSON.stringify(body) }),
-  pushbroomJobs: (page = 1, pageSize = 20, status?: string) =>
-    request<{ items: PushbroomJob[]; total: number; page: number; page_size: number }>(
-      `/api/pushbroom/jobs?page=${page}&page_size=${pageSize}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
-    ),
+  pushbroomJobs: (opts: { page?: number; pageSize?: number; status?: string; inputDir?: string } = {}) => {
+    const q = new URLSearchParams({ page: String(opts.page ?? 1), page_size: String(opts.pageSize ?? 20) });
+    if (opts.status) q.set("status", opts.status);
+    if (opts.inputDir) q.set("input_dir", opts.inputDir);
+    return request<{ items: PushbroomJob[]; total: number; page: number; page_size: number }>(`/api/pushbroom/jobs?${q}`);
+  },
   pushbroomJob: (id: string) => request<PushbroomJob>(`/api/pushbroom/jobs/${id}`),
   pushbroomCancel: (id: string) => request<PushbroomJob>(`/api/pushbroom/jobs/${id}/cancel`, { method: "POST" }),
   pushbroomRetry: (id: string) => request<PushbroomJob>(`/api/pushbroom/jobs/${id}/retry`, { method: "POST" }),
@@ -885,6 +951,25 @@ export const api = {
     a.click();
     a.remove();
   },
+  pushbroomMounts: () =>
+    request<{ items: PushbroomMount[]; builtin: { along_offset_m: number; boresight_px: number } }>("/api/pushbroom/mounts"),
+  pushbroomCreateMount: (body: { run_id: string; run_token: string; name: string; effective_from: string }) =>
+    request<PushbroomMount>("/api/pushbroom/mounts", { method: "POST", body: JSON.stringify(body) }),
+  pushbroomUpdateMount: (id: string, body: { name?: string; effective_from?: string }) =>
+    request<PushbroomMount>(`/api/pushbroom/mounts/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  pushbroomDeleteMount: (id: string) => request<{ ok: boolean }>(`/api/pushbroom/mounts/${id}`, { method: "DELETE" }),
+  pushbroomSetFlightMount: (flightName: string, profileId: string | null) =>
+    request<{ ok: boolean }>(`/api/pushbroom/flights/${encodeURIComponent(flightName)}/mount`, {
+      method: "PUT",
+      body: JSON.stringify({ profile_id: profileId }),
+    }),
+  pushbroomStartCalibration: (inputDirs: string[]) =>
+    request<PushbroomCalibrationTask>("/api/pushbroom/calibration/runs", {
+      method: "POST",
+      body: JSON.stringify({ input_dirs: inputDirs }),
+    }),
+  pushbroomCalibrationRuns: () => request<{ items: PushbroomCalibrationTask[] }>("/api/pushbroom/calibration/runs"),
+  pushbroomCalibrationRun: (id: string) => request<PushbroomCalibrationTask>(`/api/pushbroom/calibration/runs/${id}`),
   rbac: () => request<{ menus: Record<string, string[]> }>("/api/rbac"),
   updateRoleMenus: (role: string, menus: string[]) =>
     request<{ menus: Record<string, string[]> }>(`/api/rbac/roles/${role}`, {

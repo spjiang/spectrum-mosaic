@@ -1,4 +1,5 @@
-import type { PushbroomFlight, PushbroomJob } from "../../api";
+import type { PushbroomFlight, PushbroomJob, PushbroomMountRef, PushbroomMountSource, PushbroomParams } from "../../api";
+import { formatJobDateTime } from "../../jobTime";
 
 /** 与推扫 worker 的 pb_mosaic.stages 保持一致 */
 export const PB_STAGES: { id: string; label: string }[] = [
@@ -94,4 +95,61 @@ export function formatBandList(bands?: number[]): string {
     prev = b;
   }
   return `${parts.join(", ")}（${bands.length} 个）`;
+}
+
+/** worker 内置的安装参数，没有对应配置时使用 */
+export const BUILTIN_MOUNT = { along_offset_m: 1.7, boresight_px: -19 };
+
+export const MOUNT_SOURCE: Record<PushbroomMountSource, string> = {
+  manual: "手动",
+  date: "按日期",
+  builtin: "内置",
+};
+
+export function meters(value?: number | null, se?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return se == null ? `${value.toFixed(2)} m` : `${value.toFixed(2)} ± ${se.toFixed(2)} m`;
+}
+
+export function pixels(value?: number | null, se?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return se == null ? `${value.toFixed(1)} 像元` : `${value.toFixed(1)} ± ${se.toFixed(1)} 像元`;
+}
+
+/** 飞行开始时间，北京时间到分钟 */
+export function flightStartText(f: PushbroomFlight): string {
+  return f.started_at ? formatJobDateTime(f.started_at).slice(0, 16) : "—";
+}
+
+/** 飞行日期 YYYY-MM-DD（北京时间），读不到时为空串 */
+export function flightDay(f: PushbroomFlight): string {
+  return f.started_at ? formatJobDateTime(f.started_at).slice(0, 10) : "";
+}
+
+export function mountName(m: PushbroomMountRef): string {
+  return m.source === "builtin" ? "内置（没有对应配置）" : m.name || "—";
+}
+
+/** 任务提交时抄下的安装配置，带数值 */
+export function jobMountText(p: PushbroomParams): string {
+  const along = p.along_offset_m ?? BUILTIN_MOUNT.along_offset_m;
+  const bore = p.boresight_px ?? BUILTIN_MOUNT.boresight_px;
+  const values = `沿航向 ${meters(along)} · 狭缝中心 ${pixels(bore)}`;
+  const m = p.mount_profile;
+  if (!m) return p.along_offset_m != null ? `旧版相机标定 · ${values}` : `内置 · ${values}`;
+  if (m.source === "builtin") return `内置（没有对应配置） · ${values}`;
+  return `${m.name}${m.source === "manual" ? "（手动）" : ""} · ${values}`;
+}
+
+/** 历次任务列表里的简短配置名 */
+export function jobMountName(p: PushbroomParams): string {
+  const m = p.mount_profile;
+  if (!m) return p.along_offset_m != null ? "旧版标定" : "内置";
+  return m.source === "builtin" ? "内置" : m.name || "—";
+}
+
+export function jobElapsedSeconds(job: PushbroomJob): number | null {
+  if (!job.started_at) return null;
+  const end = job.finished_at ? Date.parse(job.finished_at) : Date.now();
+  return (end - Date.parse(job.started_at)) / 1000;
 }
