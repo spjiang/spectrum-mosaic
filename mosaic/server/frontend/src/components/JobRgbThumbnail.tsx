@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
-import { Image, Tooltip, message } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Tooltip, message } from "antd";
 import { api } from "../api";
+import { ImageInspectModal } from "./ImageStage";
 
 type Props = {
   jobId: string;
@@ -36,16 +37,19 @@ export default function JobRgbThumbnail({ jobId, hasRgb, title, rev }: Props) {
   const [open, setOpen] = useState(false);
   const [loadingHd, setLoadingHd] = useState(false);
   const [failed, setFailed] = useState(false);
+  const request = useRef(0);
 
   useEffect(() => {
     if (!hasRgb) {
       setUrl(null);
       setFull(null);
       setFailed(false);
+      setOpen(false);
       return;
     }
     let objectUrl: string | null = null;
     let cancelled = false;
+    request.current += 1;
     setFailed(false);
     setFull(null);
     setOpen(false);
@@ -60,29 +64,40 @@ export default function JobRgbThumbnail({ jobId, hasRgb, title, rev }: Props) {
       });
     return () => {
       cancelled = true;
+      request.current += 1;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [jobId, hasRgb, rev]);
 
-  function openLarge(visible: boolean) {
-    if (!visible) {
-      setOpen(false);
-      return;
-    }
-    if (full) {
+  useEffect(() => {
+    return () => {
+      if (full) URL.revokeObjectURL(full);
+    };
+  }, [full]);
+
+  function openLarge() {
+    if (full || loadingHd) {
       setOpen(true);
       return;
     }
-    if (loadingHd) return;
+    const token = request.current + 1;
+    request.current = token;
     setLoadingHd(true);
+    setOpen(true);
     api
       .rgbHd(jobId, rev)
       .then((blob) => {
+        if (request.current !== token) return;
         setFull(URL.createObjectURL(blob));
-        setOpen(true);
       })
-      .catch((error: Error) => message.error(error.message || "高清图读取失败"))
-      .finally(() => setLoadingHd(false));
+      .catch((error: Error) => {
+        if (request.current !== token) return;
+        message.error(error.message || "高清图读取失败");
+        setOpen(false);
+      })
+      .finally(() => {
+        if (request.current === token) setLoadingHd(false);
+      });
   }
 
   if (!hasRgb) {
@@ -102,21 +117,24 @@ export default function JobRgbThumbnail({ jobId, hasRgb, title, rev }: Props) {
   }
 
   const tip = title ? `${title} · 点击放大` : "点击放大";
+  const viewTitle = title ? `${title} RGB` : "RGB 正射";
   return (
-    <Tooltip title={tip}>
-      <span className="job-rgb-thumb-wrap" onClick={(e) => e.stopPropagation()}>
-        <Image
-          src={url}
-          alt={title || "RGB 正射"}
-          className="job-rgb-thumb"
-          preview={{
-            visible: open,
-            src: full || url,
-            mask: loadingHd ? "读取高清…" : "放大",
-            onVisibleChange: openLarge,
-          }}
-        />
-      </span>
-    </Tooltip>
+    <>
+      <Tooltip title={tip} open={open ? false : undefined}>
+        <span className="job-rgb-thumb-wrap" onClick={(e) => e.stopPropagation()}>
+          <button type="button" className="job-rgb-thumb-btn" aria-label={tip} onClick={openLarge}>
+            <img src={url} alt={viewTitle} className="job-rgb-thumb" />
+            <span className="job-rgb-thumb-mask">{loadingHd ? "读取高清…" : "放大"}</span>
+          </button>
+        </span>
+      </Tooltip>
+      <ImageInspectModal
+        open={open}
+        src={full}
+        title={viewTitle}
+        emptyText={loadingHd ? "正在读取高清…" : "正在打开影像…"}
+        onClose={() => setOpen(false)}
+      />
+    </>
   );
 }

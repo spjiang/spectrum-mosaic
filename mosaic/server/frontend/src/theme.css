@@ -2674,20 +2674,6 @@ body.is-col-resizing {
   opacity: 1;
 }
 
-.pb-preview-large-wrap {
-  display: block;
-  cursor: zoom-in;
-  background: #0f1720;
-  line-height: 0;
-}
-
-.pb-preview-large {
-  display: block;
-  width: 100%;
-  max-height: 420px;
-  object-fit: contain;
-}
-
 .image-inspect-modal .accuracy-canvas {
   height: min(720px, calc(100vh - 280px));
   min-height: 360px;

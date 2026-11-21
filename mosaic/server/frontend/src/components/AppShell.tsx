@@ -49,7 +49,7 @@ import AuditPage from "../pages/Audit";
 import IncrementalPage from "../pages/Incremental";
 import AreasPage from "../pages/Areas";
 import PushbroomWorkbenchPage from "../pages/pushbroom/workbench/PushbroomWorkbench";
-import PushbroomCalibrationPage from "../pages/pushbroom/PushbroomCalibration";
+import PushbroomMountsPage from "../pages/pushbroom/mounts/PushbroomMounts";
 import { PRODUCT, PRODUCT_TITLE } from "../product";
 import {
   canConfigure,
@@ -339,7 +339,7 @@ function AppShellBody({
               path="/pushbroom/mounts"
               element={
                 <FeatureGuard allow={canMenu("pushbroom_mounts")}>
-                  <PushbroomCalibrationPage />
+                  <PushbroomMountsPage />
                 </FeatureGuard>
               }
             />
