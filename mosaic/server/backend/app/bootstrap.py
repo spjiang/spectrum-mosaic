@@ -11,6 +11,7 @@ from app.auth import ensure_role, hash_password
 from app.config import Settings
 from app.models import ParamDefinition, ParamProfileValue, SystemSetting, User
 from app.param_catalog import PARAM_LABELS
+from app.services import pushbroom_calibration, pushbroom_mounts
 from app.services.mq import check_rabbitmq, check_worker
 from app.services.paths import ensure_worker_tree, trial_dirs
 from app.services.rbac import seed_new_menus
@@ -358,6 +359,17 @@ def _ensure_trial_dirs() -> None:
                 log.warning("mkdir %s failed: %s", root, exc)
 
 
+def _ensure_pushbroom_mounts(db: Session, settings: Settings) -> None:
+    """推扫安装配置：建表、迁移旧标定、收口上次没跑完的标定。出错只记日志，不挡启动。"""
+    _ensure_sql_named(db, "031_pushbroom_mounts.sql")
+    try:
+        pushbroom_mounts.migrate_legacy(db, settings.pushbroom_input_root)
+        pushbroom_calibration.fail_stale_runs(db)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        log.exception("pushbroom mounts bootstrap failed")
+
+
 def bootstrap(db: Session, settings: Settings) -> None:
     t0 = time.perf_counter()
     _ensure_schema(db)
@@ -394,6 +406,7 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "028_pushbroom.sql")
     _ensure_sql_named(db, "029_pushbroom_calibration.sql")
     _ensure_sql_named(db, "030_camera_source.sql")
+    _ensure_pushbroom_mounts(db, settings)
     seed_new_menus(db)
     _ensure_user_expires_at(db)
     _migrate_legacy_source_paths(db)
