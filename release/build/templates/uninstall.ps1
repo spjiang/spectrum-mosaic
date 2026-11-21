@@ -1,4 +1,4 @@
-﻿# Windows 卸载：只删除本交付包的容器和镜像。不删除 data、pgdata、licenses、.env。
+# Windows 卸载：只删除本交付包的容器和镜像。不删除 data、pgdata、licenses、.env。
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
