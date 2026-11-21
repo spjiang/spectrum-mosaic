@@ -1,11 +1,14 @@
-"""推扫相机安装标定。建议值由计算服务算出，确认后写入之后新建的任务。"""
+"""推扫相机安装标定。在后台线程里调计算服务，结果写进标定记录，页面轮询。"""
 
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import jwt
 from fastapi import HTTPException
@@ -13,79 +16,43 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import PushbroomCalibration, User
+from app.models import PushbroomCalibrationRun, User
 from app.services.audit import record_audit
 from app.services.mq import queue_stats
+
+log = logging.getLogger(__name__)
 
 TOKEN_TYPE = "pushbroom_calibration"
 TOKEN_SECONDS = 30 * 60
 QUEUE_CALIBRATE = "pushbroom.calibrate"
-BUILTIN = {"along_offset_m": 1.7, "boresight_px": -19.0}
+RUNS_KEPT = 10
+STALE_ERROR = "服务重启，标定中断"
 _DIGITS = {"along_offset_m": 2, "boresight_px": 1, "along_se_m": 2, "boresight_se_px": 1}
 
 
-def latest_calibration(db: Session) -> PushbroomCalibration | None:
-    return db.scalar(select(PushbroomCalibration).order_by(PushbroomCalibration.created_at.desc()).limit(1))
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def with_active_calibration(params: dict[str, Any], row: Any | None) -> dict[str, Any]:
-    """把生效标定抄进任务参数。调用方自己带了安装参数则拒绝。"""
-    if "along_offset_m" in params or "boresight_px" in params:
-        raise HTTPException(400, "安装参数由相机标定决定，不能在任务里填写")
-    if row is None:
-        return params
-    out = dict(params)
-    out["along_offset_m"] = float(row.along_offset_m)
-    out["boresight_px"] = float(row.boresight_px)
-    return out
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
 
 
-def public_state(db: Session, row: PushbroomCalibration | None) -> dict[str, Any]:
-    if row is None:
-        return {"active": False, "builtin": dict(BUILTIN)}
-    username = None
-    if row.created_by is not None:
-        user = db.get(User, row.created_by)
-        username = user.username if user is not None else None
-    created = row.created_at
-    return {
-        "active": True,
-        "along_offset_m": row.along_offset_m,
-        "boresight_px": row.boresight_px,
-        "along_se_m": row.along_se_m,
-        "boresight_se_px": row.boresight_se_px,
-        "flights": list(row.flights or []),
-        "created_at": created.isoformat() if created is not None else None,
-        "created_by": username,
-    }
-
-
-def issue_run_token(settings: Settings, combined: dict[str, Any], flights: list[str]) -> str:
-    exp = datetime.now(timezone.utc) + timedelta(seconds=TOKEN_SECONDS)
-    payload = {
-        "typ": TOKEN_TYPE,
-        "flights": list(flights),
-        "exp": exp,
-        **{key: round(float(combined[key]), digits) for key, digits in _DIGITS.items()},
-    }
+def issue_run_token(settings: Settings, run_id: str, expires: datetime) -> str:
+    payload = {"typ": TOKEN_TYPE, "run": run_id, "exp": expires}
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def assert_run_token(settings: Settings, token: str, body: dict[str, Any]) -> None:
+def assert_run_token(settings: Settings, token: str, run_id: str) -> None:
     try:
         claims = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError as exc:
         raise HTTPException(400, "标定结果已失效，请重新标定") from exc
-    if claims.get("typ") != TOKEN_TYPE:
-        raise HTTPException(400, "标定结果已失效，请重新标定")
-    for key, digits in _DIGITS.items():
-        if round(float(claims[key]), digits) != round(float(body[key]), digits):
-            raise HTTPException(400, "标定结果已失效，请重新标定")
-    if list(claims.get("flights") or []) != list(body.get("flights") or []):
+    if claims.get("typ") != TOKEN_TYPE or claims.get("run") != run_id:
         raise HTTPException(400, "标定结果已失效，请重新标定")
 
 
-def _usable_names(result: dict[str, Any]) -> list[str]:
+def usable_names(result: dict[str, Any]) -> list[str]:
     names = []
     for item in result.get("flights") or []:
         if not isinstance(item, dict):
@@ -96,54 +63,50 @@ def _usable_names(result: dict[str, Any]) -> list[str]:
     return names
 
 
-def present_run(settings: Settings, result: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(result, dict) or "combined" not in result:
-        detail = result.get("error") if isinstance(result, dict) else None
-        raise HTTPException(502, detail or "标定没有返回结果")
-    combined = result.get("combined") or {}
-    if not combined.get("usable"):
-        return result
-    names = _usable_names(result)
-    if not names:
-        raise HTTPException(502, "标定没有返回可用架次")
-    return {**result, "run_token": issue_run_token(settings, combined, names)}
+def _has_usable(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return bool((result.get("combined") or {}).get("usable")) and bool(usable_names(result))
 
 
-def _validate(body: dict[str, Any]) -> None:
-    along = float(body["along_offset_m"])
-    bore = float(body["boresight_px"])
-    if not -20 <= along <= 20:
+def usable_combined(result: dict[str, Any] | None) -> tuple[dict[str, float], list[str]]:
+    """可保存的合并值（已取位）和参与的架次。不可用或超出范围时 400。"""
+    if not _has_usable(result):
+        raise HTTPException(400, "这次标定没有可用结果")
+    combined = result["combined"]  # type: ignore[index]
+    try:
+        values = {key: round(float(combined[key]), digits) for key, digits in _DIGITS.items()}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, "这次标定没有可用结果") from exc
+    if not -20 <= values["along_offset_m"] <= 20:
         raise HTTPException(400, "沿航向偏移超出范围")
-    if not -400 <= bore <= 400:
+    if not -400 <= values["boresight_px"] <= 400:
         raise HTTPException(400, "狭缝中心偏置超出范围")
-    if float(body["along_se_m"]) < 0 or float(body["boresight_se_px"]) < 0:
+    if values["along_se_m"] < 0 or values["boresight_se_px"] < 0:
         raise HTTPException(400, "不确定度无效")
-    flights = body.get("flights")
-    if not isinstance(flights, list) or not 1 <= len(flights) <= 8 or any(not isinstance(n, str) or not n.strip() for n in flights):
-        raise HTTPException(400, "架次列表无效")
+    return values, usable_names(result)  # type: ignore[arg-type]
 
 
-def apply_calibration(db: Session, settings: Settings, user: User, body: dict[str, Any]) -> PushbroomCalibration:
-    _validate(body)
-    assert_run_token(settings, body["run_token"], body)
-    row = PushbroomCalibration(
-        id=uuid.uuid4(),
-        along_offset_m=round(float(body["along_offset_m"]), 2),
-        boresight_px=round(float(body["boresight_px"]), 1),
-        along_se_m=round(float(body["along_se_m"]), 2),
-        boresight_se_px=round(float(body["boresight_se_px"]), 1),
-        flights=list(body["flights"]),
-        created_by=user.id,
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(row)
-    record_audit(
-        db,
-        user.id,
-        "pushbroom.calibration.apply",
-        {"along_offset_m": row.along_offset_m, "boresight_px": row.boresight_px, "flights": row.flights},
-    )
-    return row
+def run_out(settings: Settings, row: Any, username: str | None = None) -> dict[str, Any]:
+    dirs = list(row.input_dirs or [])
+    out: dict[str, Any] = {
+        "id": str(row.id),
+        "status": row.status,
+        "input_dirs": dirs,
+        "flights": [Path(d).name for d in dirs],
+        "result": row.result,
+        "error": row.error,
+        "created_by": username,
+        "created_at": _iso(row.created_at),
+        "finished_at": _iso(row.finished_at),
+        "expires_at": None,
+    }
+    if row.status == "done" and row.finished_at is not None and _has_usable(row.result):
+        expires = row.finished_at + timedelta(seconds=TOKEN_SECONDS)
+        if expires > _utcnow():
+            out["run_token"] = issue_run_token(settings, str(row.id), expires)
+            out["expires_at"] = expires.isoformat()
+    return out
 
 
 def _online(settings: Settings) -> bool:
@@ -183,21 +146,109 @@ def _rpc(settings: Settings, input_dirs: list[str]) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             pass
     if "body" not in box:
-        raise HTTPException(502, "标定超时")
+        raise RuntimeError("标定超时")
     try:
         data = json.loads(box["body"].decode("utf-8"))
     except json.JSONDecodeError as exc:
-        raise HTTPException(502, "标定没有返回结果") from exc
+        raise RuntimeError("标定没有返回结果") from exc
     if not isinstance(data, dict):
-        raise HTTPException(502, "标定没有返回结果")
+        raise RuntimeError("标定没有返回结果")
     return data
 
 
-def run_calibrate(settings: Settings, input_dirs: list[str], *, rpc=None) -> dict[str, Any]:
-    if rpc is None:
-        if not _online(settings):
-            raise HTTPException(409, "推扫计算服务未在线")
-        result = _rpc(settings, input_dirs)
-    else:
-        result = rpc(input_dirs)
-    return present_run(settings, result)
+def _launch(settings: Settings, run_id: uuid.UUID, input_dirs: list[str]) -> None:
+    threading.Thread(
+        target=execute_run, args=(settings, run_id, input_dirs), name="pushbroom-calibrate", daemon=True
+    ).start()
+
+
+def start_run(
+    db: Session,
+    settings: Settings,
+    user: User,
+    input_dirs: list[str],
+    *,
+    launch: Callable[[Settings, uuid.UUID, list[str]], None] | None = None,
+) -> PushbroomCalibrationRun:
+    """建一条进行中的标定记录，交给后台线程，立刻返回。"""
+    busy = db.scalar(select(PushbroomCalibrationRun).where(PushbroomCalibrationRun.status == "running").limit(1))
+    if busy is not None:
+        raise HTTPException(409, "已有一次标定在进行，请等它结束")
+    if launch is None and not _online(settings):
+        raise HTTPException(409, "推扫计算服务未在线")
+    run_id = uuid.uuid4()
+    row = PushbroomCalibrationRun(
+        id=run_id,
+        status="running",
+        input_dirs=list(input_dirs),
+        created_by=user.id,
+        created_at=_utcnow(),
+    )
+    db.add(row)
+    record_audit(db, user.id, "pushbroom.calibration.start", {"run_id": str(run_id), "input_dirs": list(input_dirs)})
+    (launch or _launch)(settings, run_id, list(input_dirs))
+    return row
+
+
+def execute_run(
+    settings: Settings,
+    run_id: uuid.UUID,
+    input_dirs: list[str],
+    *,
+    rpc: Callable[[list[str]], dict[str, Any]] | None = None,
+    session_factory: Callable[[], Any] | None = None,
+) -> None:
+    """后台线程：调计算服务，把结果或失败原因写回记录。"""
+    if session_factory is None:
+        from app.db import SessionLocal
+
+        session_factory = SessionLocal
+    call = rpc or (lambda dirs: _rpc(settings, dirs))
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    try:
+        data = call(input_dirs)
+        if not isinstance(data, dict) or "combined" not in data:
+            detail = data.get("error") if isinstance(data, dict) else None
+            raise RuntimeError(detail or "标定没有返回结果")
+        result = data
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pushbroom calibrate %s failed: %s", run_id, exc)
+        error = str(exc) or "标定失败"
+    db = session_factory()
+    try:
+        row = db.get(PushbroomCalibrationRun, run_id)
+        if row is None or row.status != "running":
+            return
+        row.status = "failed" if error else "done"
+        row.result = result
+        row.error = error
+        row.finished_at = _utcnow()
+        db.commit()
+    finally:
+        db.close()
+
+
+def list_runs(db: Session) -> list[PushbroomCalibrationRun]:
+    q = select(PushbroomCalibrationRun).order_by(PushbroomCalibrationRun.created_at.desc()).limit(RUNS_KEPT)
+    return list(db.scalars(q))
+
+
+def get_run(db: Session, run_id: uuid.UUID) -> PushbroomCalibrationRun:
+    row = db.get(PushbroomCalibrationRun, run_id)
+    if row is None:
+        raise HTTPException(404, "标定记录不存在")
+    return row
+
+
+def fail_stale_runs(db: Session) -> int:
+    """启动时把上次没跑完的标定记成中断。后台线程随进程一起没了。"""
+    rows = list(db.scalars(select(PushbroomCalibrationRun).where(PushbroomCalibrationRun.status == "running")))
+    now = _utcnow()
+    for row in rows:
+        row.status = "failed"
+        row.error = STALE_ERROR
+        row.finished_at = now
+    if rows:
+        db.commit()
+    return len(rows)
