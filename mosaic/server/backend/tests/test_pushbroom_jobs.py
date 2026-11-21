@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,7 +13,9 @@ from app.config import Settings
 from app.models import SystemSetting
 from app.routers.pushbroom import download_ticket, read_download_ticket
 from app.services import pushbroom as svc
+from app.services import pushbroom_mounts as mounts
 from app.services.mq import FakeMQPublisher
+from app.services.pushbroom_check import FlightCheck
 from app.services.rbac import RBAC_KEY, SEEDED_KEY, seed_new_menus
 
 
@@ -267,3 +270,64 @@ def test_seed_without_saved_mapping_only_records_marker():
     seed_new_menus(db)
     assert RBAC_KEY not in db.rows
     assert SEEDED_KEY in db.rows
+
+
+def test_logs_are_in_beijing_time(tmp_path):
+    job = _job(tmp_path)
+    row = SimpleNamespace(created_at=datetime(2026, 11, 21, 2, 3, 4, tzinfo=timezone.utc), level="info", message="已提交")
+    db = MagicMock()
+    db.scalars.return_value = [row]
+    assert svc.format_logs(db, job) == "2026-11-21 10:03:04 [info] 已提交"
+
+
+def test_queue_positions_count_running_then_queued_by_enqueue_time():
+    t = datetime(2026, 11, 21, tzinfo=timezone.utc)
+    run = SimpleNamespace(id=uuid.uuid4(), seq=1, status="running", updated_at=t, created_at=t)
+    q1 = SimpleNamespace(id=uuid.uuid4(), seq=5, status="queued", updated_at=t + timedelta(minutes=1), created_at=t)
+    q2 = SimpleNamespace(id=uuid.uuid4(), seq=3, status="queued", updated_at=t + timedelta(minutes=2), created_at=t)
+    assert svc.queue_positions([q2, run, q1]) == {q1.id: 1, q2.id: 2}
+
+
+def test_flight_items_attach_mount_and_latest_job(tmp_path, monkeypatch):
+    good = FlightCheck(input_dir="/data/input/pushbroom/A", name="A", flight={"started_at": "2026-04-19T05:10:43+00:00"})
+    older = FlightCheck(input_dir="/data/input/pushbroom/B", name="B", flight={"started_at": "2026-04-14T05:35:44+00:00"})
+    bad = FlightCheck(input_dir="/data/input/pushbroom/C", name="C", errors=["缺少文件：figspec.gps"])
+    profile = SimpleNamespace(id=uuid.uuid4(), name="0414 安装", effective_from=datetime(2026, 4, 14).date(), along_offset_m=1.78, boresight_px=-49.8)
+    latest = _job(tmp_path, status="running", global_percent=40.0, current_stage="P3_align")
+    monkeypatch.setattr(mounts, "load_profiles", lambda db: [profile])
+    monkeypatch.setattr(mounts, "load_overrides", lambda db: {})
+    monkeypatch.setattr(
+        svc, "flight_job_stats", lambda db, owner_id: {"/data/input/pushbroom/A": {"count": 2, "latest": latest, "latest_done": None}}
+    )
+    items = svc.flight_items(MagicMock(), [bad, older, good], owner_id=None)
+    assert [i["name"] for i in items] == ["A", "B", "C"]
+    a = items[0]
+    assert a["mount"]["name"] == "0414 安装" and a["mount"]["source"] == "date"
+    assert a["job_count"] == 2 and a["latest_job"]["status"] == "running" and a["latest_job"]["global_percent"] == 40.0
+    assert a["preview_job_id"] is None
+    assert items[1]["job_count"] == 0 and items[1]["latest_job"] is None
+    assert items[2]["ok"] is False
+
+
+def test_create_job_copies_the_matched_mount(tmp_path, monkeypatch):
+    inp = tmp_path / "in" / "FigSpec_X"
+    inp.mkdir(parents=True)
+    settings = Settings(
+        data_roots=str(tmp_path), pushbroom_input_root=str(tmp_path / "in"), pushbroom_output_root=str(tmp_path / "out")
+    )
+    check = FlightCheck(input_dir=str(inp), name="FigSpec_X", flight={"bands": 10, "started_at": "2026-04-19T05:10:43+00:00"})
+    profile = SimpleNamespace(id=uuid.uuid4(), name="0419 安装", effective_from=None, along_offset_m=1.3, boresight_px=-30.0)
+    seen = {}
+
+    def fake_resolve(db, name, started_at):
+        seen["args"] = (name, started_at)
+        return mounts.Resolved("date", profile)
+
+    monkeypatch.setattr(svc, "quick_check", lambda path: check)
+    monkeypatch.setattr(svc, "validate_paths", lambda *a, **k: None)
+    monkeypatch.setattr(mounts, "resolve_for", fake_resolve)
+    user = SimpleNamespace(id=1, username="admin")
+    job = svc.create_job(MagicMock(), settings, FakeMQPublisher(), user=user, admin=True, input_dir=str(inp), title="", params={})
+    assert seen["args"] == ("FigSpec_X", "2026-04-19T05:10:43+00:00")
+    assert job.params["along_offset_m"] == 1.3 and job.params["boresight_px"] == -30.0
+    assert job.params["mount_profile"] == {"id": str(profile.id), "name": "0419 安装", "source": "date"}

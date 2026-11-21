@@ -22,8 +22,8 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import PushbroomJob, PushbroomJobLog, User
 from app.services.paths import prepare_job_dirs, stamp_run_output_dir, trial_dirs, validate_paths
-from app.services.pushbroom_calibration import latest_calibration, with_active_calibration
-from app.services.pushbroom_check import quick_check
+from app.services import pushbroom_mounts as mounts
+from app.services.pushbroom_check import FlightCheck, quick_check
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def create_job(
     bad = [b for b in params.get("bands") or [] if b > total_bands]
     if bad:
         raise HTTPException(400, f"波段序号超出范围（共 {total_bands} 个波段）：{bad}")
-    params = with_active_calibration(params, latest_calibration(db))
+    params = mounts.apply_mount(params, mounts.resolve_for(db, inp.name, check.flight.get("started_at")))
     out = stamp_run_output_dir(str(Path(output_root) / inp.name))
     validate_paths(settings, str(inp), out)
     job = PushbroomJob(
@@ -196,6 +196,7 @@ def page_jobs(
     *,
     owner_id: int | None,
     status: str | None = None,
+    input_dir: str | None = None,
 ) -> tuple[list[PushbroomJob], int]:
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
@@ -207,9 +208,80 @@ def page_jobs(
     if status:
         q = q.where(PushbroomJob.status == status)
         cq = cq.where(PushbroomJob.status == status)
+    if input_dir:
+        q = q.where(PushbroomJob.input_dir == input_dir)
+        cq = cq.where(PushbroomJob.input_dir == input_dir)
     total = int(db.scalar(cq) or 0)
     rows = list(db.scalars(q.order_by(PushbroomJob.seq.desc()).offset((page - 1) * page_size).limit(page_size)))
     return rows, total
+
+
+def active_jobs(db: Session) -> list[PushbroomJob]:
+    return list(db.scalars(select(PushbroomJob).where(PushbroomJob.status.in_(ACTIVE))))
+
+
+def queue_positions(rows: list[Any]) -> dict[uuid.UUID, int]:
+    """排队任务前面还有几个：在跑的都算，排队的按入队时间。worker 一次只跑一个。"""
+    running = sum(1 for row in rows if row.status in {"running", "cancelling"})
+    queued = sorted(
+        (row for row in rows if row.status == "queued"),
+        key=lambda row: (row.updated_at or row.created_at, row.seq),
+    )
+    return {row.id: running + index for index, row in enumerate(queued)}
+
+
+def flight_job_stats(db: Session, owner_id: int | None) -> dict[str, dict[str, Any]]:
+    """每个架次目录跑过几次、最近一次、最近一次成功。两次查询取完，不按架次逐个查。"""
+    q = select(
+        PushbroomJob.input_dir,
+        func.count().label("n"),
+        func.max(PushbroomJob.seq).label("last"),
+        func.max(PushbroomJob.seq).filter(PushbroomJob.status == "succeeded").label("done"),
+    ).group_by(PushbroomJob.input_dir)
+    if owner_id is not None:
+        q = q.where(PushbroomJob.created_by == owner_id)
+    stats = list(db.execute(q))
+    seqs = {seq for row in stats for seq in (row.last, row.done) if seq is not None}
+    jobs = {job.seq: job for job in db.scalars(select(PushbroomJob).where(PushbroomJob.seq.in_(seqs)))} if seqs else {}
+    return {
+        row.input_dir: {"count": int(row.n), "latest": jobs.get(row.last), "latest_done": jobs.get(row.done)}
+        for row in stats
+    }
+
+
+def flight_item(check: dict[str, Any], mount: dict[str, Any], stats: dict[str, Any] | None) -> dict[str, Any]:
+    latest = (stats or {}).get("latest")
+    done = (stats or {}).get("latest_done")
+    return {
+        **check,
+        "mount": mount,
+        "job_count": int((stats or {}).get("count") or 0),
+        "latest_job": None
+        if latest is None
+        else {
+            "id": str(latest.id),
+            "seq": latest.seq,
+            "status": latest.status,
+            "global_percent": latest.global_percent,
+            "current_stage": latest.current_stage,
+            "finished_at": latest.finished_at.isoformat() if latest.finished_at else None,
+        },
+        "preview_job_id": str(done.id) if done is not None and preview_png(done) is not None else None,
+    }
+
+
+def flight_items(db: Session, checks: list[FlightCheck], *, owner_id: int | None) -> list[dict[str, Any]]:
+    profiles = mounts.load_profiles(db)
+    overrides = mounts.load_overrides(db)
+    stats = flight_job_stats(db, owner_id)
+    items = []
+    for check in checks:
+        res = mounts.resolve(profiles, overrides.get(check.name), mounts.flight_date(check.flight.get("started_at")))
+        key = str(Path(check.input_dir).resolve())
+        items.append(flight_item(check.as_dict(), mounts.mount_out(res), stats.get(key)))
+    ok = sorted((i for i in items if i["ok"]), key=lambda i: i["flight"].get("started_at") or "", reverse=True)
+    bad = sorted((i for i in items if not i["ok"]), key=lambda i: i["name"])
+    return ok + bad
 
 
 def cancel_job(db: Session, mq, job: PushbroomJob, *, worker_online: bool) -> PushbroomJob:
@@ -387,7 +459,7 @@ def format_logs(db: Session, job: PushbroomJob, *, tail: int = LOG_TAIL) -> str:
         )
     )
     lines = [
-        f"{(r.created_at or _utcnow()).astimezone(timezone.utc):%Y-%m-%d %H:%M:%S} [{r.level}] {r.message}"
+        f"{(r.created_at or _utcnow()).astimezone(mounts.CST):%Y-%m-%d %H:%M:%S} [{r.level}] {r.message}"
         for r in rows
     ]
     run_log = Path(job.output_dir) / "log" / "run.log"
