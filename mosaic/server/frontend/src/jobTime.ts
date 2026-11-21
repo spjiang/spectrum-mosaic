@@ -50,10 +50,62 @@ export function formatStageSeconds(seconds: number | null | undefined): string {
   return restMin ? `${hours}小时${restMin}分` : `${hours}小时`;
 }
 
+const CST_MS = 8 * 60 * 60 * 1000;
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** 没有时区的时间按 UTC 读。接口存的是 UTC，直接切片会少 8 小时。 */
+function parseJobInstant(v: string): number | null {
+  const raw = v.trim();
+  if (!raw) return null;
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  const iso = hasZone ? raw : `${raw.replace(" ", "T")}Z`;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function formatShifted(ms: number, withSeconds: boolean): string {
+  const cst = new Date(ms + CST_MS);
+  const date = `${cst.getUTCFullYear()}-${pad2(cst.getUTCMonth() + 1)}-${pad2(cst.getUTCDate())}`;
+  const clock = withSeconds
+    ? `${pad2(cst.getUTCHours())}:${pad2(cst.getUTCMinutes())}:${pad2(cst.getUTCSeconds())}`
+    : `${pad2(cst.getUTCHours())}:${pad2(cst.getUTCMinutes())}`;
+  return `${date} ${clock}`;
+}
+
 export function formatJobDateTime(v?: string | null): string {
   if (!v) return "—";
-  const s = String(v).replace("T", " ");
-  return s.length >= 19 ? s.slice(0, 19) : s;
+  const ms = parseJobInstant(String(v));
+  if (ms == null) {
+    const s = String(v).replace("T", " ");
+    return s.length >= 19 ? s.slice(0, 19) : s;
+  }
+  return formatShifted(ms, true);
+}
+
+function utcMinute(v: string): string | null {
+  const ms = parseJobInstant(v);
+  if (ms == null) return null;
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+}
+
+/** 自动标题原先按 UTC 写入。列表改成北京时间后，旧标题按创建时间补 8 小时，手改过的不动。 */
+export function displayJobTitle(
+  title: string | null | undefined,
+  seq: number | null | undefined,
+  createdAt?: string | null,
+): string {
+  const text = (title || "").trim();
+  if (!text) return "—";
+  if (seq == null || !createdAt) return text;
+  const utc = utcMinute(createdAt);
+  if (!utc || text !== `#${seq} ${utc}`) return text;
+  const shown = formatJobDateTime(createdAt);
+  if (shown === "—") return text;
+  return `#${seq} ${shown.slice(0, 16)}`;
 }
 
 function activeElapsedSeconds(

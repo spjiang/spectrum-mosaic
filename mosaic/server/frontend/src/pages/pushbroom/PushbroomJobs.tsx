@@ -6,17 +6,30 @@ import {
   Card,
   Checkbox,
   Descriptions,
-  Drawer,
   Modal,
+  Popover,
   Progress,
   Select,
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
-import { DownloadOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  DownloadOutlined,
+  OneToOneOutlined,
+  PlusOutlined,
+  QuestionCircleOutlined,
+  ReloadOutlined,
+  RotateRightOutlined,
+  ZoomInOutlined,
+  ZoomOutOutlined,
+} from "@ant-design/icons";
+import { PhotoProvider, PhotoView } from "react-photo-view";
+import type { OverlayRenderProps } from "react-photo-view/dist/types";
+import "react-photo-view/dist/react-photo-view.css";
 import { api, type PushbroomFile, type PushbroomJob, type PushbroomStatus } from "../../api";
 import { formatNo } from "../../ids";
 import { formatJobDateTime } from "../../jobTime";
@@ -34,10 +47,118 @@ import {
 
 const POLL_MS = 3000;
 
+const PRODUCT_HELP: { name: string; text: string }[] = [
+  { name: "*_mosaic.spe", text: "拼好的高光谱立方体，ENVI BIL。数值是相机原始 DN，没有做过显示拉伸。" },
+  { name: "*_mosaic.hdr", text: "立方体的头文件。行列数、波段、波长和坐标都在这里，必须和 spe 放在同一个目录。" },
+  { name: "*_rgb.tif", text: "红绿蓝三个波段的 GeoTIFF，带坐标。数值仍是原始 DN，适合继续计算，直接打开会偏暗。" },
+  { name: "*_rgb_display.tif", text: "同一张 RGB，做过亮度拉伸。颜色接近屏幕上的预览，用来目视，不能当作反射率。" },
+  { name: "*_preview.png", text: "页面上的结果预览。内容和显示拉伸图一致，没有地理坐标。" },
+  { name: "*_footprints.geojson", text: "每条航带落到成果上的范围，可在 GIS 里查看航带是怎么拼上去的。" },
+  { name: "report.json", text: "处理报告，给程序读。里面有分辨率、覆盖面积、配准、标定提示和各步耗时。" },
+  { name: "report.md", text: "同一份报告的文字版，用文本编辑器直接打开。" },
+];
+
+function ProductHelp() {
+  return (
+    <Popover
+      trigger="click"
+      placement="bottomLeft"
+      title="成果文件说明"
+      getPopupContainer={() => document.body}
+      content={
+        <div style={{ width: 380 }}>
+          {PRODUCT_HELP.map((item) => (
+            <div key={item.name} style={{ marginBottom: 10 }}>
+              <Typography.Text code>{item.name}</Typography.Text>
+              <div style={{ marginTop: 2 }}>{item.text}</div>
+            </div>
+          ))}
+        </div>
+      }
+    >
+      <button type="button" className="param-help-btn" aria-label="成果文件说明" onClick={(e) => e.stopPropagation()}>
+        <QuestionCircleOutlined />
+      </button>
+    </Popover>
+  );
+}
+
+function PreviewTools({ scale, rotate, onScale, onRotate }: OverlayRenderProps) {
+  const zoom = (factor: number) => onScale(Math.min(8, Math.max(0.2, scale * factor)));
+  const tools = [
+    { label: "放大", icon: <ZoomInOutlined />, run: () => zoom(1.5) },
+    { label: "缩小", icon: <ZoomOutOutlined />, run: () => zoom(1 / 1.5) },
+    { label: "原始大小", icon: <OneToOneOutlined />, run: () => onScale(1) },
+    { label: "旋转", icon: <RotateRightOutlined />, run: () => onRotate(rotate + 90) },
+  ];
+  return (
+    <>
+      {tools.map((tool) => (
+        <button key={tool.label} type="button" className="PhotoView-Slider__toolbarIcon pb-photo-tool" title={tool.label} aria-label={tool.label} onClick={tool.run}>
+          {tool.icon}
+        </button>
+      ))}
+    </>
+  );
+}
+
 function elapsedSeconds(job: PushbroomJob): number | null {
   if (!job.started_at) return null;
   const end = job.finished_at ? Date.parse(job.finished_at) : Date.now();
   return (end - Date.parse(job.started_at)) / 1000;
+}
+
+function ResultPreview({
+  job,
+  large = false,
+}: {
+  job: Pick<PushbroomJob, "id" | "title" | "has_preview" | "finished_at" | "updated_at">;
+  large?: boolean;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!job.has_preview) {
+      setUrl(null);
+      setFailed(false);
+      return;
+    }
+    let objectUrl: string | null = null;
+    let cancelled = false;
+    setUrl(null);
+    setFailed(false);
+    api
+      .pushbroomPreview(job.id, job.finished_at || job.updated_at)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [job.id, job.has_preview, job.finished_at, job.updated_at]);
+
+  if (!job.has_preview) return <Typography.Text type="secondary">—</Typography.Text>;
+  if (failed || !url) {
+    return (
+      <Tooltip title={failed ? "预览加载失败" : "加载预览…"}>
+        <span className={`job-rgb-thumb job-rgb-thumb--${failed ? "err" : "loading"}`} aria-hidden />
+      </Tooltip>
+    );
+  }
+  return (
+    <span className={large ? "pb-preview-large-wrap" : "job-rgb-thumb-wrap"} onClick={(e) => e.stopPropagation()}>
+      <PhotoView src={url}>
+        <img src={url} alt={`${job.title} 结果预览`} className={large ? "pb-preview-large" : "job-rgb-thumb"} />
+      </PhotoView>
+    </span>
+  );
 }
 
 function StatusTag({ job }: { job: PushbroomJob }) {
@@ -61,7 +182,7 @@ function JobProgress({ job }: { job: PushbroomJob }) {
   );
 }
 
-function JobDrawer({
+function JobDetail({
   jobId,
   admin,
   onClose,
@@ -75,6 +196,7 @@ function JobDrawer({
   const [job, setJob] = useState<PushbroomJob | null>(null);
   const [files, setFiles] = useState<PushbroomFile[]>([]);
   const [logs, setLogs] = useState("");
+  const [packing, setPacking] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   const load = useCallback(async () => {
@@ -118,16 +240,36 @@ function JobDrawer({
     }
   }
 
+  async function downloadArchive() {
+    if (!job) return;
+    setPacking(true);
+    try {
+      await api.pushbroomDownloadArchive(job.id);
+    } catch (err) {
+      message.error((err as Error).message || String(err));
+    } finally {
+      setPacking(false);
+    }
+  }
+
   return (
-    <Drawer
+    <Modal
       open={Boolean(jobId)}
-      onClose={onClose}
-      width={760}
-      title={job ? `推扫任务 ${formatNo(job.seq)} · ${job.title}` : "推扫任务"}
+      onCancel={onClose}
+      footer={null}
+      width={880}
+      centered
       destroyOnClose
+      styles={{ body: { maxHeight: "calc(100vh - 160px)", overflow: "auto" } }}
+      title={job ? `推扫任务 ${formatNo(job.seq)} · ${job.title}` : "推扫任务"}
     >
       {job && (
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          {job.has_preview && (
+            <Card size="small" title="结果预览">
+              <ResultPreview job={job} large />
+            </Card>
+          )}
           {job.error_summary && <Alert type="error" showIcon message="失败原因" description={job.error_summary} />}
           {job.calibration_warning && (
             <Alert
@@ -186,7 +328,25 @@ function JobDrawer({
             </Space>
           </Card>
 
-          <Card size="small" title="成果文件">
+          <Card
+            size="small"
+            title={
+              <span className="title-with-help">
+                成果文件
+                <ProductHelp />
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  disabled={!files.length}
+                  loading={packing}
+                  onClick={downloadArchive}
+                >
+                  打包下载
+                </Button>
+              </span>
+            }
+          >
             <Table
               rowKey="path"
               size="small"
@@ -220,7 +380,7 @@ function JobDrawer({
           </Card>
         </Space>
       )}
-    </Drawer>
+    </Modal>
   );
 }
 
@@ -318,6 +478,15 @@ export default function PushbroomJobsPage() {
   }
 
   return (
+    <PhotoProvider
+      className="pb-photo-view"
+      maskOpacity={0.92}
+      photoClosable={false}
+      maskClosable
+      pullClosable={false}
+      toolbarRender={(props) => <PreviewTools {...props} />}
+      overlayRender={() => <div className="pb-photo-hint">滚轮缩放，按住拖动</div>}
+    >
     <Card
       className="mosaic-panel"
       title="推扫记录"
@@ -353,7 +522,7 @@ export default function PushbroomJobsPage() {
         loading={loading}
         dataSource={rows}
         tableLayout="fixed"
-        scroll={{ x: admin ? 1240 : 1130 }}
+        scroll={{ x: admin ? 1360 : 1250 }}
         pagination={{
           current: page,
           pageSize,
@@ -378,6 +547,11 @@ export default function PushbroomJobsPage() {
                 {r.title}
               </Button>
             ),
+          },
+          {
+            title: "结果预览",
+            width: 110,
+            render: (_: unknown, r: PushbroomJob) => <ResultPreview job={r} />,
           },
           { title: "状态", width: 100, render: (_: unknown, r: PushbroomJob) => <StatusTag job={r} /> },
           { title: "进度", width: 240, render: (_: unknown, r: PushbroomJob) => <JobProgress job={r} /> },
@@ -413,7 +587,8 @@ export default function PushbroomJobsPage() {
           },
         ]}
       />
-      <JobDrawer jobId={openId} admin={admin} onClose={() => openJob(null)} onChanged={quietReload} />
+      <JobDetail jobId={openId} admin={admin} onClose={() => openJob(null)} onChanged={quietReload} />
     </Card>
+    </PhotoProvider>
   );
 }

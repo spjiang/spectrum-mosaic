@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +24,13 @@ from app.services.stage_steps import persist_stage_steps
 from app.services.worker_env import apply_worker_env
 from app.services.worker_inspect import heartbeat_holds_job
 
+_CST = timezone(timedelta(hours=8))
+
+
 def default_job_title(seq: int, when: datetime) -> str:
-    """空标题：任务号 + 创建时间。钟面与列表「创建时间」一致（UTC）。"""
-    stamp = when.astimezone(timezone.utc) if when.tzinfo else when
-    return f"#{seq} {stamp.strftime('%Y-%m-%d %H:%M')}"
+    """空标题：任务号 + 创建时间。钟面与列表「创建时间」一致（北京时间）。"""
+    aware = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    return f"#{seq} {aware.astimezone(_CST).strftime('%Y-%m-%d %H:%M')}"
 
 
 def _clean_title(title: str | None) -> str:

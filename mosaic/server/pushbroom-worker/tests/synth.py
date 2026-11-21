@@ -103,11 +103,16 @@ def write_flight(
     *,
     texture: Texture | None = None,
     bias: tuple[float, float, float, float] | None = None,
+    drift: tuple[float, float, float] | None = None,
     shear_deg: tuple[float, float] = (0.0, 0.0),
     sensor: dict | None = None,
     header_extra: str = "",
 ) -> SynthFlight:
     """bias = (t0, t1, dx, dy)：t0–t1 秒内的定位整体偏 (dx, dy) 米，成像仍按真实位置。
+
+    drift = (t0, t1, north_m)：这段时间中间约一半的定位整段偏北 north_m 米，两端用短斜坡接上。
+    成像仍按真实位置。偏东会把窄航带推出重叠区，测不到；沿航向的这段才留在接缝上。
+    整段平均值会被航带平移吃掉，剩下的是沿航向变化的那一部分。
 
     shear_deg = (北飞, 南飞)：狭缝剪切，离中线 d 米的像元沿航向前移 tan(φ)·d 米。
     sensor：成像用的真实安装参数（boresight_px、along_offset_m），默认与 SENSOR_PARAMS 相同。
@@ -154,6 +159,13 @@ def write_flight(
         m = (rec_t >= b0) & (rec_t <= b1)
         rx = rx + np.where(m, bx, 0.0)
         ry = ry + np.where(m, by, 0.0)
+    if drift:
+        t0, t1, amp = drift
+        u = (rec_t - t0) / max(t1 - t0, 1e-6)
+        rise = np.clip((u - 0.18) / 0.08, 0.0, 1.0)
+        fall = np.clip((0.82 - u) / 0.08, 0.0, 1.0)
+        bump = np.where((u >= 0.0) & (u <= 1.0), amp * np.minimum(rise, fall), 0.0)
+        ry = ry + bump
     tf = Transformer.from_crs(CRS.from_epsg(EPSG), CRS.from_epsg(4326), always_xy=True)
     lon, lat = tf.transform(rx, ry)
     rows = ["Lines,UnixTime,Microseconds,Latitude,Longitude,Altitude,W,X,Y,Z,XVelocity,YVelocity,ZVelocity"]

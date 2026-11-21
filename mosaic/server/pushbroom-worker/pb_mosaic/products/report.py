@@ -146,6 +146,12 @@ def render_markdown(r: dict[str, Any]) -> str:
                         f"{fmt(p['median_before_m'])} | {p['tiles_after']} | {fmt(p['median_after_m'])} |"
                     )
             out.append("")
+        tie = align.get("tiepoints") or {}
+        if tie.get("note"):
+            out.append("### 特征点")
+            out.append("")
+            out.append(f"- {tie['note']}")
+            out.append("")
 
     cal = r.get("calibration")
     if cal:

@@ -208,6 +208,7 @@ export type PushbroomJob = {
   error_summary: string | null;
   calibration_warning?: string | null;
   stage_timings: Record<string, number | null>;
+  has_preview: boolean;
   created_at: string | null;
   updated_at: string | null;
   started_at: string | null;
@@ -840,7 +841,29 @@ export const api = {
     request<{ ok: boolean }>(`/api/pushbroom/jobs/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
   pushbroomLogs: (id: string) => request<string>(`/api/pushbroom/jobs/${id}/logs`),
   pushbroomFiles: (id: string) => request<{ items: PushbroomFile[] }>(`/api/pushbroom/jobs/${id}/files`),
+  pushbroomPreview: async (id: string, rev?: string | null) => {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const q = rev ? `?v=${encodeURIComponent(rev)}` : "";
+    const res = await fetch(`/api/pushbroom/jobs/${id}/preview.png${q}`, { headers, cache: "no-store" });
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise<Blob>(() => {});
+    }
+    if (!res.ok) throw new Error(readError(await res.text(), "结果预览读取失败"));
+    return res.blob();
+  },
   /** 成果可能有几十 GB：换一个短期下载链接交给浏览器直接下载，不读进页面内存。 */
+  pushbroomDownloadArchive: async (id: string) => {
+    const { url } = await request<{ url: string }>(`/api/pushbroom/jobs/${id}/archive-link`, { method: "POST" });
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  },
   pushbroomDownload: async (id: string, path: string) => {
     const { url } = await request<{ url: string }>(`/api/pushbroom/jobs/${id}/download-link`, {
       method: "POST",

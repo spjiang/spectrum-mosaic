@@ -29,6 +29,7 @@ from pb_mosaic.license_check import LicenseError, enforce_license_or_raise
 from pb_mosaic.mosaic.align import AlignParams, AlignResult, align_strips
 from pb_mosaic.mosaic.merge import Cancelled, write_mosaic
 from pb_mosaic.mosaic.refine import RefineParams, RefineResult, refine_strips
+from pb_mosaic.mosaic.tiepoints import TieParams, TieResult, bend_strips
 from pb_mosaic.products.envi_out import write_mosaic_header
 from pb_mosaic.products.footprints import write_footprints, write_trajectory_csv
 from pb_mosaic.products.preview import RgbSink, rgb_positions, stretch_to_png, write_display_rgb
@@ -79,6 +80,7 @@ class JobParams:
     bands: list[int] | None = None  # 1 起始
     align: bool = True
     refine: bool = True
+    tiepoints: bool = True
     sensor: dict[str, Any] = field(default_factory=dict)
     ignored: list[str] = field(default_factory=list)
 
@@ -100,7 +102,7 @@ class JobParams:
             if len(set(bands)) != len(bands):
                 raise PipelineError("波段序号有重复")
             p.bands = sorted(bands)
-        for key in ("align", "refine"):
+        for key in ("align", "refine", "tiepoints"):
             if key in raw:
                 val = raw.pop(key)
                 if not isinstance(val, bool):
@@ -113,7 +115,13 @@ class JobParams:
         return p
 
     def as_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"gsd_m": self.gsd_m, "bands": self.bands, "align": self.align, "refine": self.refine}
+        out: dict[str, Any] = {
+            "gsd_m": self.gsd_m,
+            "bands": self.bands,
+            "align": self.align,
+            "refine": self.refine,
+            "tiepoints": self.tiepoints,
+        }
         out.update(self.sensor)
         return out
 
@@ -197,8 +205,9 @@ def describe_sources(sources: dict[str, str]) -> str:
     return "；".join(f"{_SOURCE_LABELS[s]}：{', '.join(groups[s])}" for s in _SOURCE_LABELS if s in groups)
 
 
-# 配准阶段内整条平移与精配准各占的进度
+# 配准阶段内：整条平移、精配准、特征点沿航向弯曲
 RIGID_SHARE = 0.4
+TIE_START = 0.85
 
 
 @dataclass
@@ -208,18 +217,25 @@ class Geometry:
     geoms: list[StripGeometry]
     alignment: AlignResult
     refine: RefineResult
+    tie: TieResult
     offsets: dict[int, tuple[float, float]]
     calibration: CalibrationCheck
 
     @property
     def note(self) -> str:
-        return self.alignment.note if not self.refine.applied else f"{self.alignment.note}；{self.refine.note}"
+        parts = [self.alignment.note]
+        if self.refine.applied and self.refine.note:
+            parts.append(self.refine.note)
+        if self.tie.note and self.tie.applied:
+            parts.append(self.tie.note)
+        return "；".join(p for p in parts if p)
 
     def alignment_dict(self) -> dict[str, Any]:
         d = self.alignment.as_dict()
         d["rigid_offsets_east_north_m"] = d.pop("offsets_east_north_m")
         d["offsets_east_north_m"] = {str(k): [round(v[0], 3), round(v[1], 3)] for k, v in self.offsets.items()}
         d["refine"] = self.refine.as_dict()
+        d["tiepoints"] = self.tie.as_dict()
         return d
 
 
@@ -262,7 +278,7 @@ def solve_geometry(
             traj.epsg,
             RefineParams(enabled=enabled),
             cancelled=cancelled,
-            progress=lambda f, m: st.progress(RIGID_SHARE + (1 - RIGID_SHARE) * f, m, force=True),
+            progress=lambda f, m: st.progress(RIGID_SHARE + (TIE_START - RIGID_SHARE) * f, m, force=True),
         )
     offsets = dict(alignment.offsets)
     if refine.applied:
@@ -272,7 +288,18 @@ def solve_geometry(
         }
     linked = {s for p in alignment.pairs if p.used for s in (p.a, p.b)}
     calibration = check_calibration(geoms, offsets, sensor, linked)
-    return Geometry(geoms, alignment, refine, offsets, calibration)
+    tie_on = params.align and params.tiepoints and len(geoms) > 1
+    tie = bend_strips(
+        geoms,
+        read_band,
+        traj.epsg,
+        TieParams(enabled=tie_on),
+        cancelled=cancelled,
+        progress=lambda f, m: st.progress(TIE_START + (1.0 - TIE_START) * f, m, force=True),
+    )
+    if tie.applied:
+        geoms = [g.bent(*tie.lines[g.strip.index]) for g in geoms]
+    return Geometry(geoms, alignment, refine, tie, offsets, calibration)
 
 
 def _require_license() -> None:

@@ -47,6 +47,16 @@ class StripGeometry:
         moved = self.translated(dx, dy)
         return replace(moved, shear=moved.shear + dshear) if dshear else moved
 
+    def bent(self, east: np.ndarray, north: np.ndarray) -> "StripGeometry":
+        """逐行平移（东、北，米）。用来跟上沿航向变化的 GPS 误差。"""
+        east = np.asarray(east, dtype=np.float64)
+        north = np.asarray(north, dtype=np.float64)
+        if east.shape != (self.n,) or north.shape != (self.n,):
+            raise ValueError(f"逐行平移长度应为 {self.n}")
+        if not np.any(east) and not np.any(north):
+            return self
+        return replace(self, px=self.px + east, py=self.py + north, _table=None)
+
     def cross_m(self, sample: np.ndarray) -> np.ndarray:
         """像元号 → 离狭缝中心的旁向米数，航迹右侧为正。"""
         return self.sensor.sign * (np.asarray(sample, dtype=np.float64) - self.sensor.center_px) * self.sensor.gsd_cross_m

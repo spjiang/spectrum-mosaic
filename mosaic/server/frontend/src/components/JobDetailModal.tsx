@@ -10,7 +10,7 @@ import JobProcessTable from "./JobProcessTable";
 import JobSnapshot from "./JobSnapshot";
 import JobStageFlow from "./JobStageFlow";
 import JobStatusTag from "./JobStatusTag";
-import { formatJobDateTime, jobElapsedHours } from "../jobTime";
+import { displayJobTitle, formatJobDateTime, jobElapsedHours } from "../jobTime";
 import LogConsole from "./LogConsole";
 
 const LIVE = ["queued", "running", "paused", "awaiting_continue"];
@@ -65,6 +65,7 @@ export default function JobDetailModal({
 
   const percent = Math.round(job?.global_percent || 0);
   const processes = job ? attachJobProcesses(job, inspect).processes || [] : [];
+  const shownTitle = job ? displayJobTitle(job.title, job.seq, job.created_at) : "—";
 
   return (
     <Modal
@@ -78,7 +79,7 @@ export default function JobDetailModal({
       title={
         job ? (
           <Space size={10} wrap>
-            <span>任务 {formatNo(job.seq)}{job.title ? ` · ${job.title}` : ""}</span>
+            <span>任务 {formatNo(job.seq)}{shownTitle !== "—" ? ` · ${shownTitle}` : ""}</span>
             <JobStatusTag status={job.status} />
             <Progress
               percent={percent}

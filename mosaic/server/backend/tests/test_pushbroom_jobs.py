@@ -155,6 +155,47 @@ def test_delete_refuses_active_job(tmp_path):
         svc.delete_job(MagicMock(), job, settings=Settings(), delete_files=False)
 
 
+def test_archive_zip_packs_products_and_report_only(tmp_path):
+    import io
+    import zipfile
+
+    job = _job(tmp_path, title="FigSpec_1")
+    out = tmp_path / "out" / "FigSpec_1" / "20261119_100000"
+    (out / "products").mkdir(parents=True)
+    (out / "report").mkdir()
+    (out / "process").mkdir()
+    (out / "products" / "flight_mosaic.hdr").write_bytes(b"ENVI")
+    (out / "products" / "flight_preview.png").write_bytes(b"png")
+    (out / "report" / "report.md").write_text("ok", encoding="utf-8")
+    (out / "process" / "strips.json").write_text("{}", encoding="utf-8")
+    blob = b"".join(svc.iter_archive(job))
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        assert archive.namelist() == [
+            "products/flight_mosaic.hdr",
+            "products/flight_preview.png",
+            "report/report.md",
+        ]
+        assert archive.read("products/flight_mosaic.hdr") == b"ENVI"
+    assert svc.archive_filename(job) == "FigSpec_1_成果.zip"
+    (out / "products" / "flight_mosaic.hdr").unlink()
+    (out / "products" / "flight_preview.png").unlink()
+    (out / "report" / "report.md").unlink()
+    with pytest.raises(HTTPException):
+        svc.archive_members(job)
+
+
+def test_preview_png_is_only_the_display_preview(tmp_path):
+    job = _job(tmp_path)
+    products = tmp_path / "out" / "FigSpec_1" / "20261119_100000" / "products"
+    products.mkdir(parents=True)
+    png = products / "flight_preview.png"
+    png.write_bytes(b"\x89PNG")
+    (products / "other.png").write_bytes(b"no")
+    assert svc.preview_png(job) == png.resolve()
+    png.unlink()
+    assert svc.preview_png(job) is None
+
+
 def test_only_products_and_report_are_downloadable(tmp_path):
     job = _job(tmp_path)
     out = tmp_path / "out" / "FigSpec_1" / "20261119_100000"

@@ -17,7 +17,7 @@ import { ResizableHeader, useColumnWidths } from "../components/ResizableHeader"
 import { attachJobProcesses, fmtMb, jobComputeState } from "../processTree";
 import { downloadJson, jobParamsFilename, serializeJobParams } from "../profileExport";
 import { TitleWithProgressHelp } from "../components/ProgressHelpTip";
-import { formatJobDateTime, jobElapsedHours } from "../jobTime";
+import { displayJobTitle, formatJobDateTime, jobElapsedHours } from "../jobTime";
 import { useAuth } from "../auth";
 import { canExecute } from "../roles";
 
@@ -129,17 +129,17 @@ export default function JobsPage() {
       if (status && r.status !== status) return false;
       if (stage && r.current_stage !== stage && r.completed_stage !== stage) return false;
       if (profileId != null && r.profile_id !== profileId) return false;
+      const createdDay = formatJobDateTime(r.created_at).slice(0, 10);
       if (fromDate) {
-        const t = String(r.created_at || "").slice(0, 10);
-        if (t && t < fromDate) return false;
+        if (createdDay && createdDay !== "—" && createdDay < fromDate) return false;
       }
       if (toDate) {
-        const t = String(r.created_at || "").slice(0, 10);
-        if (t && t > toDate) return false;
+        if (createdDay && createdDay !== "—" && createdDay > toDate) return false;
       }
       if (keyword) {
         const k = keyword.toLowerCase();
-        const blob = `${r.seq ?? ""} ${r.title || ""} ${r.id} ${r.input_dir} ${r.output_dir} ${r.message || ""} ${r.current_stage || ""}`.toLowerCase();
+        const shownTitle = displayJobTitle(r.title, r.seq, r.created_at);
+        const blob = `${r.seq ?? ""} ${shownTitle} ${r.title || ""} ${r.id} ${r.input_dir} ${r.output_dir} ${r.message || ""} ${r.current_stage || ""}`.toLowerCase();
         if (!blob.includes(k)) return false;
       }
       return true;
@@ -278,7 +278,8 @@ export default function JobsPage() {
               title: "标题",
               dataIndex: "title",
               ellipsis: true,
-              render: (v: string) => v || "—",
+              render: (v: string, r: { seq?: number | null; created_at?: string | null }) =>
+                displayJobTitle(v, r.seq, r.created_at),
             }),
             col("status", {
               title: "状态",

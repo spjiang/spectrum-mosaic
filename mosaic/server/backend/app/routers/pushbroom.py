@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -133,6 +134,7 @@ def _job_out(job: PushbroomJob, owner: str | None = None) -> dict[str, Any]:
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "has_preview": svc.preview_png(job) is not None,
     }
 
 
@@ -328,6 +330,19 @@ def job_logs(
     return svc.format_logs(db, _owned(db, job_id, user))
 
 
+@router.get("/jobs/{job_id}/preview.png")
+def job_preview(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("executor", "admin")),
+) -> FileResponse:
+    path = svc.preview_png(_owned(db, job_id, user))
+    if path is None:
+        raise HTTPException(404, "还没有结果预览")
+    return FileResponse(path, media_type="image/png", filename=path.name)
+
+
 @router.get("/jobs/{job_id}/files")
 def job_files(
     job_id: uuid.UUID,
@@ -340,6 +355,19 @@ def job_files(
 
 class LinkBody(BaseModel):
     path: str
+
+
+@router.post("/jobs/{job_id}/archive-link")
+def archive_link(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("executor", "admin")),
+) -> dict[str, Any]:
+    job = _owned(db, job_id, user)
+    svc.archive_members(job)
+    ticket = download_ticket(settings, user_id=user.id, job_id=job.id, path="*")
+    return {"url": f"/api/pushbroom/download?ticket={ticket}", "expires_in": DOWNLOAD_TICKET_SECONDS}
 
 
 @router.post("/jobs/{job_id}/download-link")
@@ -368,5 +396,14 @@ def download(
     if user is None or access_block_reason(user):
         raise HTTPException(401, "下载链接已失效")
     job = _owned(db, uuid.UUID(claims["job"]), user)
+    if claims.get("path") == "*":
+        members = svc.archive_members(job)
+        filename = svc.archive_filename(job)
+        disposition = f"attachment; filename=\"pushbroom-{job.seq}.zip\"; filename*=UTF-8''{quote(filename)}"
+        return StreamingResponse(
+            svc.iter_archive_members(members),
+            media_type="application/zip",
+            headers={"Content-Disposition": disposition},
+        )
     path = svc.resolve_file(job, claims["path"])
     return FileResponse(path, filename=path.name)

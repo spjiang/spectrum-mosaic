@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import re
 import shutil
+import threading
+import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -396,6 +401,19 @@ def format_logs(db: Session, job: PushbroomJob, *, tail: int = LOG_TAIL) -> str:
     return "\n".join(lines[-tail:])
 
 
+def preview_png(job: PushbroomJob) -> Path | None:
+    """成果目录里给人看的预览图。没有就返回空，不把别的 PNG 当成预览。"""
+    folder = (Path(job.output_dir) / "products").resolve()
+    if not folder.is_dir():
+        return None
+    found: list[Path] = []
+    for path in folder.glob("*_preview.png"):
+        resolved = path.resolve()
+        if resolved.is_file() and resolved.parent == folder:
+            found.append(resolved)
+    return sorted(found)[0] if found else None
+
+
 def list_files(job: PushbroomJob) -> list[dict[str, Any]]:
     base = Path(job.output_dir)
     out: list[dict[str, Any]] = []
@@ -417,6 +435,96 @@ def list_files(job: PushbroomJob) -> list[dict[str, Any]]:
                 }
             )
     return out
+
+
+def archive_members(job: PushbroomJob) -> list[tuple[Path, str]]:
+    """打包下载的成员：成果和报告，不含过程文件。压缩包里的路径与列表一致。"""
+    items = list_files(job)
+    if not items:
+        raise HTTPException(404, "还没有可下载的成果")
+    return [(resolve_file(job, item["path"]), item["path"]) for item in items]
+
+
+def archive_filename(job: PushbroomJob) -> str:
+    raw = (job.title or "").strip() or f"pushbroom-{job.seq}"
+    stem = re.sub(r'[\\/:*?"<>|\r\n]+', "_", raw).strip(" ._") or f"pushbroom-{job.seq}"
+    return f"{stem}_成果.zip"
+
+
+def iter_archive(job: PushbroomJob) -> Iterator[bytes]:
+    """不落临时包，按存储方式边读边打 zip。大立方体只多出包头，不复制一份。"""
+    return iter_archive_members(archive_members(job))
+
+
+def iter_archive_members(members: list[tuple[Path, str]]) -> Iterator[bytes]:
+    """成员路径必须在数据库会话关闭前取好。流式写出时不能再碰任务对象。"""
+    sizes = [path.stat().st_size for path, _ in members]
+    force_zip64 = any(size >= 0xFFFFFFFF for size in sizes) or sum(sizes) >= 0xFFFFFFFF
+    chunks: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=8)
+    stop = threading.Event()
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.written = 0
+
+        def write(self, data: bytes | bytearray | memoryview) -> int:
+            if stop.is_set():
+                raise BrokenPipeError
+            blob = bytes(data)
+            chunks.put(blob)
+            self.written += len(blob)
+            return len(blob)
+
+        def seekable(self) -> bool:
+            return False
+
+        def tell(self) -> int:
+            return self.written
+
+        def flush(self) -> None:
+            return None
+
+    def produce() -> None:
+        try:
+            with zipfile.ZipFile(_Writer(), "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+                for path, name in members:
+                    if stop.is_set():
+                        break
+                    modified = time.localtime(path.stat().st_mtime)
+                    stamp = modified[:6] if modified.tm_year >= 1980 else (1980, 1, 1, 0, 0, 0)
+                    info = zipfile.ZipInfo(filename=name, date_time=stamp)
+                    info.flag_bits |= 0x08
+                    info.compress_type = zipfile.ZIP_STORED
+                    with archive.open(info, "w", force_zip64=force_zip64) as dest, path.open("rb") as src:
+                        while True:
+                            block = src.read(1024 * 1024)
+                            if not block:
+                                break
+                            dest.write(block)
+        except BrokenPipeError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            if not stop.is_set():
+                chunks.put(exc)
+        finally:
+            chunks.put(None)
+
+    threading.Thread(target=produce, name="pushbroom-archive", daemon=True).start()
+    try:
+        while True:
+            item = chunks.get()
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        stop.set()
+        while True:
+            try:
+                chunks.get_nowait()
+            except queue.Empty:
+                break
 
 
 def resolve_file(job: PushbroomJob, rel: str) -> Path:

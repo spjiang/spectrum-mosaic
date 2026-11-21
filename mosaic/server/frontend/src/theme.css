@@ -2645,6 +2645,47 @@ body.is-col-resizing {
   cursor: zoom-in;
 }
 
+.pb-preview-large-wrap {
+  display: block;
+  cursor: zoom-in;
+  background: #0f1720;
+  line-height: 0;
+}
+
+.pb-preview-large {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+}
+
+.pb-photo-view .PhotoView-Slider__BannerWrap,
+.pb-photo-view.PhotoView-Slider__clean .PhotoView-Slider__BannerWrap,
+.pb-photo-view.PhotoView-Slider__clean .PhotoView-Slider__Overlay {
+  opacity: 1;
+}
+
+.pb-photo-tool {
+  color: #fff;
+  background: transparent;
+  border: 0;
+  font-size: 18px;
+  line-height: 0;
+}
+
+.pb-photo-hint {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  z-index: 30;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
 .job-rgb-thumb-wrap .ant-image {
   display: block;
   width: 72px;
