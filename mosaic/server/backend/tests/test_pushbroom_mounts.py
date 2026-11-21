@@ -216,3 +216,25 @@ def test_migrate_legacy_runs_once(monkeypatch):
     again.scalar.return_value = uuid.uuid4()
     assert mounts.migrate_legacy(again, "/data/input/pushbroom") is None
     again.add.assert_not_called()
+
+
+def test_mount_and_calibration_routes_are_admin_only():
+    import inspect
+
+    from app.routers import pushbroom as routes
+
+    for fn in (
+        routes.list_mounts,
+        routes.create_mount,
+        routes.update_mount,
+        routes.delete_mount,
+        routes.set_flight_mount,
+        routes.start_calibration,
+        routes.list_calibration_runs,
+        routes.get_calibration_run,
+    ):
+        params = inspect.signature(fn).parameters
+        name = "user" if "user" in params else "_user"
+        allowed = params[name].default.dependency.__closure__[0].cell_contents
+        assert allowed == ("admin",), fn.__name__
+    assert not hasattr(routes, "apply_calibration")

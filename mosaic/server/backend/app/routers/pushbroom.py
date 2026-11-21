@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -19,6 +20,7 @@ from app.db import get_db
 from app.models import PushbroomJob, User
 from app.services import pushbroom as svc
 from app.services import pushbroom_calibration as calibration
+from app.services import pushbroom_mounts as mounts
 from app.services.audit import record_audit
 from app.services.deps import get_mq
 from app.services.mq import PB_QUEUE_JOBS, MQPublisher, queue_stats
@@ -38,7 +40,7 @@ class PushbroomParams(BaseModel):
     gsd_m: float | None = Field(default=None, ge=0.01, le=2.0)
     # 1 起始的波段序号。不填输出全部波段
     bands: list[int] | None = None
-    # 只为拒绝任务里手填安装参数；真正的值由相机标定注入
+    # 只为拒绝任务里手填安装参数；真正的值由安装配置决定
     along_offset_m: float | None = None
     boresight_px: float | None = None
 
@@ -70,13 +72,20 @@ class CalibrationRunBody(BaseModel):
     input_dirs: list[str] = Field(min_length=1, max_length=8)
 
 
-class CalibrationApplyBody(BaseModel):
-    along_offset_m: float
-    boresight_px: float
-    along_se_m: float
-    boresight_se_px: float
-    flights: list[str]
+class MountCreateBody(BaseModel):
+    run_id: uuid.UUID
     run_token: str
+    name: str = Field(min_length=1, max_length=64)
+    effective_from: date
+
+
+class MountUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    effective_from: date | None = None
+
+
+class FlightMountBody(BaseModel):
+    profile_id: uuid.UUID | None = None
 
 
 DOWNLOAD_TICKET_SECONDS = 300
@@ -112,7 +121,7 @@ def _worker_state(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _job_out(job: PushbroomJob, owner: str | None = None) -> dict[str, Any]:
+def _job_out(job: PushbroomJob, owner: str | None = None, queue_position: int | None = None) -> dict[str, Any]:
     return {
         "id": str(job.id),
         "seq": job.seq,
@@ -135,14 +144,24 @@ def _job_out(job: PushbroomJob, owner: str | None = None) -> dict[str, Any]:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         "has_preview": svc.preview_png(job) is not None,
+        "queue_position": queue_position,
     }
 
 
-def _owner_name(db: Session, job: PushbroomJob) -> str | None:
-    if job.created_by is None:
+def _username(db: Session, user_id: int | None) -> str | None:
+    if user_id is None:
         return None
-    row = db.get(User, job.created_by)
+    row = db.get(User, user_id)
     return row.username if row else None
+
+
+def _owner_name(db: Session, job: PushbroomJob) -> str | None:
+    return _username(db, job.created_by)
+
+
+def _out(db: Session, job: PushbroomJob) -> dict[str, Any]:
+    position = svc.queue_positions(svc.active_jobs(db)).get(job.id) if job.status == "queued" else None
+    return _job_out(job, _owner_name(db, job), position)
 
 
 def _owned(db: Session, job_id: uuid.UUID, user: User) -> PushbroomJob:
@@ -162,62 +181,143 @@ def status(
     return {"enabled": True, **_worker_state(settings)}
 
 
-@router.get("/calibration")
-def get_calibration(
-    db: Session = Depends(get_db),
-    _settings: Settings = Depends(require_enabled),
-    _user: User = Depends(require_roles("admin")),
-) -> dict[str, Any]:
-    return calibration.public_state(db, calibration.latest_calibration(db))
-
-
-@router.post("/calibration/run")
-def run_calibration(
-    body: CalibrationRunBody,
-    settings: Settings = Depends(require_enabled),
-    _user: User = Depends(require_roles("admin")),
-) -> dict[str, Any]:
-    input_root, _ = svc.roots_for(_user, settings, admin=True)
+def _calibration_dirs(user: User, settings: Settings, raw_dirs: list[str]) -> list[str]:
+    input_root, _ = svc.roots_for(user, settings, admin=True)
     dirs: list[str] = []
-    for raw in body.input_dirs:
+    for raw in raw_dirs:
         inp = svc.assert_input_allowed(raw, input_root, settings)
         check = quick_check(inp)
         if not check.ok:
             raise HTTPException(400, {"message": f"{inp.name} 核对未通过", "check": check.as_dict()})
         dirs.append(str(inp))
-    return calibration.run_calibrate(settings, dirs)
+    return dirs
 
 
-@router.post("/calibration")
-def apply_calibration(
-    body: CalibrationApplyBody,
+@router.post("/calibration/runs")
+def start_calibration(
+    body: CalibrationRunBody,
     db: Session = Depends(get_db),
     settings: Settings = Depends(require_enabled),
     user: User = Depends(require_roles("admin")),
 ) -> dict[str, Any]:
-    row = calibration.apply_calibration(db, settings, user, body.model_dump())
-    return calibration.public_state(db, row)
+    row = calibration.start_run(db, settings, user, _calibration_dirs(user, settings, body.input_dirs))
+    return calibration.run_out(settings, row, user.username)
+
+
+@router.get("/calibration/runs")
+def list_calibration_runs(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(require_enabled),
+    _user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    rows = calibration.list_runs(db)
+    return {"items": [calibration.run_out(settings, r, _username(db, r.created_by)) for r in rows]}
+
+
+@router.get("/calibration/runs/{run_id}")
+def get_calibration_run(
+    run_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(require_enabled),
+    _user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    row = calibration.get_run(db, run_id)
+    return calibration.run_out(settings, row, _username(db, row.created_by))
+
+
+@router.get("/mounts")
+def list_mounts(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    input_root, _ = svc.roots_for(user, settings, admin=True)
+    checks = [quick_check(p) for p in find_flights(input_root)]
+    pairs = [(c.name, c.flight.get("started_at")) for c in checks if c.ok]
+    profiles = mounts.load_profiles(db)
+    counts = mounts.count_matches(profiles, mounts.load_overrides(db), pairs)
+    items = [mounts.profile_out(p, counts.get(str(p.id), 0), _username(db, p.created_by)) for p in profiles]
+    return {"items": items, "builtin": dict(mounts.BUILTIN)}
+
+
+@router.post("/mounts")
+def create_mount(
+    body: MountCreateBody,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    row = mounts.create_profile(
+        db,
+        settings,
+        user,
+        run_id=body.run_id,
+        run_token=body.run_token,
+        name=body.name,
+        effective_from=body.effective_from,
+    )
+    return mounts.profile_out(row, 0, user.username)
+
+
+@router.patch("/mounts/{profile_id}")
+def update_mount(
+    profile_id: uuid.UUID,
+    body: MountUpdateBody,
+    db: Session = Depends(get_db),
+    _settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    row = mounts.update_profile(db, user, profile_id, name=body.name, effective_from=body.effective_from)
+    return mounts.profile_out(row, 0, _username(db, row.created_by))
+
+
+@router.delete("/mounts/{profile_id}")
+def delete_mount(
+    profile_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    mounts.delete_profile(db, user, profile_id)
+    return {"ok": True}
+
+
+@router.put("/flights/{flight_name}/mount")
+def set_flight_mount(
+    flight_name: str,
+    body: FlightMountBody,
+    db: Session = Depends(get_db),
+    _settings: Settings = Depends(require_enabled),
+    user: User = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    mounts.set_override(db, user, flight_name, body.profile_id)
+    return {"ok": True}
 
 
 @router.get("/flights")
 def flights(
+    db: Session = Depends(get_db),
     settings: Settings = Depends(require_enabled),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
-    input_root, output_root = svc.roots_for(user, settings, admin=is_admin(user))
-    items = [quick_check(p).as_dict() for p in find_flights(input_root)]
+    admin = is_admin(user)
+    input_root, output_root = svc.roots_for(user, settings, admin=admin)
+    checks = [quick_check(p) for p in find_flights(input_root)]
+    items = svc.flight_items(db, checks, owner_id=None if admin else user.id)
     return {"input_root": input_root, "output_root": output_root, "items": items}
 
 
 @router.post("/check")
 def check(
     body: CheckBody,
+    db: Session = Depends(get_db),
     settings: Settings = Depends(require_enabled),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
-    input_root, _ = svc.roots_for(user, settings, admin=is_admin(user))
+    admin = is_admin(user)
+    input_root, _ = svc.roots_for(user, settings, admin=admin)
     inp = svc.assert_input_allowed(body.input_dir, input_root, settings)
-    return quick_check(inp).as_dict()
+    return svc.flight_items(db, [quick_check(inp)], owner_id=None if admin else user.id)[0]
 
 
 @router.post("/jobs")
@@ -229,7 +329,7 @@ def create_job(
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
     if body.params.along_offset_m is not None or body.params.boresight_px is not None:
-        raise HTTPException(400, "安装参数由相机标定决定，不能在任务里填写")
+        raise HTTPException(400, "安装参数由安装配置决定，不能在任务里填写")
     job = svc.create_job(
         db,
         settings,
@@ -241,7 +341,7 @@ def create_job(
         params=body.params.model_dump(exclude_none=True),
     )
     record_audit(db, user.id, "pushbroom.create", {"job_id": str(job.id), "seq": job.seq, "input_dir": job.input_dir})
-    return _job_out(job, user.username)
+    return _out(db, job)
 
 
 @router.get("/jobs")
@@ -249,17 +349,22 @@ def list_jobs(
     page: int = 1,
     page_size: int = 20,
     status: str | None = None,
+    input_dir: str | None = None,
     db: Session = Depends(get_db),
     _settings: Settings = Depends(require_enabled),
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
     owner_id = None if is_admin(user) else user.id
-    rows, total = svc.page_jobs(db, page, page_size, owner_id=owner_id, status=status)
-    names: dict[int, str] = {}
+    resolved = str(Path(input_dir).resolve()) if input_dir else None
+    rows, total = svc.page_jobs(db, page, page_size, owner_id=owner_id, status=status, input_dir=resolved)
+    positions = svc.queue_positions(svc.active_jobs(db))
+    names: dict[int, str | None] = {}
     for row in rows:
         if row.created_by is not None and row.created_by not in names:
-            names[row.created_by] = _owner_name(db, row) or ""
-    items = [_job_out(r, names.get(r.created_by) if r.created_by is not None else None) for r in rows]
+            names[row.created_by] = _owner_name(db, row)
+    items = [
+        _job_out(r, names.get(r.created_by) if r.created_by is not None else None, positions.get(r.id)) for r in rows
+    ]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -271,7 +376,7 @@ def get_job(
     user: User = Depends(require_roles("executor", "admin")),
 ) -> dict[str, Any]:
     job = _owned(db, job_id, user)
-    out = _job_out(job, _owner_name(db, job))
+    out = _out(db, job)
     out["calibration_warning"] = svc.calibration_warning(job.output_dir)
     return out
 
@@ -288,7 +393,7 @@ def cancel_job(
     online = _worker_state(settings)["worker_online"]
     job = svc.cancel_job(db, mq, job, worker_online=online is not False)
     record_audit(db, user.id, "pushbroom.cancel", {"job_id": str(job.id), "seq": job.seq})
-    return _job_out(job, _owner_name(db, job))
+    return _out(db, job)
 
 
 @router.post("/jobs/{job_id}/retry")
@@ -302,7 +407,7 @@ def retry_job(
     job = _owned(db, job_id, user)
     job = svc.retry_job(db, mq, job, username=user.username)
     record_audit(db, user.id, "pushbroom.retry", {"job_id": str(job.id), "seq": job.seq, "run_attempt": job.run_attempt})
-    return _job_out(job, _owner_name(db, job))
+    return _out(db, job)
 
 
 @router.delete("/jobs/{job_id}")
