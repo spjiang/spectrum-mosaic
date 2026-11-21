@@ -51,6 +51,12 @@ def test_good_flight_passes_and_reports_layout(tmp_path):
     assert res.flight["wavelength_min"] == 400.0
 
 
+def test_flight_start_comes_from_first_gps_record(tmp_path):
+    result = quick_check(_flight(tmp_path))
+    # 第一条定位 UnixTime = 100
+    assert result.flight["started_at"] == "1970-01-01T00:01:40+00:00"
+
+
 def test_multiline_braces_are_joined():
     hdr = parse_envi_header("ENVI\nwavelength = {1,\n2,\n3}\nsamples = 5\n")
     assert hdr["wavelength"].replace(" ", "") == "{1,2,3}"

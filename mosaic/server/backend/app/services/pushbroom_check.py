@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -188,7 +189,8 @@ def _check_gps(path: Path, result: FlightCheck) -> None:
     except (ValueError, IndexError):
         result.errors.append(f"{GPS_NAME} 的 UnixTime 列不是整数")
         return
-    result.flight.update(gps_records=len(records), duration_s=max(0, t1 - t0))
+    started = datetime.fromtimestamp(t0, timezone.utc).isoformat() if t0 > 0 else None
+    result.flight.update(gps_records=len(records), duration_s=max(0, t1 - t0), started_at=started)
 
 
 def quick_check(input_dir: str | Path) -> FlightCheck:
