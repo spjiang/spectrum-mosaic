@@ -152,10 +152,8 @@ export function canEditSettings(roles: string[]): boolean {
   return canConfigure(roles);
 }
 
-export function homePath(roles: string[]): string {
-  if (canExecute(roles)) return "/execute";
-  if (canConfigure(roles)) return "/profiles";
-  return "/jobs";
+export function homePath(_roles: string[]): string {
+  return "/";
 }
 
 export function rolesFromToken(token: string | null): string[] {

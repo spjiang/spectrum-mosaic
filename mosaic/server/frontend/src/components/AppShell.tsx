@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { Layout, Menu, Progress, Button, Tooltip, Dropdown, Tag, Modal, Typography } from "antd";
+import { Suspense, useMemo, useState, type ReactNode } from "react";
+import { Layout, Menu, Progress, Button, Tooltip, Dropdown, Tag, Modal, Typography, Spin } from "antd";
 import type { MenuProps } from "antd";
 import {
   PlayCircleOutlined,
@@ -29,6 +29,7 @@ import {
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
 import { JobsProvider, useJobs } from "../jobsContext";
+import HomePage from "../pages/Home";
 import ExecutePage from "../pages/Execute";
 import ProfilesListPage from "../pages/ProfilesList";
 import ProfileEditPage from "../pages/ProfileEdit";
@@ -67,6 +68,7 @@ import { formatNo } from "../ids";
 const { Sider, Header, Content } = Layout;
 
 const TITLE: Record<string, string> = {
+  home: "首页",
   execute: "新建处理",
   incremental: "测区管理",
   pushbroom_workbench: "推扫拼图",
@@ -128,11 +130,23 @@ function Guard({ allow, children }: { allow: boolean; children: React.ReactNode 
   return <>{children}</>;
 }
 
+function FeatureLoading() {
+  return (
+    <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
+      <Spin />
+    </div>
+  );
+}
+
 /** 推扫菜单取决于后端开关，开关读到之前不跳转也不渲染。 */
 function FeatureGuard({ allow, children }: { allow: boolean; children: React.ReactNode }) {
   const { ready } = useRbac();
-  if (!ready) return null;
-  return <Guard allow={allow}>{children}</Guard>;
+  if (!ready) return <FeatureLoading />;
+  return (
+    <Suspense fallback={<FeatureLoading />}>
+      <Guard allow={allow}>{children}</Guard>
+    </Suspense>
+  );
 }
 
 /** 旧的推扫记录地址：带上 ?job= 跳到工作台，工作台按任务找到架次。 */
@@ -163,7 +177,8 @@ function AppShellBody({
   const visibleMenus = useMemo(() => menusForRoles(roles, mapping, features), [roles, mapping, features]);
   const canMenu = (id: string) => visibleMenus.some((m) => m.key === id);
 
-  const top = loc.pathname.split("/")[1] || "execute";
+  const onHome = loc.pathname === "/";
+  const top = onHome ? "home" : loc.pathname.split("/")[1] || "home";
   // 推扫：/pushbroom 是工作台，/pushbroom/mounts 是安装配置
   const key = top === "pushbroom" ? (loc.pathname.split("/")[2] === "mounts" ? "pushbroom_mounts" : "pushbroom_workbench") : top;
   const pageTitle =
@@ -230,7 +245,7 @@ function AppShellBody({
         width={248}
         collapsedWidth={80}
       >
-        <div className={`mosaic-brand${collapsed ? " is-collapsed" : ""}`}>
+        <Link to="/" className={`mosaic-brand${collapsed ? " is-collapsed" : ""}`}>
           <BrandMark className="mosaic-brand-mark" size={collapsed ? 40 : 44} />
           {!collapsed && (
             <div className="mosaic-brand-copy">
@@ -238,7 +253,7 @@ function AppShellBody({
               <span className="mosaic-brand-sub">{PRODUCT.tagline}</span>
             </div>
           )}
-        </div>
+        </Link>
         <Menu
           className="mosaic-sider-menu"
           mode="inline"
@@ -308,6 +323,7 @@ function AppShellBody({
         </Header>
         <Content className="mosaic-content">
           <Routes>
+            <Route path="/" element={<HomePage />} />
             <Route path="/execute" element={<ExecutePage />} />
             <Route
               path="/incremental"

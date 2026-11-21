@@ -15,7 +15,7 @@ import {
   jobMountText,
 } from "../labels";
 
-export default function JobTabs({ job }: { job: PushbroomJob }) {
+export default function JobTabs({ job, defaultActiveKey = "files" }: { job: PushbroomJob; defaultActiveKey?: string }) {
   const [files, setFiles] = useState<PushbroomFile[]>([]);
   const [logs, setLogs] = useState("");
   const logRef = useRef<HTMLPreElement>(null);
@@ -58,6 +58,7 @@ export default function JobTabs({ job }: { job: PushbroomJob }) {
 
   return (
     <Tabs
+      defaultActiveKey={defaultActiveKey}
       items={[
         {
           key: "files",

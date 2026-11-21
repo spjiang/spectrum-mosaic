@@ -142,7 +142,8 @@ export function jobMountText(p: PushbroomParams): string {
 }
 
 /** 历次任务列表里的简短配置名 */
-export function jobMountName(p: PushbroomParams): string {
+export function jobMountName(p: PushbroomParams | undefined): string {
+  if (!p) return "—";
   const m = p.mount_profile;
   if (!m) return p.along_offset_m != null ? "旧版标定" : "内置";
   return m.source === "builtin" ? "内置" : m.name || "—";

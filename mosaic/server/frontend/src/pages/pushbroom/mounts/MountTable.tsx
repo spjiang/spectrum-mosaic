@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { Button, Card, Form, Input, Modal, Space, Table, Typography, message } from "antd";
+import { useMemo, useState } from "react";
+import { Button, Flex, Form, Input, Modal, Space, Table, Typography, message } from "antd";
 import { api, type PushbroomMount } from "../../../api";
 import { formatJobDateTime } from "../../../jobTime";
 import { meters, pixels } from "../labels";
+import { matchMountKeyword, mountsTablePagination } from "./listTools";
 
 type EditValues = { name: string; effective_from: string };
 
@@ -20,7 +21,19 @@ export default function MountTable({
   const [editing, setEditing] = useState<PushbroomMount | null>(null);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<EditValues>();
-  const rows = [...mounts].sort((a, b) => b.effective_from.localeCompare(a.effective_from));
+  const [keyword, setKeyword] = useState("");
+  const [fromDay, setFromDay] = useState("");
+  const [toDay, setToDay] = useState("");
+
+  const rows = useMemo(() => {
+    const sorted = [...mounts].sort((a, b) => b.effective_from.localeCompare(a.effective_from));
+    return sorted.filter((m) => {
+      if (!matchMountKeyword(m.name, keyword) && !matchMountKeyword(m.flights.join(" "), keyword)) return false;
+      if (fromDay && m.effective_from < fromDay) return false;
+      if (toDay && m.effective_from > toDay) return false;
+      return true;
+    });
+  }, [fromDay, keyword, mounts, toDay]);
 
   async function save() {
     if (!editing) return;
@@ -58,34 +71,68 @@ export default function MountTable({
   }
 
   return (
-    <Card className="mosaic-panel" title="安装配置">
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        每个架次按飞行日期，用生效日期不晚于它的最近一组。比所有配置都早的架次用内置值
-        {builtin ? `（沿航向 ${meters(builtin.along_offset_m)}，狭缝中心 ${pixels(builtin.boresight_px)}）` : ""}。
-        拆装或更换相机后，在下面用新架次标定，再保存成一组新配置。
+    <div className="pb-mounts-panel">
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
+        配置保存在数据库。没有匹配到任何配置时，使用内置值
+        {builtin ? `（沿航向 ${meters(builtin.along_offset_m)}，狭缝中心 ${pixels(builtin.boresight_px)}）` : ""}
+        。新建请打开「新建配置」页签。
       </Typography.Paragraph>
+      <Flex className="pb-mounts-toolbar" gap={8} wrap align="center">
+        <Input
+          allowClear
+          placeholder="搜索名称或标定架次"
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          style={{ width: 220 }}
+        />
+        <Typography.Text type="secondary">生效日期</Typography.Text>
+        <Input type="date" value={fromDay} onChange={(e) => setFromDay(e.target.value)} style={{ width: 150 }} />
+        <Typography.Text type="secondary">至</Typography.Text>
+        <Input type="date" value={toDay} onChange={(e) => setToDay(e.target.value)} style={{ width: 150 }} />
+        {(keyword || fromDay || toDay) && (
+          <Button
+            type="link"
+            onClick={() => {
+              setKeyword("");
+              setFromDay("");
+              setToDay("");
+            }}
+          >
+            清空筛选
+          </Button>
+        )}
+      </Flex>
       <Table
+        className="pb-mounts-table"
         rowKey="id"
         size="small"
         loading={loading}
         dataSource={rows}
-        pagination={false}
-        locale={{ emptyText: "还没有安装配置，所有架次都用内置值" }}
+        pagination={mountsTablePagination(rows.length)}
+        tableLayout="auto"
+        locale={{ emptyText: mounts.length ? "没有符合筛选条件的配置" : "还没有安装配置" }}
         columns={[
-          { title: "名称", dataIndex: "name" },
-          { title: "生效日期", dataIndex: "effective_from", width: 120 },
-          { title: "沿航向偏移", width: 150, render: (_: unknown, m: PushbroomMount) => meters(m.along_offset_m, m.along_se_m) },
-          { title: "狭缝中心偏置", width: 160, render: (_: unknown, m: PushbroomMount) => pixels(m.boresight_px, m.boresight_se_px) },
-          { title: "标定架次", render: (_: unknown, m: PushbroomMount) => m.flights.join("、") || "—" },
+          { title: "名称", dataIndex: "name", ellipsis: true },
+          { title: "生效日期", dataIndex: "effective_from" },
           {
-            title: "保存",
-            width: 200,
-            render: (_: unknown, m: PushbroomMount) => `${m.created_by || "管理员"} · ${formatJobDateTime(m.created_at).slice(0, 16)}`,
+            title: "安装参数",
+            render: (_: unknown, m: PushbroomMount) =>
+              `${meters(m.along_offset_m, m.along_se_m)} · ${pixels(m.boresight_px, m.boresight_se_px)}`,
           },
-          { title: "对到的架次", dataIndex: "matched", width: 100 },
+          {
+            title: "标定来源架次",
+            ellipsis: { showTitle: true },
+            onCell: () => ({ className: "pb-mounts-cell-wrap" }),
+            render: (_: unknown, m: PushbroomMount) => m.flights.join("、") || "—",
+          },
+          { title: "自动匹配", dataIndex: "matched", align: "center" as const },
+          {
+            title: "保存时间",
+            render: (_: unknown, m: PushbroomMount) => formatJobDateTime(m.created_at).slice(0, 16),
+          },
           {
             title: "操作",
-            width: 170,
+            onCell: () => ({ style: { whiteSpace: "nowrap" } }),
             render: (_: unknown, m: PushbroomMount) => (
               <Space size={0}>
                 <Button
@@ -125,6 +172,6 @@ export default function MountTable({
           </Form.Item>
         </Form>
       </Modal>
-    </Card>
+    </div>
   );
 }

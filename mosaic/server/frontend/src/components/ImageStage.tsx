@@ -359,6 +359,14 @@ export function ImageInspectModal({
       destroyOnClose
       className="image-inspect-modal"
       styles={{ body: { paddingTop: 12 } }}
+      modalRender={(node) => (
+        <div
+          onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          {node}
+        </div>
+      )}
     >
       <ImageStage
         image={image}

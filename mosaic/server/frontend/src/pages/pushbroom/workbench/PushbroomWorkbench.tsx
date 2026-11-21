@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Alert, Card, Empty, message } from "antd";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Alert, Card, Typography, message } from "antd";
 import { api, type PushbroomFlightItem, type PushbroomJob, type PushbroomStatus } from "../../../api";
 import { useAuth } from "../../../auth";
 import { PB_ACTIVE } from "../labels";
-import FlightHeader from "./FlightHeader";
 import FlightList from "./FlightList";
-import JobHistory from "./JobHistory";
-import JobMain from "./JobMain";
-import JobTabs from "./JobTabs";
+import FlightJobsModal from "./FlightJobsModal";
+import PushbroomJobDetailModal from "./PushbroomJobDetailModal";
+import PushbroomJobViewModal from "./PushbroomJobViewModal";
 
 const POLL_MS = 3000;
 
@@ -16,42 +15,40 @@ function baseName(path: string) {
   return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 
+/** 推扫工作台：架次与任务表格 + 操作列弹窗（同框幅拼图） */
 export default function PushbroomWorkbenchPage() {
   const { roles } = useAuth();
   const admin = roles.includes("admin");
-  const [params, setParams] = useSearchParams();
-  const flightName = params.get("flight");
-  const jobParam = params.get("job");
+  const loc = useLocation();
+  const navigate = useNavigate();
+  const flightName = useMemo(() => new URLSearchParams(loc.search).get("flight"), [loc.search]);
+  const jobParam = useMemo(() => new URLSearchParams(loc.search).get("job"), [loc.search]);
   const [status, setStatus] = useState<PushbroomStatus | null>(null);
   const [flights, setFlights] = useState<PushbroomFlightItem[]>([]);
   const [extra, setExtra] = useState<PushbroomFlightItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [jobs, setJobs] = useState<PushbroomJob[]>([]);
-  const [detail, setDetail] = useState<PushbroomJob | null>(null);
+  const [detailJobId, setDetailJobId] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<string>("files");
+  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
 
   const all = useMemo(
     () => [...flights, ...extra.filter((e) => !flights.some((f) => f.input_dir === e.input_dir))],
     [flights, extra],
   );
   const flight = all.find((f) => f.name === flightName && f.ok) ?? null;
-  const selectedId = jobs.some((j) => j.id === jobParam) ? jobParam : (jobs[0]?.id ?? null);
-  const shown = (detail?.id === selectedId ? detail : jobs.find((j) => j.id === selectedId)) ?? null;
 
   const select = useCallback(
     (next: { flight?: string | null; job?: string | null }) => {
-      setParams(
-        (cur) => {
-          const q = new URLSearchParams(cur);
-          for (const [key, value] of Object.entries(next)) {
-            if (value) q.set(key, value);
-            else q.delete(key);
-          }
-          return q;
-        },
-        { replace: true },
-      );
+      const q = new URLSearchParams(loc.search);
+      for (const [key, value] of Object.entries(next)) {
+        if (value) q.set(key, value);
+        else q.delete(key);
+      }
+      const search = q.toString();
+      navigate({ pathname: loc.pathname, search }, { replace: true });
     },
-    [setParams],
+    [loc.pathname, loc.search, navigate],
   );
 
   const loadFlights = useCallback(async (quiet = false) => {
@@ -76,34 +73,19 @@ export default function PushbroomWorkbenchPage() {
     setJobs(data.items);
   }, [flight?.input_dir]);
 
-  const loadDetail = useCallback(async () => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
-    }
-    setDetail(await api.pushbroomJob(selectedId));
-  }, [selectedId]);
-
   const refresh = useCallback(() => {
     loadFlights(true).catch(() => undefined);
     loadJobs().catch(() => undefined);
-    loadDetail().catch(() => undefined);
-  }, [loadFlights, loadJobs, loadDetail]);
+  }, [loadFlights, loadJobs]);
 
   useEffect(() => {
     loadFlights().catch(() => undefined);
   }, [loadFlights]);
 
   useEffect(() => {
-    setDetail(null);
     loadJobs().catch((err) => message.error((err as Error).message || String(err)));
   }, [loadJobs]);
 
-  useEffect(() => {
-    loadDetail().catch(() => undefined);
-  }, [loadDetail]);
-
-  // 只有任务链接时，按任务找到架次补进地址
   useEffect(() => {
     if (flightName || !jobParam) return;
     api
@@ -121,8 +103,8 @@ export default function PushbroomWorkbenchPage() {
   }, [live, refresh]);
 
   function onSubmitted(job: PushbroomJob) {
-    setJobs((cur) => [job, ...cur.filter((j) => j.id !== job.id)]);
-    select({ job: job.id });
+    const name = baseName(job.input_dir);
+    select({ flight: name, job: job.id });
     loadFlights(true).catch(() => undefined);
   }
 
@@ -131,8 +113,13 @@ export default function PushbroomWorkbenchPage() {
     select({ flight: item.name, job: null });
   }
 
+  function openDetail(id: string, tab = "params") {
+    setDetailTab(tab);
+    setDetailJobId(id);
+  }
+
   return (
-    <div className="pb-wb">
+    <div className="pb-wb pb-wb--stack">
       {status?.worker_online === false && (
         <Alert
           type="warning"
@@ -141,48 +128,52 @@ export default function PushbroomWorkbenchPage() {
           description="任务可以提交，会在队列里等待。请联系管理员启动推扫计算服务。"
         />
       )}
-      <div className="pb-wb-body">
-        <aside className="pb-wb-side mosaic-panel">
-          <FlightList
-            items={all}
-            selected={flight?.name ?? null}
-            loading={loading}
-            onSelect={(name) => select({ flight: name, job: null })}
-            onReload={() => loadFlights().catch(() => undefined)}
-            onChecked={onChecked}
-          />
-        </aside>
-        <section className="pb-wb-main">
-          {!flight ? (
-            <Card className="mosaic-panel pb-wb-empty">
-              <Empty description="在左边选一个架次" />
-            </Card>
-          ) : (
-            <>
-              <FlightHeader
-                key={flight.input_dir}
-                flight={flight}
-                admin={admin}
-                onSubmitted={onSubmitted}
-                onMountChanged={() => loadFlights(true).catch(() => undefined)}
-              />
-              <div className="pb-wb-mid">
-                <Card className="mosaic-panel pb-wb-stage">
-                  <JobMain job={shown} admin={admin} flightName={flight.name} onChanged={refresh} />
-                </Card>
-                <Card className="mosaic-panel pb-wb-history" title={`历次任务（${jobs.length}）`}>
-                  <JobHistory jobs={jobs} selectedId={selectedId} onSelect={(id) => select({ job: id })} onChanged={refresh} />
-                </Card>
-              </div>
-              {shown && (
-                <Card className="mosaic-panel">
-                  <JobTabs job={shown} />
-                </Card>
-              )}
-            </>
-          )}
-        </section>
-      </div>
+      <Card className="mosaic-panel" title="架次列表">
+        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+          点架次名称、单击表格行或「操作 → 任务列表」打开居中弹窗查看历次任务；提交拼图、改选配置等在操作菜单中。
+        </Typography.Paragraph>
+        <FlightList
+          items={all}
+          selected={flight?.name ?? null}
+          loading={loading}
+          admin={admin}
+          onSelect={(name) => select({ flight: name, job: null })}
+          onReload={() => loadFlights().catch(() => undefined)}
+          onChecked={onChecked}
+          onSubmitted={onSubmitted}
+          onMountChanged={() => loadFlights(true).catch(() => undefined)}
+        />
+      </Card>
+
+      {flightName ? (
+        <FlightJobsModal
+          flightName={flightName}
+          flight={flight}
+          loadingFlights={loading}
+          jobs={jobs}
+          open
+          onClose={() => select({ flight: null, job: null })}
+          onDetail={(id) => openDetail(id, "params")}
+          onPreview={(id) => setPreviewJobId(id)}
+          onDetailFiles={(id) => openDetail(id, "files")}
+          onChanged={refresh}
+        />
+      ) : null}
+
+      <PushbroomJobDetailModal
+        jobId={detailJobId}
+        open={Boolean(detailJobId)}
+        defaultTab={detailTab}
+        onClose={() => setDetailJobId(null)}
+      />
+      <PushbroomJobViewModal
+        jobId={previewJobId}
+        flightName={flight?.name ?? ""}
+        admin={admin}
+        open={Boolean(previewJobId)}
+        onClose={() => setPreviewJobId(null)}
+        onChanged={refresh}
+      />
     </div>
   );
 }
