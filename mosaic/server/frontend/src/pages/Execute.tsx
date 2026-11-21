@@ -156,6 +156,8 @@ export default function ExecutePage() {
   const [gsdSamples, setGsdSamples] = useState(0);
   const [gsdNote, setGsdNote] = useState("");
   const [orthoScale, setOrthoScale] = useState(1);
+  // 只有相对航高的相机：提交时的分辨率只是预估，空三后按实际离地高度确定
+  const [gsdAfterAt, setGsdAfterAt] = useState(false);
   const [outputDir, setOutputDir] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [memoryGb, setMemoryGb] = useState<number | null>(0);
@@ -173,6 +175,9 @@ export default function ExecutePage() {
   const memoryApplied = useRef(false);
 
   const selected = useMemo(() => profiles.find((p) => p.id === profileId), [profiles, profileId]);
+  const cameraSource: string | null = selected?.values?.camera_source || null;
+  const pixelSizeUm: number | null = asPositiveNumber(selected?.values?.pixel_size_um) || null;
+  const [cameraNote, setCameraNote] = useState("");
 
   useEffect(() => {
     Promise.all([api.paramDefs(), api.profiles()])
@@ -313,6 +318,8 @@ export default function ExecutePage() {
       setScene(null);
       setSceneLoading(false);
       setGsdSamples(0);
+      setGsdAfterAt(false);
+      setCameraNote("");
       setGsdNote(dir ? "输入目录须位于 /data 下" : "");
       return;
     }
@@ -320,12 +327,20 @@ export default function ExecutePage() {
     const timer = window.setTimeout(() => {
       setSceneLoading(true);
       api
-        .nativeGsd(dir)
+        .nativeGsd(dir, { source: cameraSource, pixelSizeUm })
         .then((r) => {
           if (cancelled) return;
           setNativeGsd(r.native_gsd_m);
           setGsdSamples(r.n_samples);
+          setGsdAfterAt(Boolean(r.resolution_after_at));
           setGsdNote("");
+          setCameraNote(
+            r.camera_label
+              ? `相机：${r.camera_label}（${r.camera_detected ? "自动识别" : "处理方案指定"}）` +
+                  `，${r.n_color ?? 0} 张 Color` +
+                  ((r.n_ms_bands ?? 0) > 0 ? ` + ${r.n_ms_bands} 个多光谱波段` : "，无多光谱")
+              : "",
+          );
           if (r.width && r.height && r.n_color) {
             setScene({
               width: r.width,
@@ -345,6 +360,8 @@ export default function ExecutePage() {
           setNativeGsd(null);
           setScene(null);
           setGsdSamples(0);
+          setGsdAfterAt(false);
+          setCameraNote("");
           setGsdNote(e.message || "读不出原始分辨率");
         })
         .finally(() => {
@@ -355,7 +372,7 @@ export default function ExecutePage() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [inputDir]);
+  }, [inputDir, cameraSource, pixelSizeUm]);
 
   const summary = selected?.values || {};
   const busy = Boolean(job && ACTIVE.includes(job.status));
@@ -459,6 +476,11 @@ export default function ExecutePage() {
                 value={inputDir}
                 onChange={(e) => setInputDir(e.target.value)}
               />
+              {cameraNote ? (
+                <div style={{ marginTop: 4 }}>
+                  <Typography.Text type="secondary">{cameraNote}</Typography.Text>
+                </div>
+              ) : null}
               <div style={{ marginTop: 10 }}>
                 <span className="title-with-help">
                   <Typography.Text type="secondary">降低分辨率</Typography.Text>
@@ -494,8 +516,8 @@ export default function ExecutePage() {
                         value: scale,
                         label: nativeGsd
                           ? scale === 1
-                            ? `不降低　${nativeGsd.toFixed(4)} m`
-                            : `降低到 1/${scale}　${(nativeGsd * scale).toFixed(4)} m`
+                            ? `不降低　${gsdAfterAt ? "约 " : ""}${nativeGsd.toFixed(4)} m`
+                            : `降低到 1/${scale}　${gsdAfterAt ? "约 " : ""}${(nativeGsd * scale).toFixed(4)} m`
                           : scale === 1
                             ? "不降低"
                             : `降低到 1/${scale}`,
@@ -505,7 +527,9 @@ export default function ExecutePage() {
                     <div style={{ marginTop: 4 }}>
                       <Typography.Text type="secondary">
                         {nativeGsd
-                          ? `原始分辨率 ${nativeGsd.toFixed(4)} m（航高取 ${gsdSamples} 张 Color）。选 1/2、1/4 只放大成果像元，覆盖不缩小。`
+                          ? gsdAfterAt
+                            ? `按相对起飞点航高预估约 ${nativeGsd.toFixed(4)} m。这台相机没有离地高度，空三后按实际离地高度确定，测区比起飞点高时成果会更细。选 1/2、1/4 只放大成果像元，覆盖不缩小。`
+                            : `原始分辨率 ${nativeGsd.toFixed(4)} m（航高取 ${gsdSamples} 张 Color）。选 1/2、1/4 只放大成果像元，覆盖不缩小。`
                           : gsdNote || "填写测区目录后自动读取原始分辨率"}
                       </Typography.Text>
                     </div>
@@ -739,12 +763,14 @@ export default function ExecutePage() {
                       gpu,
                       gpu_memory_gb: gpu === "off" ? 0 : gpuMemoryGb,
                       ...(nativeGsd != null && !summary.grid_reference
-                        ? {
-                            ortho_scale: orthoScale,
-                            native_gsd_m: nativeGsd,
-                            ortho_gsd_m: nativeGsd * orthoScale,
-                            dsm_gsd: nativeGsd * orthoScale * 2,
-                          }
+                        ? gsdAfterAt
+                          ? { ortho_scale: orthoScale }
+                          : {
+                              ortho_scale: orthoScale,
+                              native_gsd_m: nativeGsd,
+                              ortho_gsd_m: nativeGsd * orthoScale,
+                              dsm_gsd: nativeGsd * orthoScale * 2,
+                            }
                         : {}),
                     },
                   });

@@ -127,6 +127,8 @@ cd /Users/jiangshengping/wwwroot/shenzhen/spectrum/algorithm/projects/数据融�
 
 | CLI | Web key |
 | --- | --- |
+| `--camera-source` | `camera_source`（`auto` / `max_ms` / `wayho_rgb`） |
+| `--pixel-size-um` | `pixel_size_um` |
 | `--max-index` | `max_index` |
 | `--max-frames` | `max_frames` |
 | `--min-agl-m` | `min_agl_m` |
@@ -151,6 +153,7 @@ cd /Users/jiangshengping/wwwroot/shenzhen/spectrum/algorithm/projects/数据融�
 | CLI | Web key |
 | --- | --- |
 | `--dsm-gsd` | `dsm_gsd` |
+| `--ortho-scale` | `ortho_scale`（未给 `--dsm-gsd` 时，正射取空三后原始分辨率的 1/2/4 倍） |
 | `--reuse-dsm` | `reuse_dsm` |
 | `--n-layers` | `n_layers` |
 | `--z-margin-m` | `z_margin_m` |

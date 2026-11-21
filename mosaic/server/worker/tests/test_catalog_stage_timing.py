@@ -8,15 +8,16 @@ import pytest
 
 def test_run_sparse_invokes_catalog_done_after_build(monkeypatch, tmp_path: Path):
     from ms_mosaic import runner
+    from ms_mosaic.sources import MAX_MS, SourceScan
 
     inp = tmp_path / "in"
     inp.mkdir()
     cache = tmp_path / "cache"
     order: list[str] = []
 
-    def fake_scan(_root, max_index=None):
+    def fake_scan(_root, **_kwargs):
         order.append("scan")
-        return {}
+        return SourceScan(MAX_MS, True, {})
 
     def fake_usable(shots, **kwargs):
         order.append("usable")
@@ -33,7 +34,7 @@ def test_run_sparse_invokes_catalog_done_after_build(monkeypatch, tmp_path: Path
         block.band_order.return_value = ["Color"]
         return block
 
-    monkeypatch.setattr(runner, "scan_directory", fake_scan)
+    monkeypatch.setattr(runner, "scan_input", fake_scan)
     monkeypatch.setattr(runner, "usable_shots", fake_usable)
     monkeypatch.setattr(runner, "build_block", fake_build)
     monkeypatch.setattr(runner, "_choose_feature_device", lambda log=None: None)

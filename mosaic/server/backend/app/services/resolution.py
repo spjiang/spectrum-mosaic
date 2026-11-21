@@ -1,7 +1,7 @@
 """从航片头读取原始地面分辨率和测区规模，供提交前选择拼图分辨率、估算并发。
 
-GSD = H / f_px（Kraus《Photogrammetry》）。f_px 用标定焦距按像宽缩放，
-与 worker 的 geo.gsd_m 相同：1508.19 px @ 1440 宽。
+GSD = H / f_px（Kraus《Photogrammetry》）。MAX 相机的 f_px 用标定焦距按像宽缩放，
+与 worker 的 geo.gsd_m 相同：1508.19 px @ 1440 宽。Wayho 相机用 XMP 焦距 ÷ 像元尺寸。
 """
 
 from __future__ import annotations
@@ -13,6 +13,16 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from app.config import Settings
+from app.services.camera_sources import (
+    AUTO,
+    SEQ_NAME_RE,
+    SOURCE_LABELS,
+    WAYHO_RGB,
+    detect_source,
+    focal_px_for,
+    normalize_source,
+    tiff_head,
+)
 
 CALIB_WIDTH_PX = 1440.0
 CALIB_FOCAL_PX = 1508.19
@@ -83,6 +93,14 @@ def resolve_input_dir(raw: str, settings: Settings) -> Path:
     return path
 
 
+def _positive_float(raw: object) -> float | None:
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
 def _float_tag(pattern: re.Pattern[str], text: str) -> float | None:
     found = pattern.search(text)
     if found is None:
@@ -116,17 +134,23 @@ def _span_m(lats: list[float], lons: list[float], width: int, height: int, gsd: 
     return east_m + width * gsd, north_m + height * gsd
 
 
-def measure_native_gsd(input_dir: Path, *, sample: int = _SAMPLE) -> dict:
-    """读测区文件名和 Color 文件头。
+def _color_head(path: Path) -> tuple[tuple[int, int] | None, str]:
+    """Color 航片的像幅和可搜 XMP 的文本。JPG 只读前 1 MB；TIF 读文件头标签。"""
+    if path.suffix.lower() in {".tif", ".tiff"}:
+        width, height, xmp, _make = tiff_head(path)
+        return (width, height), xmp
+    blob = path.read_bytes()[:_READ]
+    return jpeg_size(blob), blob.decode("latin1", errors="ignore")
 
-    返回原始分辨率，以及像幅、波段数、航线地面范围。范围用来估算正射像元，
-    不作为交付格网。
-    """
+
+def _list_colors(input_dir: Path, source: str, files: list[Path]) -> tuple[list[Path], set[str]]:
+    """按相机类型挑出 Color 航片与多光谱波段名。"""
+    if source == WAYHO_RGB:
+        # worker 只扫输入目录这一层
+        return [p for p in files if p.parent == input_dir and SEQ_NAME_RE.match(p.name)], set()
     colors: list[Path] = []
     ms_bands: set[str] = set()
-    for path in input_dir.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in files:
         matched = _NAME_RE.match(path.name)
         # 原始 D 和辐射校正 R 都是航片。W 是白板，不进测区统计。
         if matched is None or matched.group("role").upper() == "W":
@@ -135,35 +159,66 @@ def measure_native_gsd(input_dir: Path, *, sample: int = _SAMPLE) -> dict:
             colors.append(path)
         elif matched.group("wl"):
             ms_bands.add(f"{int(matched.group('wl'))}nm")
+    return colors, ms_bands
+
+
+def measure_native_gsd(
+    input_dir: Path,
+    *,
+    sample: int = _SAMPLE,
+    camera_source: str | None = AUTO,
+    pixel_size_um: float | None = None,
+) -> dict:
+    """读测区文件名和 Color 文件头。
+
+    返回原始分辨率，以及像幅、波段数、航线地面范围和识别出的相机类型。范围用来估算
+    正射像元，不作为交付格网。
+    """
+    files = [path for path in input_dir.rglob("*") if path.is_file()]
+    try:
+        source = normalize_source(camera_source)
+        detected = source == AUTO
+        if detected:
+            source = detect_source(files)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    colors, ms_bands = _list_colors(input_dir, source, files)
 
     values: list[float] = []
     width = height = None
     lats: list[float] = []
     lons: list[float] = []
+    focal_px: float | None = None
     for path in _spread(colors, _POS_CAP):
         try:
-            blob = path.read_bytes()[:_READ]
+            size, text = _color_head(path)
         except OSError:
             continue
-        text = blob.decode("latin1", errors="ignore")
-        size = jpeg_size(blob)
         if size is not None and width is None:
             width, height = size
+        if source == WAYHO_RGB and focal_px is None:
+            focal_px = focal_px_for(text, pixel_size_um)
         agl = _float_tag(_AGL_RE, text)
         if size is not None and agl is not None and agl > 1.0 and len(values) < sample:
-            values.append(gsd_m(agl, size[0]))
+            values.append(agl / focal_px if focal_px else gsd_m(agl, size[0]))
         lat = _float_tag(_LAT_RE, text)
         lon = _float_tag(_LON_RE, text)
         if lat is not None and lon is not None:
             lats.append(lat)
             lons.append(lon)
     if not values or width is None or height is None:
-        raise HTTPException(400, "目录里没有带航高的 Color JPG，读不出原始分辨率")
+        kind = "Color TIF" if source == WAYHO_RGB else "Color JPG"
+        raise HTTPException(400, f"目录里没有带航高的 {kind}，读不出原始分辨率")
     values.sort()
     native = values[len(values) // 2]
     span = _span_m(lats, lons, width, height, native)
     bands = ["Color", *sorted(ms_bands, key=lambda name: int(name[:-2]))]
     return {
+        "camera_source": source,
+        "camera_label": SOURCE_LABELS[source],
+        "camera_detected": detected,
+        "focal_px": focal_px,
+        "resolution_after_at": resolution_after_at(source),
         "native_gsd_m": native,
         "n_samples": len(values),
         "n_color_seen": len(colors),
@@ -186,6 +241,15 @@ def measure_native_gsd(input_dir: Path, *, sample: int = _SAMPLE) -> dict:
     }
 
 
+def resolution_after_at(source: str) -> bool:
+    """航片只有相对起飞点航高时，提交时的估计偏粗，分辨率留到空三后定。
+
+    Wayho 的 XMP 航高是相对起飞点的，测区地面比起飞点高时离地高度被高估
+    （rgb1：XMP 124 m，空三后实际约 107 m），提交时锁定会把 1.49 cm 做成 1.92 cm。
+    """
+    return source == WAYHO_RGB
+
+
 def needs_resolution_choice(params: dict, snap: dict) -> bool:
     """提交时要不要按航片写成 DSM/正射 GSD。
 
@@ -205,7 +269,8 @@ def needs_resolution_choice(params: dict, snap: dict) -> bool:
 def apply_resolution_choice(snap: dict, input_dir: str, settings: Settings) -> None:
     """用户选了拼图倍数时，用实测原始分辨率写入 DSM/正射 GSD。
 
-    锁定交付格网时不改，避免下拉把验收格网换掉。
+    锁定交付格网时不改，避免下拉把验收格网换掉。只有相对航高的相机只保留倍数，
+    由 worker 在空三后按实际离地高度和自标定焦距算分辨率。
     """
     if snap.get("grid_reference"):
         return
@@ -218,10 +283,18 @@ def apply_resolution_choice(snap: dict, input_dir: str, settings: Settings) -> N
         return
     if scale not in ORTHO_SCALES:
         raise HTTPException(400, "拼图分辨率只能选 1、2、4 倍原始分辨率")
-    info = measure_native_gsd(resolve_input_dir(input_dir, settings))
+    info = measure_native_gsd(
+        resolve_input_dir(input_dir, settings),
+        camera_source=snap.get("camera_source"),
+        pixel_size_um=_positive_float(snap.get("pixel_size_um")),
+    )
+    snap["ortho_scale"] = scale
+    if info["resolution_after_at"]:
+        for key in ("native_gsd_m", "ortho_gsd_m", "dsm_gsd"):
+            snap.pop(key, None)
+        return
     native = float(info["native_gsd_m"])
     ortho = native * scale
-    snap["ortho_scale"] = scale
     snap["native_gsd_m"] = native
     snap["ortho_gsd_m"] = ortho
     snap["dsm_gsd"] = ortho * 2.0

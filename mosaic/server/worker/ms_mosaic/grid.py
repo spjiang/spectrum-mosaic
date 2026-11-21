@@ -152,9 +152,10 @@ def estimate_native_gsd(camera, poses: dict, ground_z: float) -> float:
     return height / focal
 
 
-def estimate_dsm_gsd(camera, poses: dict, ground_z: float) -> float:
-    """DSM 取原生 GSD 的 2 倍，正射再 refine 回一半。"""
-    return 2.0 * estimate_native_gsd(camera, poses, ground_z)
+def estimate_dsm_gsd(camera, poses: dict, ground_z: float, scale: int | None = None) -> float:
+    """DSM 取原生 GSD 的 2 倍，正射再 refine 回一半。scale 为正射相对原生 GSD 的倍数。"""
+    factor = scale if scale and scale > 0 else 1
+    return 2.0 * factor * estimate_native_gsd(camera, poses, ground_z)
 
 
 def delivery_match_factor(delivery_gsd: float, match_gsd: float) -> int:

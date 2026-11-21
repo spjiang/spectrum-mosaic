@@ -207,6 +207,7 @@ def run_mosaic(
     max_frames: int | None = None,
     max_index: int | None = None,
     dsm_gsd: float | None = None,
+    ortho_scale: int | None = None,
     workers: int | None = None,
     workers_at: int | None = None,
     max_features: int | None = None,
@@ -227,6 +228,8 @@ def run_mosaic(
     max_tilt_deg: float | None = None,
     drop_white_panel: bool = True,
     require_pos: bool = True,
+    camera_source: str | None = None,
+    pixel_size_um: float | None = None,
     sigma_xy_m: float | None = None,
     sigma_z_m: float | None = None,
     sigma_attitude_deg: float | None = None,
@@ -336,6 +339,8 @@ def run_mosaic(
         calibrate_intrinsics=calibrate_intrinsics,
         ba_stage3=ba_stage3,
         at_bands=at_bands,
+        camera_source=camera_source,
+        pixel_size_um=pixel_size_um,
         log=log,
         on_catalog_done=finish_catalog if report_catalog else None,
     )
@@ -394,8 +399,12 @@ def run_mosaic(
         )
     else:
         if dsm_gsd is None:
-            dsm_gsd = estimate_dsm_gsd(sparse.camera, dense_poses, ground_z)
-            log(f"DSM GSD 由航高/焦距估计为 {dsm_gsd:.6f} m（正射为其一半）")
+            # 只有相对航高的相机（Wayho）提交时不锁分辨率，空三后按实际离地高度和自标定焦距定
+            dsm_gsd = estimate_dsm_gsd(sparse.camera, dense_poses, ground_z, ortho_scale)
+            log(
+                f"DSM GSD 由空三后离地高度/焦距估计为 {dsm_gsd:.6f} m"
+                f"（{ortho_scale or 1} 倍原始分辨率，正射为其一半）"
+            )
         # 范围用 POS 足迹和提交时参考面，与冻结 GSD 同一原则。空三后外方位
         # 微漂会让足迹并集差 1～6 个像元，比对报告就变成「范围/宽高未达标」。
         pos_cams, pos_poses = pos_grid_views(block, dense_poses)
@@ -901,4 +910,6 @@ def run_mosaic(
     reporter.stage_done("S6_report", time.perf_counter() - t_report)
     payload["status"] = "succeeded"
     payload["completed_stage"] = "S6_report"
+    payload["native_gsd_m"] = float(native)
+    payload["ortho_gsd_m"] = float(dsm_gsd) * ORTHO_OVER_DSM
     return payload

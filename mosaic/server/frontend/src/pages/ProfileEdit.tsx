@@ -25,7 +25,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { PARAM_HELP } from "../paramHelp";
 import { formatDefault, isEmpty, isRequired, paramRemark, validateValues, type ParamDef } from "../paramRules";
-import { PRESET_OPTIONS, RUN_MODE_OPTIONS } from "../presets";
+import { CAMERA_SOURCE_OPTIONS, PRESET_OPTIONS, RUN_MODE_OPTIONS } from "../presets";
 import { STAGE_META, STAGES, type StageId } from "../stages";
 import { downloadJson, profileFilename, serializeProfile } from "../profileExport";
 import { useAuth } from "../auth";
@@ -74,6 +74,13 @@ function FieldEditor({
           style={{ width: "100%" }}
           value={values[d.key] || "full"}
           options={[...RUN_MODE_OPTIONS]}
+          onChange={(v) => setValues({ ...values, [d.key]: v })}
+        />
+      ) : d.key === "camera_source" ? (
+        <Select
+          style={{ width: "100%" }}
+          value={values[d.key] || "auto"}
+          options={[...CAMERA_SOURCE_OPTIONS]}
           onChange={(v) => setValues({ ...values, [d.key]: v })}
         />
       ) : d.key === "preset" ? (

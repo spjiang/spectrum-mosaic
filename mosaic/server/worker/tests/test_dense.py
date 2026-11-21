@@ -82,6 +82,9 @@ def test_estimate_dsm_gsd_from_height_and_focal():
     native = estimate_native_gsd(cam, poses, ground_z)
     assert native == pytest.approx(111.8 / 2100.0, rel=1e-6)
     assert estimate_dsm_gsd(cam, poses, ground_z) == pytest.approx(2.0 * native, rel=1e-9)
+    # 提交时未锁分辨率（Wayho）时按所选倍数放大
+    assert estimate_dsm_gsd(cam, poses, ground_z, 2) == pytest.approx(4.0 * native, rel=1e-9)
+    assert estimate_dsm_gsd(cam, poses, ground_z, 0) == pytest.approx(2.0 * native, rel=1e-9)
 
 
 def test_estimate_z_margin_scales_with_relief():

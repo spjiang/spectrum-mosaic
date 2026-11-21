@@ -81,6 +81,20 @@ export const PARAM_HELP: Record<string, ParamHelp> = {
     up: "更多起飞/降落帧被扔，测区边缘可能缺影像",
     down: "可能把地面滑行/标定帧吃进空三",
   },
+  camera_source: {
+    examples: ["auto（推荐）", "max_ms", "wayho_rgb"],
+    tips: [
+      "自动识别：文件名是 MAX_<编号>_<波段>_<D/W/R> 的按 MAX 多光谱读；000000.tif 这类序号命名、型号 VEN-* 的按 Wayho RGB 读",
+      "Wayho 相机 XMP 的俯仰、横滚写 0，按正下视处理",
+      "没有绝对高程时相机高取相对航高，DSM 是相对起飞点的高度",
+    ],
+  },
+  pixel_size_um: {
+    examples: ["留空（按型号表，VEN-1220 为 1.85）", "2.4"],
+    tips: ["焦距初值 = 焦距 mm × 1000 ÷ 像元尺寸", "只对非 MAX 相机生效"],
+    up: "焦距初值变小，空三从更短的焦距开始收敛",
+    down: "焦距初值变大；偏差过大时空三可能不收敛",
+  },
   max_tilt_deg: {
     examples: ["60.0"],
     up: "侧视也进网，接缝和遮挡更难",

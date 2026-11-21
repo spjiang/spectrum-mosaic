@@ -8,6 +8,7 @@ from typing import Any
 
 from ms_mosaic.local_defaults import INPUT as LOCAL_INPUT
 from ms_mosaic.local_defaults import available as local_input_ready
+from ms_mosaic.sources import CAMERA_SOURCES
 
 # 与 backend param_catalog / param_definitions 对齐（不含仅服务端拼路径的派生项）
 _PATH_KEYS = (
@@ -25,6 +26,7 @@ _FLOAT_KEYS = (
     "gpu_memory_gb",
     "min_agl_m",
     "max_tilt_deg",
+    "pixel_size_um",
     "sigma_xy_m",
     "sigma_z_m",
     "sigma_attitude_deg",
@@ -49,6 +51,7 @@ _INT_KEYS = (
     "workers_dense",
     "workers_ortho",
     "n_layers",
+    "ortho_scale",
 )
 _BOOL_KEYS = (
     "match_reference_color",
@@ -68,6 +71,7 @@ _STR_KEYS = (
     "start_stage",
     "stop_after_stage",
     "preset",
+    "camera_source",
     "primary_band",
     "color_correction",
 )
@@ -128,6 +132,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(_flag("max_frames"), type=int, default=None, help="最大曝光数（Web: max_frames）")
     parser.add_argument(_flag("min_agl_m"), type=float, default=None, help="最低航高米（Web: min_agl_m）")
     parser.add_argument(_flag("max_tilt_deg"), type=float, default=None, help="最大倾角度（Web: max_tilt_deg）")
+    parser.add_argument(
+        _flag("camera_source"),
+        choices=CAMERA_SOURCES,
+        default=None,
+        help="相机类型（Web: camera_source）。auto 自动识别；max_ms MAX 多光谱；wayho_rgb Wayho VEN RGB",
+    )
+    parser.add_argument(
+        _flag("pixel_size_um"),
+        type=float,
+        default=None,
+        help="像元尺寸微米（Web: pixel_size_um），用于由焦距算像素焦距。空则按型号表",
+    )
 
     parser.add_argument(
         _flag("primary_band"),
@@ -157,6 +173,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(_flag("dsm_gsd"), type=float, default=None, help="DSM 分辨率米（Web: dsm_gsd）")
+    parser.add_argument(
+        _flag("ortho_scale"),
+        type=int,
+        choices=(1, 2, 4),
+        default=None,
+        help="未给 DSM 分辨率时，正射取空三后原始分辨率的倍数（Web: ortho_scale）",
+    )
     parser.add_argument(_flag("reuse_dsm"), type=Path, default=None, help="复用 DSM 路径（Web: reuse_dsm）")
     parser.add_argument(_flag("n_layers"), type=int, default=None, help="高程扫描层数（Web: n_layers）")
     parser.add_argument(_flag("z_margin_m"), type=float, default=None, help="高程搜索半宽米（Web: z_margin_m）")

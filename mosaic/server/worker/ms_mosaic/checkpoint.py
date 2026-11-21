@@ -239,11 +239,18 @@ def rebuild_block(
     max_tilt_deg: float | None = None,
     drop_white_panel: bool = True,
     require_pos: bool = True,
+    camera_source: str | None = None,
+    pixel_size_um: float | None = None,
 ) -> Block:
-    from ms_mosaic.catalog import scan_directory
     from ms_mosaic.scene import MIN_AGL_M, MAX_TILT_DEG, build_block, usable_shots
+    from ms_mosaic.sources import scan_input
 
-    shots = scan_directory(Path(input_dir), max_index=max_index)
+    shots = scan_input(
+        Path(input_dir),
+        max_index=max_index,
+        camera_source=camera_source,
+        pixel_size_um=pixel_size_um,
+    ).shots
     keep, _ = usable_shots(
         shots,
         min_agl_m=MIN_AGL_M if min_agl_m is None else float(min_agl_m),
@@ -278,6 +285,8 @@ def resolve_sparse(
     calibrate_intrinsics: bool = True,
     ba_stage3: bool = True,
     at_bands=None,
+    camera_source: str | None = None,
+    pixel_size_um: float | None = None,
     log: Callable[[str], None] | None = print,
     run_sparse_fn=None,
     rebuild_fn: Callable[..., Block] | None = None,
@@ -303,6 +312,8 @@ def resolve_sparse(
             max_tilt_deg=max_tilt_deg,
             drop_white_panel=drop_white_panel,
             require_pos=require_pos,
+            camera_source=camera_source,
+            pixel_size_um=pixel_size_um,
         )
         if on_catalog_done is not None:
             on_catalog_done(max(0.0, time.perf_counter() - t_cat))
@@ -318,6 +329,8 @@ def resolve_sparse(
         "calibrate_intrinsics": calibrate_intrinsics,
         "ba_stage3": ba_stage3,
         "at_bands": at_bands,
+        "camera_source": camera_source,
+        "pixel_size_um": pixel_size_um,
         "log": log,
     }
     if min_agl_m is not None:

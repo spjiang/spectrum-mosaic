@@ -109,15 +109,29 @@ class Camera:
     model: str = "MAX-S800"
 
     @classmethod
-    def initial(cls, key: str, width: int, height: int, *, kind: str = "ms") -> Camera:
-        ratio = FOCAL_OVER_WIDTH_RGB if kind == "rgb" else FOCAL_OVER_WIDTH_MS
+    def initial(
+        cls,
+        key: str,
+        width: int,
+        height: int,
+        *,
+        kind: str = "ms",
+        f: float | None = None,
+        model: str | None = None,
+    ) -> Camera:
+        """自标定初值。相机适配读得到焦距（像素）时用它，否则按 MAX 的 f/宽 比例估。"""
+        if f is None or not math.isfinite(float(f)) or float(f) <= 0:
+            ratio = FOCAL_OVER_WIDTH_RGB if kind == "rgb" else FOCAL_OVER_WIDTH_MS
+            f = ratio * float(width)
+        extra = {"model": model} if model else {}
         return cls(
             key=key,
             width=int(width),
             height=int(height),
-            f=ratio * float(width),
+            f=float(f),
             cx=float(width) / 2.0,
             cy=float(height) / 2.0,
+            **extra,
         )
 
     def to_vector(self) -> np.ndarray:

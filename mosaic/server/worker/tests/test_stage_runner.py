@@ -38,10 +38,13 @@ def test_run_stages_forwards_template_params(tmp_path: Path, monkeypatch):
             "edge_trim_m": 20,
             "flatten_edge_win_m": 40,
             "flatten_edge_band_m": 80,
+            "ortho_scale": "2",
             "run_mode": "full",
         },
     )
     assert result["status"] == "succeeded"
+    assert captured["ortho_scale"] == 2
+    assert captured["dsm_gsd"] is None
     assert captured["workers_at"] == 4
     assert captured["max_features"] == 4096
     assert captured["workers_dense"] == 6

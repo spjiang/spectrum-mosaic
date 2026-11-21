@@ -3,7 +3,7 @@ import { Collapse, Descriptions, Typography } from "antd";
 import { api } from "../api";
 import { gpuLabel } from "../gpuLabel";
 import type { ParamDef } from "../paramRules";
-import { presetLabel, runModeLabel } from "../presets";
+import { cameraSourceLabel, presetLabel, runModeLabel } from "../presets";
 import { STAGE_META, STAGES, stageLabel, type StageId } from "../stages";
 
 type Def = ParamDef & { sort_order?: number };
@@ -34,6 +34,7 @@ function fmt(key: string, value: unknown): string {
   if (value == null || value === "") return "—";
   if (key === "run_mode") return runModeLabel(String(value));
   if (key === "preset") return presetLabel(value ? String(value) : null);
+  if (key === "camera_source") return cameraSourceLabel(String(value));
   if (key === "start_stage" || key === "stop_after_stage") return stageLabel(String(value));
   if (key === "gpu") return gpuLabel(value);
   if (key === "color_correction") {

@@ -63,6 +63,10 @@ export function validateValues(defs: ParamDef[], values: Record<string, any>): {
       errors.push({ key: d.key, message: "特征点上限须为正整数" });
       continue;
     }
+    if (d.key === "pixel_size_um" && typeof raw === "number" && (raw < 0.5 || raw > 30)) {
+      errors.push({ key: d.key, message: "像元尺寸须在 0.5～30 微米之间" });
+      continue;
+    }
     if (
       d.value_type === "path" &&
       typeof raw === "string" &&

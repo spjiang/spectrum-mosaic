@@ -91,7 +91,12 @@ def handle_job(
         elif status == "paused":
             reporter.event("paused", stage_id=result.get("completed_stage"), message=result.get("message") or "已暂停，可继续运行")
         else:
-            reporter.event("succeeded", n_shots=result.get("n_shots"))
+            reporter.event(
+                "succeeded",
+                n_shots=result.get("n_shots"),
+                native_gsd_m=result.get("native_gsd_m"),
+                ortho_gsd_m=result.get("ortho_gsd_m"),
+            )
     except Exception as exc:  # noqa: BLE001
         log.exception("job failed")
         reporter.event("failed", error=str(exc))

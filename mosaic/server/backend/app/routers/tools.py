@@ -29,11 +29,17 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 @router.get("/native-gsd")
 def native_gsd(
     input_dir: str = Query(...),
+    camera_source: str | None = Query(None),
+    pixel_size_um: float | None = Query(None, gt=0),
     settings: Settings = Depends(get_settings),
     user: User = Depends(require_roles("admin", "configurator", "executor", "viewer")),
 ) -> dict:
     assert_owned_dirs(user.username, input_dir, f"/data/output/runs/{user.username}", is_admin=is_admin(user))
-    return measure_native_gsd(resolve_input_dir(input_dir, settings))
+    return measure_native_gsd(
+        resolve_input_dir(input_dir, settings),
+        camera_source=camera_source,
+        pixel_size_um=pixel_size_um,
+    )
 
 _CHUNK = 1024 * 1024
 

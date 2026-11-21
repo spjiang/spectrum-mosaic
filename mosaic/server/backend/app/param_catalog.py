@@ -13,6 +13,8 @@ PARAM_LABELS: dict[str, str] = {
     "preset": "快捷预设",
     "benchmark_dir": "调试对照目录",
     "match_reference_color": "调试套色",
+    "camera_source": "相机类型",
+    "pixel_size_um": "像元尺寸（µm）",
     "max_index": "最大影像编号",
     "max_frames": "最大曝光数",
     "min_agl_m": "最低航高（米）",

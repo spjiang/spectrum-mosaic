@@ -4,6 +4,8 @@ from typing import Any, Sequence
 
 from fastapi import HTTPException
 
+from app.services.camera_sources import CAMERA_SOURCES
+
 
 def is_empty(value: Any) -> bool:
     if value is None:
@@ -75,6 +77,11 @@ def validate_param_values(defs: Sequence[Any], values: dict[str, Any]) -> list[s
         if defn.key == "max_features" and isinstance(raw, (int, float)) and not isinstance(raw, bool):
             if raw < 1 or not float(raw).is_integer():
                 errors.append("特征点上限须为正整数")
+        if defn.key == "camera_source" and raw not in CAMERA_SOURCES:
+            errors.append(f"相机类型只能是 {' / '.join(CAMERA_SOURCES)}")
+        if defn.key == "pixel_size_um" and isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            if not 0.5 <= float(raw) <= 30.0:
+                errors.append("像元尺寸须在 0.5～30 微米之间")
         if defn.key == "at_bands" and isinstance(raw, list) and raw:
             names = {str(item) for item in raw}
             default = {"Color", "450nm", "550nm", "650nm", "720nm", "750nm", "800nm", "850nm"}

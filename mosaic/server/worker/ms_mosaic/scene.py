@@ -194,26 +194,31 @@ def build_block(shots: Mapping[int, Shot], *, crs: str | None = None) -> Block:
 
         records = []
         if shot.rgb is not None:
-            records.append((PRIMARY_BAND, shot.rgb.path))
+            records.append((PRIMARY_BAND, shot.rgb))
         for band in order:
             if band == PRIMARY_BAND:
                 continue
             rec = shot.ms.get(band)
             if rec is not None:
-                records.append((band, rec.path))
+                records.append((band, rec))
 
-        for band, path in records:
+        for band, rec in records:
             if band not in sizes:
-                sizes[band] = image_size(path)
+                sizes[band] = image_size(rec.path)
                 width, height = sizes[band]
                 block.cameras[band] = Camera.initial(
-                    band, width, height, kind="rgb" if band == "Color" else "ms"
+                    band,
+                    width,
+                    height,
+                    kind="rgb" if band == "Color" else "ms",
+                    f=rec.focal_px,
+                    model=rec.camera_model or None,
                 )
             image = ImageRef(
                 index=next_index,
                 shot_index=shot_index,
                 band=band,
-                path=path,
+                path=rec.path,
                 group=group_of[band],
             )
             block.images.append(image)
@@ -241,7 +246,7 @@ def transfer_band(
     别的波长数也按同一规则迁移。
     """
     primary_cam = cameras[PRIMARY_BAND]
-    primary_init = Camera.initial(
+    primary_init = block.cameras.get(PRIMARY_BAND) or Camera.initial(
         PRIMARY_BAND, primary_cam.width, primary_cam.height, kind="rgb"
     )
     if band == PRIMARY_BAND:

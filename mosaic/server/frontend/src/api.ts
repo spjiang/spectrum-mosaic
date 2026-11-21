@@ -480,8 +480,11 @@ export const api = {
   jobs: () => request<any[]>("/api/jobs"),
   job: (id: string) => request<any>(`/api/jobs/${id}`),
   createJob: (body: any) => request("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
-  nativeGsd: (inputDir: string) =>
-    request<{
+  nativeGsd: (inputDir: string, camera?: { source?: string | null; pixelSizeUm?: number | null }) => {
+    const q = new URLSearchParams({ input_dir: inputDir });
+    if (camera?.source) q.set("camera_source", camera.source);
+    if (camera?.pixelSizeUm && camera.pixelSizeUm > 0) q.set("pixel_size_um", String(camera.pixelSizeUm));
+    return request<{
       native_gsd_m: number;
       n_samples: number;
       n_color?: number;
@@ -490,8 +493,14 @@ export const api = {
       n_ms_bands?: number;
       span_x_m?: number | null;
       span_y_m?: number | null;
+      camera_source?: string;
+      camera_label?: string;
+      camera_detected?: boolean;
+      focal_px?: number | null;
+      resolution_after_at?: boolean;
       choices: { scale: number; ortho_gsd_m: number; dsm_gsd_m: number }[];
-    }>(`/api/tools/native-gsd?input_dir=${encodeURIComponent(inputDir)}`),
+    }>(`/api/tools/native-gsd?${q.toString()}`);
+  },
   accuracyState: (id: string) => request<AccuracyState>(`/api/jobs/${id}/accuracy`),
   accuracyConfig: (
     id: string,

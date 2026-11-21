@@ -1323,6 +1323,10 @@ def apply_event(db: Session, payload: dict[str, Any]) -> JobRun | None:
         job.global_percent = 100.0
         job.finished_at = _utcnow()
         job.message = payload.get("message") or "完成"
+        # 提交时未锁分辨率（Wayho 等只有相对航高的相机），用空三后实际值回填
+        if job.ortho_gsd_m is None:
+            job.native_gsd_m = _optional_float(payload.get("native_gsd_m")) or job.native_gsd_m
+            job.ortho_gsd_m = _optional_float(payload.get("ortho_gsd_m"))
     elif event == "oom_retry":
         # 计算进程已被系统杀掉。已完成的阶段还在，降并发后从下一阶段自动继续。
         if job.status not in {"paused", "cancelled", "succeeded"}:

@@ -34,6 +34,8 @@ class Pos:
     agl_m: float
     focal_mm: float = 5.0
     rtk: int = 0
+    # 没有绝对高程时 alt_m 取相对航高，地面在 0 附近，DSM 是相对起飞点的高度。
+    alt_relative: bool = False
 
 
 @dataclass
@@ -46,6 +48,9 @@ class FileRecord:
     wavelength_nm: int | None = None
     pos: Pos | None = None
     capture_uuid: str = ""
+    # 相机适配给出的焦距初值（像素）。None 时按像宽比例估。
+    focal_px: float | None = None
+    camera_model: str = ""
 
 
 @dataclass

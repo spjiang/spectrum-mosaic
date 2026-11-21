@@ -393,6 +393,7 @@ def bootstrap(db: Session, settings: Settings) -> None:
     _ensure_sql_named(db, "025_job_title.sql")
     _ensure_sql_named(db, "028_pushbroom.sql")
     _ensure_sql_named(db, "029_pushbroom_calibration.sql")
+    _ensure_sql_named(db, "030_camera_source.sql")
     seed_new_menus(db)
     _ensure_user_expires_at(db)
     _migrate_legacy_source_paths(db)

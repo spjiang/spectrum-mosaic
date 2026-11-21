@@ -15,6 +15,13 @@ import LogConsole from "./LogConsole";
 
 const LIVE = ["queued", "running", "paused", "awaiting_continue"];
 
+// 提交时没锁分辨率（只有相对航高的相机），跑完前由空三确定
+function gsdPendingText(job: any): string {
+  const snap = job?.params_snapshot || {};
+  const pending = snap.ortho_scale != null && snap.dsm_gsd == null && !snap.grid_reference;
+  return pending && LIVE.includes(job?.status) ? "空三后确定" : "—";
+}
+
 export default function JobDetailModal({
   open,
   jobId,
@@ -163,10 +170,10 @@ export default function JobDetailModal({
                 {job.gpu_memory_gb ? `${job.gpu_memory_gb} GB` : "自动（空闲显存 85%）"}
               </Descriptions.Item>
               <Descriptions.Item label="原始分辨率">
-                {job.native_gsd_m ? `${Number(job.native_gsd_m).toFixed(4)} m` : "—"}
+                {job.native_gsd_m ? `${Number(job.native_gsd_m).toFixed(4)} m` : gsdPendingText(job)}
               </Descriptions.Item>
               <Descriptions.Item label="拼图分辨率">
-                {job.ortho_gsd_m ? `${Number(job.ortho_gsd_m).toFixed(4)} m` : "—"}
+                {job.ortho_gsd_m ? `${Number(job.ortho_gsd_m).toFixed(4)} m` : gsdPendingText(job)}
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">{formatJobDateTime(job.created_at)}</Descriptions.Item>
               <Descriptions.Item label="结束时间">{formatJobDateTime(job.finished_at)}</Descriptions.Item>

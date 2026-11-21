@@ -11,6 +11,17 @@ export const RUN_MODE_OPTIONS = [
   { value: "step", label: "逐步确认" },
 ] as const;
 
+export const CAMERA_SOURCE_OPTIONS = [
+  { value: "auto", label: "自动识别" },
+  { value: "max_ms", label: "MAX 多光谱相机" },
+  { value: "wayho_rgb", label: "Wayho VEN 系列 RGB 相机" },
+] as const;
+
+export function cameraSourceLabel(value: string | null | undefined): string {
+  if (!value) return "自动识别";
+  return CAMERA_SOURCE_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
 export function presetLabel(value: string | null | undefined): string {
   if (!value) return "通用";
   return PRESET_OPTIONS.find((o) => o.value === value)?.label ?? value;

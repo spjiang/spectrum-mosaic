@@ -15,6 +15,7 @@ from ms_mosaic.checkpoint import apply_payload, load_at_payload, save_sparse
 from ms_mosaic.matching import PairMatches
 from ms_mosaic.qa import band_rms_px, observation_summary, registered_image_ids
 from ms_mosaic.scene import Block, ImageRef
+from ms_mosaic.sources import MAX_MS, SourceScan
 
 
 def _block() -> Block:
@@ -58,7 +59,7 @@ def _fake_at(cameras, poses, tracks, features, *_a, **_k):
 
 def _run(monkeypatch, tmp_path: Path):
     block = _block()
-    monkeypatch.setattr(runner, "scan_directory", lambda *_a, **_k: [object()] * 2)
+    monkeypatch.setattr(runner, "scan_input", lambda *_a, **_k: SourceScan(MAX_MS, True, {0: None, 1: None}))
     monkeypatch.setattr(runner, "usable_shots", lambda shots, **_k: ({0: None, 1: None}, {}))
     monkeypatch.setattr(runner, "build_block", lambda _keep: block)
     monkeypatch.setattr(runner, "_choose_feature_device", lambda log=None: None)
@@ -78,7 +79,7 @@ def _run(monkeypatch, tmp_path: Path):
 def test_run_sparse_forwards_feature_limit(monkeypatch, tmp_path: Path):
     """特征上限要从空三入口传到匹配和关键点读取，不能在半路丢成默认 8192。"""
     block = _block()
-    monkeypatch.setattr(runner, "scan_directory", lambda *_a, **_k: [object()] * 2)
+    monkeypatch.setattr(runner, "scan_input", lambda *_a, **_k: SourceScan(MAX_MS, True, {0: None, 1: None}))
     monkeypatch.setattr(runner, "usable_shots", lambda shots, **_k: ({0: None, 1: None}, {}))
     monkeypatch.setattr(runner, "build_block", lambda _keep: block)
     monkeypatch.setattr(runner, "_choose_feature_device", lambda log=None: None)

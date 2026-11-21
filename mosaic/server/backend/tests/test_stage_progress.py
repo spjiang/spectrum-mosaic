@@ -150,3 +150,21 @@ def test_stage_done_advances_current_if_behind():
     apply_event(_db(job), {"job_id": str(job.id), "event": "stage_done", "stage_id": "S4_dsm"})
     assert job.completed_stage == "S4_dsm"
     assert job.current_stage == "S4_dsm"
+
+
+def test_succeeded_backfills_gsd_only_when_not_locked():
+    job = _job(native_gsd_m=None, ortho_gsd_m=None)
+    apply_event(
+        _db(job),
+        {"job_id": str(job.id), "event": "succeeded", "native_gsd_m": 0.01488, "ortho_gsd_m": 0.01488},
+    )
+    assert job.native_gsd_m == 0.01488 and job.ortho_gsd_m == 0.01488
+    locked = _job(native_gsd_m=0.05, ortho_gsd_m=0.1)
+    apply_event(
+        _db(locked),
+        {"job_id": str(locked.id), "event": "succeeded", "native_gsd_m": 0.06, "ortho_gsd_m": 0.12},
+    )
+    assert locked.native_gsd_m == 0.05 and locked.ortho_gsd_m == 0.1
+    bare = _job(native_gsd_m=None, ortho_gsd_m=None)
+    apply_event(_db(bare), {"job_id": str(bare.id), "event": "succeeded"})
+    assert bare.ortho_gsd_m is None

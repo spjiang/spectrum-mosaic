@@ -161,6 +161,7 @@ def _run_stages_body(
             max_frames=_as_int(params.get("max_frames")),
             max_index=_as_int(params.get("max_index")),
             dsm_gsd=_as_float(params.get("dsm_gsd")),
+            ortho_scale=_as_int(params.get("ortho_scale")),
             workers=_as_int(params.get("workers")),
             workers_at=_as_int(params.get("workers_at")),
             max_features=_as_int(params.get("max_features")),
@@ -181,6 +182,8 @@ def _run_stages_body(
             max_tilt_deg=_as_float(params.get("max_tilt_deg")),
             drop_white_panel=_as_bool(params.get("drop_white_panel"), True),
             require_pos=_as_bool(params.get("require_pos"), True),
+            camera_source=params.get("camera_source") or None,
+            pixel_size_um=_as_float(params.get("pixel_size_um")),
             sigma_xy_m=_as_float(params.get("sigma_xy_m")),
             sigma_z_m=_as_float(params.get("sigma_z_m")),
             sigma_attitude_deg=_as_float(params.get("sigma_attitude_deg")),
@@ -224,6 +227,12 @@ def _run_stages_body(
     elif status == "cancelled":
         reporter.event("cancelled")
     elif status == "succeeded":
-        reporter.event("succeeded", message="全流程完成", n_shots=result.get("n_shots"))
+        reporter.event(
+            "succeeded",
+            message="全流程完成",
+            n_shots=result.get("n_shots"),
+            native_gsd_m=result.get("native_gsd_m"),
+            ortho_gsd_m=result.get("ortho_gsd_m"),
+        )
     result.setdefault("elapsed_s", time.time() - t0)
     return result

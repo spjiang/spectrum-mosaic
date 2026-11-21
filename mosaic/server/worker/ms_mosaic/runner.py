@@ -24,7 +24,7 @@ import numpy as np
 
 from ms_mosaic.at import ATResult, run_at
 from ms_mosaic.camera import Camera, Pose
-from ms_mosaic.catalog import scan_directory
+from ms_mosaic.sources import AUTO as CAMERA_AUTO, scan_input
 from ms_mosaic.features import extract_file, load_keypoints
 from ms_mosaic.matching import MIN_INLIERS, DescriptorIndex, PairMatches, geometric_verify, match_pair
 from ms_mosaic.cpu import cpu_cap, host_reserve, job_cpus
@@ -383,6 +383,8 @@ def run_sparse(
     calibrate_intrinsics: bool = True,
     ba_stage3: bool = True,
     at_bands=None,
+    camera_source: str | None = CAMERA_AUTO,
+    pixel_size_um: float | None = None,
     log=lambda *_: None,
     on_catalog_done=None,
 ) -> SparseResult:
@@ -390,7 +392,16 @@ def run_sparse(
     timings: dict[str, float] = {}
     t0 = time.perf_counter()
 
-    shots = scan_directory(input_dir, max_index=max_index)
+    scan = scan_input(
+        input_dir,
+        max_index=max_index,
+        camera_source=camera_source,
+        pixel_size_um=pixel_size_um,
+    )
+    shots = scan.shots
+    log(f"相机类型：{scan.label}（{'自动识别' if scan.detected else '处理方案指定'}）")
+    for note in scan.notes:
+        log(note)
     keep, reasons = usable_shots(
         shots,
         min_agl_m=min_agl_m,
@@ -554,7 +565,7 @@ def run_sparse(
     del tracks
     release_heap()
     timings["at"] = time.time() - t
-    timings["total"] = time.time() - t0
+    timings["total"] = time.perf_counter() - t0
     log(f"空三 {timings['at']:.1f}s，稀疏重建合计 {timings['total']:.1f}s")
 
     # 密集/GSD 仍取主波段内参；缺 Color 时退回任一已解相机
