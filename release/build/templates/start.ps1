@@ -1,4 +1,4 @@
-# Windows 一键启动，对应 start.sh。
+﻿# Windows 一键启动，对应 start.sh。
 # 在交付包根目录执行: powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot

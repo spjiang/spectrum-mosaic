@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/requirements-runtime.txt .
-RUN pip install --no-cache-dir -r requirements-runtime.txt
+RUN pip install --no-cache-dir --timeout 60 --retries 8 -r requirements-runtime.txt
 
 COPY --from=builder /build/pushbroom/pb_mosaic ./pb_mosaic
 COPY --from=builder /build/release/build/cython_modules_pushbroom.txt /tmp/compiled.txt

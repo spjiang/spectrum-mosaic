@@ -56,7 +56,12 @@ def test_repo_amd64_gpu_dockerfile_is_cuda_cupy():
     text = path.read_text(encoding="utf-8")
     assert "nvidia/cuda:12.2.2-runtime-ubuntu22.04" in text
     assert "requirements-gpu.txt" in text
+    assert "check_cuda_fp16.py" in text
+    assert "/usr/local/cuda/include/" in text
     assert "cupy" in text
+    gpu_req = (_REPO / "mosaic" / "server" / "worker" / "requirements-gpu.txt").read_text(encoding="utf-8")
+    assert "nvidia-cuda-runtime-cu12==12.2.140" in gpu_req
+    assert "nvidia-cuda-nvrtc-cu12==12.2.140" in gpu_req
     cpu = worker_customer_dockerfile(_REPO, "arm64")
     assert cpu.name == "Dockerfile.worker-customer"
     assert cpu.is_file()

@@ -53,10 +53,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY mosaic/server/worker/requirements-worker.txt mosaic/server/worker/requirements-gpu.txt ./
+COPY release/build/check_cuda_fp16.py /tmp/check_cuda_fp16.py
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements-gpu.txt \
+    && python /tmp/check_cuda_fp16.py \
+    && rm /tmp/check_cuda_fp16.py \
     && apt-get purge -y --auto-remove g++ python3.11-dev software-properties-common \
     && rm -rf /var/lib/apt/lists/*
+
+# CuPy 在 CUDA 12.2 及以上不再用自带的头文件，而是固定加 -I/usr/local/cuda/include。
+# 运行时镜像这个目录里没有 cuda_fp16.h。版本对不上时，pip 包里的头文件也不会被加进编译参数。
+RUN cp -a /opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/include/. /usr/local/cuda/include/ \
+    && python -c "import ctypes; from ctypes import POINTER, byref, c_char_p, c_int, c_void_p; inc=b'/usr/local/cuda/include'; nv=ctypes.CDLL('libnvrtc.so.12'); prog=c_void_p(); src=b'#include <cuda_fp16.h>\\nextern \"C\" __global__ void k() {}\\n'; nv.nvrtcCreateProgram.argtypes=[POINTER(c_void_p), c_char_p, c_char_p, c_int, c_void_p, c_void_p]; nv.nvrtcCompileProgram.argtypes=[c_void_p, c_int, POINTER(c_char_p)]; rc=nv.nvrtcCreateProgram(byref(prog), src, b'k.cu', 0, None, None); opts=[b'-I'+inc, b'--device-as-default-execution-space', b'-arch=sm_75']; arr=(c_char_p*len(opts))(*opts); rc2=nv.nvrtcCompileProgram(prog, len(opts), arr); assert rc==0 and rc2==0, (rc, rc2); print('CUDA_FP16_IN_CUDA_INCLUDE_OK')"
 
 COPY --from=builder /build/worker/ms_mosaic ./ms_mosaic
 COPY release/build/.embed/license_public.pem /app/license_public.pem

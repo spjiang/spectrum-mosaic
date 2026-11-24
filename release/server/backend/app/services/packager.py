@@ -137,7 +137,12 @@ def build_delivery_zip(
         if not src.exists():
             raise FileNotFoundError(f"缺少 {src}")
         dst = staging / name
-        shutil.copy2(src, dst)
+        if name.endswith(".ps1"):
+            # Windows PowerShell 5.1 没有 BOM 时按系统 ANSI 读文件，中文会冲掉引号。
+            text = src.read_text(encoding="utf-8-sig")
+            dst.write_text(text, encoding="utf-8-sig", newline="\n")
+        else:
+            shutil.copy2(src, dst)
         if name.endswith(".sh"):
             dst.chmod(0o755)
 
